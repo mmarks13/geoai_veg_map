@@ -4,23 +4,25 @@ version = "0.1.0"
 description = ""
 authors = ["Michael Marks"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11"
 geopandas = "^1.0.1"
 numpy = "^2.1.3"
-pdal = "^3.4.5"
 laspy = "^2.5.4"
 rasterio = "^1.4.2"
 stackstac = "^0.5.1"
 torch = "^2.5.1"
 torchvision = "^0.20.1"
-sklearn = "^0.0.post12"
 einops = "^0.8.0"
 shapely = "^2.0.6"
-GDAL = "^3.10"
 uavsar-pytools = "^0.7.1"
 pystac-client = "^0.8.5"
+scikit-learn = "^1.5.2"
+gdal = "3.4.1"
+open3d = "^0.18.0"
+pyvista = "^0.44.1"
 
 
 [build-system]
