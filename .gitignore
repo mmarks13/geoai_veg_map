@@ -162,3 +162,11 @@ cython_debug/
 *.las
 *.laz
 *.grd.tiff
+
+__pycache__/
+.venv/
+.env
+.DS_Store
+*.pyc
+*.pyo
+.cache/
