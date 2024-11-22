@@ -1,0 +1,70 @@
+--------------------------------------------------------------------
+Date: 11/11/2024
+### Title: TIDE JupyterHub Setup Day 1: Ceph S3, Git, & Poetry Setup. Point Cloud Viz Troubleshooting
+
+Today, I worked on setting up point cloud visualization in my JupyterHub environment with Poetry.
+Here’s a summary of the key issues and steps I took:
+
+- **Poetry Environment Setup**:
+  I needed to configure my Jupyter Notebook kernel to recognize packages installed by Poetry. 
+  I confirmed the environment path and added necessary packages, but encountered issues with 
+  packages not being fully recognized.
+
+- **3D Point Cloud Visualization**:
+  - **PyVista**: I tried using PyVista with `trame` and `ipywidgets` for interactive rendering 
+    in Jupyter but encountered compatibility issues and missing modules, like `vtk`. Despite updating 
+    and reinstalling, some backend components failed to load. I set up a virtual display using `pyvirtualdisplay` with Xvfb, which allowed successful rendering of point cloud data as images, although further manual adjustments were needed to display the saved images inline in Jupyter. Adjusted code to convert and display PyVista output as inline images in Jupyter using the PIL library.
+  
+  - **Open3D**: I attempted visualizing `.las` files with Open3D but encountered persistent errors, 
+    including `AttributeError` and missing dependencies like `addict`. Reinstalling packages and even downgrading Open3D didn’t resolve the issues. The visualization still failed to work in the notebook environment, leading to kernel crashes with simplified data sets. Troubleshooting steps included downsampling data, using non-interactive visualization modes, and testing alternative configurations (e.g., using `draw_geometries` and adjusting WebRTC settings). Error logs indicated missing display environment configurations, prompting further exploration of virtual display setups.
+
+- **Ceph Object Store Access**:
+  I successfully set up file access from an S3-compatible Ceph object store using `rclone` and the `s3fs` python package. Below is example code for that. 
+```
+# Initialize S3 filesystem
+fs = s3fs.S3FileSystem(key='my_key', secret='my_secret', client_kwargs={'endpoint_url': 'http://rook-ceph-rgw-tide.rook-tide'})
+
+# Open the file directly from Ceph S3
+with fs.open('uavlidar/20241025_151528.las', 'rb') as f:
+    las = laspy.read(f)
+```
+
+**Resolution**:
+Despite these troubleshooting steps, I couldn’t get point cloud visualization fully operational 
+in my JupyterHub environment due to persistent compatibility and backend issues with both 
+PyVista and Open3D in Jupyter.
+
+**Final Resolution and Outcome**:
+- **Poetry Setup**: Successfully set up, but encountered limitations with package compatibility in Jupyter.
+- **Point Cloud Visualization**: Achieved partial success with PyVista by rendering static images in Jupyter. However, interactive point cloud visualization remains limited due to display and compatibility issues with Open3D and PyVista.
+- **Ceph S3 Access**: Successfully configured `rclone` to access `.las` files from Ceph S3 storage using the `s3fs` python package. 
+
+--------------------------------------------------------------------
+
+Date: 11/20/2024
+- I had my local persistant storage increased from 75GB to 250GB. This should make it so I don't need to use the S3 storage.
+
+--------------------------------------------------------------------
+
+Date: 11/21/2024
+### Title: Preparing and Evaluating Data for the Clay Foundation Model  
+
+Today, I worked on setting up the Clay Foundation model and preparing Earth observation data for use with the `ClayDataModule`. Below is a summary of the main challenges and steps I took:
+
+- **Model Compatibility**:  
+  I initially attempted to use the newly released Clay v1.5 (released 10 days ago) but encountered issues due to an unknown architecture (`vit_large_patch14_reg4_dinov2`) required by the model. As a result, I reverted to Clay v1.0, which loaded successfully and allowed me to set the model to evaluation mode (`module.eval()`).
+
+- **Data Preparation**:
+  - **Issue**: The `.npz` training data required by the `ClayDataModule` was unavailable.  
+  - **Solution**: I identified the `stacchip` library as the recommended tool for creating `.npz` files and wrote a script to dynamically generate image chips from a STAC catalog. The script queries the catalog, processes imagery into batches, and saves them in the correct format with placeholder metadata (latitude, longitude, and time).
+
+**Resolution**:  
+- Successfully loaded the Clay v1.0 model and set it to evaluation mode.  
+- Developed an untested script for preparing `.npz` data files using `stacchip`. This script is ready for testing to ensure compatibility with the `ClayDataModule`.  
+
+**Final Outcome**:  
+- **Model**: The v1.0 checkpoint (`clay-v1-base.ckpt`) loaded and evaluated successfully.  
+- **Data**: The preparation pipeline is complete but requires testing to verify `.npz` files are correctly formatted for integration with the `ClayDataModule`.  
+- **Next Steps**: Test the data preparation script, ensure the `ClayDataModule` loads data properly, and further explore solutions for using Clay v1.5 in the future.  
+
+
