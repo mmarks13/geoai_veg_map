@@ -1,0 +1,126 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "stac_extensions": [],
+  "id": "WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_20200524T183756",
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          -120.29258616,
+          34.93667514
+        ],
+        [
+          -120.07671258,
+          34.91296815
+        ],
+        [
+          -120.07711183,
+          34.76428285
+        ],
+        [
+          -120.29135999,
+          34.78694078
+        ],
+        [
+          -120.29258616,
+          34.93667514
+        ]
+      ]
+    ]
+  },
+  "bbox": [
+    -120.29258616,
+    34.76428285,
+    -120.07671258,
+    34.93667514
+  ],
+  "properties": {
+    "datetime": "2020-05-24T18:37:56.495250Z"
+  },
+  "links": [
+    {
+      "rel": "root",
+      "href": "../../catalog.json",
+      "type": "application/json"
+    },
+    {
+      "rel": "collection",
+      "href": "../collection.json",
+      "type": "application/json"
+    },
+    {
+      "rel": "parent",
+      "href": "../collection.json",
+      "type": "application/json"
+    }
+  ],
+  "assets": {
+    "coastal": {
+      "href": "imagery/worldview2/cog/WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_ortho_coastal.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Coastal band",
+      "roles": [
+        "data"
+      ]
+    },
+    "blue": {
+      "href": "imagery/worldview2/cog/WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_ortho_blue.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Blue band",
+      "roles": [
+        "data"
+      ]
+    },
+    "green": {
+      "href": "imagery/worldview2/cog/WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_ortho_green.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Green band",
+      "roles": [
+        "data"
+      ]
+    },
+    "yellow": {
+      "href": "imagery/worldview2/cog/WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_ortho_yellow.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Yellow band",
+      "roles": [
+        "data"
+      ]
+    },
+    "red": {
+      "href": "imagery/worldview2/cog/WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_ortho_red.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Red band",
+      "roles": [
+        "data"
+      ]
+    },
+    "rededge": {
+      "href": "imagery/worldview2/cog/WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_ortho_rededge.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Rededge band",
+      "roles": [
+        "data"
+      ]
+    },
+    "nir1": {
+      "href": "imagery/worldview2/cog/WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_ortho_nir1.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Nir1 band",
+      "roles": [
+        "data"
+      ]
+    },
+    "nir2": {
+      "href": "imagery/worldview2/cog/WV02_20200524183756_10300100A89BD500_20MAY24183756-M1BS-504342154090_01_P002_ortho_nir2.tif",
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "title": "Nir2 band",
+      "roles": [
+        "data"
+      ]
+    }
+  },
+  "collection": "worldview2-l1b"
+}
