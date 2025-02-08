@@ -1,4 +1,4 @@
-# point_cloud_upsampler.py
+# point_transformer_upsampler.py
 
 import torch
 import torch.nn as nn

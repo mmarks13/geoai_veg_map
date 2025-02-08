@@ -160,102 +160,60 @@ def aggregate_grid(points, resolution, agg_func, field='Z',
     return grid, x_min, y_min, resolution
 
 
+import numpy as np
+import scipy.ndimage as ndimage
 
-# def aggregate_grid(points, resolution, agg_func, field='Z',
-#                    remove_outliers=False, outlier_threshold=3,
-#                    x_min=None, y_min=None, x_max=None, y_max=None):
-#     """
-#     Aggregate a point cloud into a 2D grid using an arbitrary aggregation function.
-#     Optionally remove extreme outliers in each grid cell before aggregation and then
-#     interpolate any missing (NaN) grid cells.
-
-#     If x_min, y_min, x_max, and y_max are provided, these define the grid's boundaries.
-#     """
-#     # Extract coordinate and value arrays.
-#     x = points['X']
-#     y = points['Y']
-#     values = points[field]
-
-#     # Determine grid boundaries.
-#     if x_min is None:
-#         x_min = x.min()
-#     if y_min is None:
-#         y_min = y.min()
-#     if x_max is None:
-#         x_max = x.max()
-#     if y_max is None:
-#         y_max = y.max()
-
-#     # Determine number of columns and rows.
-#     ncols = int(np.ceil((x_max - x_min) / resolution))
-#     nrows = int(np.ceil((y_max - y_min) / resolution))
-
-#     # Compute grid cell indices.
-#     col_indices = ((x - x_min) / resolution).astype(np.int32)
-#     row_indices = ((y - y_min) / resolution).astype(np.int32)
-
-#     # For points outside the boundaries, assign the boundary index.
-#     col_indices = np.where(col_indices < 0, 0, col_indices)
-#     col_indices = np.where(col_indices >= ncols, ncols - 1, col_indices)
-#     row_indices = np.where(row_indices < 0, 0, row_indices)
-#     row_indices = np.where(row_indices >= nrows, nrows - 1, row_indices)
-
-#     # Flatten the 2D indices.
-#     flat_indices = row_indices * ncols + col_indices
-
-#     # Sort points by grid cell.
-#     order = np.argsort(flat_indices)
-#     flat_indices_sorted = flat_indices[order]
-#     values_sorted = values[order]
-
-#     # Group by unique grid cell.
-#     unique_bins, start_idx, counts = np.unique(flat_indices_sorted, return_index=True, return_counts=True)
-
-#     # Initialize grid.
-#     grid_flat = np.full(nrows * ncols, np.nan, dtype=values.dtype)
-
-#     # Aggregate values per cell.
-#     for flat_ind, start, count in zip(unique_bins, start_idx, counts):
-#         cell_vals = values_sorted[start:start+count]
-#         if remove_outliers and cell_vals.size > 0:
-#             median_val = np.median(cell_vals)
-#             mad = np.median(np.abs(cell_vals - median_val))
-#             if mad > 0:
-#                 mask = np.abs(cell_vals - median_val) <= outlier_threshold * mad
-#             else:
-#                 mask = np.ones_like(cell_vals, dtype=bool)
-#             cell_vals = cell_vals[mask]
-#         grid_flat[flat_ind] = agg_func(cell_vals) if cell_vals.size > 0 else np.nan
-
-#     # Reshape to 2D.
-#     grid = grid_flat.reshape(nrows, ncols)
-
-#     # --- Interpolate NaN values ---
-#     valid_mask = ~np.isnan(grid)
-#     if np.any(valid_mask):
-#         grid_x, grid_y = np.meshgrid(np.arange(ncols), np.arange(nrows))
-#         points_valid = np.column_stack((grid_x[valid_mask], grid_y[valid_mask]))
-#         values_valid = grid[valid_mask]
-#         points_nan = np.column_stack((grid_x[~valid_mask], grid_y[~valid_mask]))
+def create_smoothed_dtm(points, bounding_box, coarse_res=2.5, fine_res=1.0, sigma=1):
+    """
+    Create a DTM that is first aggregated at a coarse resolution (e.g., 2.5 m) 
+    using the minimum Z values, then smoothed and upsampled to a finer (1 m) resolution.
+    
+    Parameters
+    ----------
+    points : np.ndarray
+        Structured numpy array with at least the fields 'X', 'Y', and 'Z'.
+    bounding_box : list or tuple
+        The bounding box in the form [xmin, ymin, xmax, ymax].
+    coarse_res : float, optional
+        Resolution for the initial aggregation (default 2.5 m).
+    fine_res : float, optional
+        Target (smoothed) resolution (default 1.0 m).
+    sigma : float, optional
+        Sigma for the Gaussian smoothing (default 1). Adjust as needed.
         
-#         # Check if valid points are degenerate (not full-dimensional).
-#         if points_valid.shape[0] < 4 or np.unique(points_valid, axis=0).shape[0] < 3:
-#             # Use nearest-neighbor if not enough unique points for linear interpolation.
-#             interpolated_values = griddata(points_valid, values_valid, points_nan, method='nearest')
-#         else:
-#             try:
-#                 interpolated_values = griddata(points_valid, values_valid, points_nan, method='linear')
-#             except Exception as e:
-#                 # Fall back to nearest if linear interpolation fails.
-#                 interpolated_values = griddata(points_valid, values_valid, points_nan, method='nearest')
-#             nan_linear = np.isnan(interpolated_values)
-#             if np.any(nan_linear):
-#                 interpolated_values[nan_linear] = griddata(points_valid, values_valid,
-#                                                            points_nan[nan_linear], method='nearest')
-#         grid[~valid_mask] = interpolated_values
-#     # --- End interpolation ---
-#     return grid, x_min, y_min, resolution
-
+    Returns
+    -------
+    dtm_fine : np.ndarray
+        The smoothed DTM at fine (1 m) resolution.
+    x_min : float
+        The minimum x coordinate of the grid.
+    y_min : float
+        The minimum y coordinate of the grid.
+    new_res : float
+        The fine grid cell size (should equal fine_res).
+    """
+    # Step 1: Aggregate the DTM at a coarse resolution (2.5 m)
+    dtm_coarse, x_min, y_min, res = aggregate_grid(
+        points,
+        resolution=coarse_res,
+        agg_func=np.min,
+        field='Z',
+        remove_outliers=True,
+        outlier_threshold = 5,
+        bounding_box=bounding_box,
+        interpolate=False
+    )
+    
+    # Step 2: Smooth the coarse DTM.
+    # A Gaussian filter here will smooth the grid; adjust sigma as appropriate.
+    dtm_smoothed = ndimage.gaussian_filter(dtm_coarse, sigma=sigma)
+    
+    # Step 3: Upsample the smoothed coarse DTM to 1 m resolution.
+    # The zoom factor is the ratio of the coarse to the fine resolution.
+    zoom_factor = coarse_res / fine_res  # e.g., 2.5/1 = 2.5
+    dtm_fine = ndimage.zoom(dtm_smoothed, zoom=zoom_factor, order=3)
+    
+    return dtm_fine, x_min, y_min, fine_res
 
 
 
@@ -343,15 +301,34 @@ def scale_grid_values(values, out_min, out_max, in_min, in_max):
     return scaled
 
 
+import pystac
+import pdal
+import json
+import gc
+import numpy as np
+from pyproj import Transformer  # ensure Transformer is imported
+import torch  # ensure torch is imported
+
+def bounding_box_to_geojson(bbox):
+    """
+    Converts a bounding box to a GeoJSON polygon.
+    """
+    return json.dumps(mapping(box(bbox[0], bbox[1], bbox[2], bbox[3])))
 
 
-def create_pointcloud_stack(bbox, start_date, end_date, stac_source, collection, threads=4,
+def print_point_cloud_bounds(pc, label="Point Cloud"):
+    """Prints min/max X and Y values of a given point cloud."""
+    if len(pc) > 0:
+        print(f"{label}: Min X = {pc['X'].min()}, Max X = {pc['X'].max()}, Min Y = {pc['Y'].min()}, Max Y = {pc['Y'].max()}")
+    else:
+        print(f"{label}: Empty point cloud")
+        
+def create_pointcloud_stack(bbox, start_date, end_date, stac_source, threads=4,
                             bbox_crs="EPSG:4326", target_crs=None):
     """
-    Create a stack of point clouds from STAC items filtered by collection, date, and bounding box.
+    Create a stack of point clouds from STAC items filtered by date and bounding box.
     In addition, compute an approximate DSM (max height) and DTM (min height) grid and derive the
-    approximate canopy height. Two new fields ('approx_ch_raw' and 'approx_ch_scaled') are appended to
-    the point cloud. The function returns the updated point cloud stack along with the DSM and DTM grids.
+    approximate canopy height. Two new fields ('ch_50cm' and 'ch_1m') are appended to the point cloud.
     
     Parameters
     ----------
@@ -363,8 +340,6 @@ def create_pointcloud_stack(bbox, start_date, end_date, stac_source, collection,
         End date in YYYY-MM-DD format.
     stac_source : str
         Path or URL to the STAC catalog.
-    collection : str
-        The collection id to filter items.
     threads : int, optional
         Number of threads for PDAL processing (default is 4).
     bbox_crs : str, optional
@@ -375,38 +350,64 @@ def create_pointcloud_stack(bbox, start_date, end_date, stac_source, collection,
     Returns
     -------
     point_clouds : list of np.ndarray
-        List of structured numpy arrays (point clouds) with the additional fields.
-    uav_approx_dsm : np.ndarray
-        2D grid representing the approximate digital surface model.
-    uav_approx_dtm : np.ndarray
-        2D grid representing the approximate digital terrain model.
+        List containing a single structured numpy array (the combined point cloud) with the additional fields.
+    dsm_50cm, dtm_50cm, dsm_1m, dtm_1m : np.ndarray
+        Grids representing the DSM and DTM at two resolutions.
     """
-    # Read the STAC catalog and filter items.
+    import pystac
+    import pdal
+    import json
+    import gc
+    import numpy as np
+
+    # Read the STAC catalog.
     catalog = pystac.read_file(stac_source)
     items = []
+
+    def bboxes_intersect(bbox1, bbox2):
+        # Return True if bbox1 intersects bbox2 (both in [xmin, ymin, xmax, ymax] format)
+        return not (bbox1[2] < bbox2[0] or bbox1[0] > bbox2[2] or
+                    bbox1[3] < bbox2[1] or bbox1[1] > bbox2[3])
+    
+    # --- Filter items by date and spatial intersection ---
     for item in catalog.get_all_items():
-        if item.collection_id == collection:
-            item_date = item.datetime.date()
-            if start_date <= str(item_date) <= end_date:
+        # Check the date.
+        item_date = item.datetime.date()
+        if not (start_date <= str(item_date) <= end_date):
+            continue
+
+        # Check horizontal bounding box intersection.
+        if item.bbox:
+            if len(item.bbox) == 6:
+                # Assume item.bbox = [minx, miny, minz, maxx, maxy, maxz]
+                item_xy_bbox = [item.bbox[0], item.bbox[1], item.bbox[3], item.bbox[4]]
+            else:
+                item_xy_bbox = item.bbox
+            if bboxes_intersect(bbox, item_xy_bbox):
                 items.append(item)
 
     if not items:
         raise ValueError("No items found for the specified parameters.")
 
     point_clouds = []
+    # These variables will be assigned from the last successful grid creation.
+    dsm_50cm = dtm_50cm = dsm_1m = dtm_1m = None
+
+    # Read each point cloud via PDAL.
     for item in items:
         if 'copc' not in item.assets:
             continue
-
+        
         pc_file = item.assets['copc'].href
-
+        # print(f"getting {pc_file}")
         pipeline_dict = {
             "pipeline": [
                 {
                     "type": "readers.copc",
                     "filename": pc_file,
                     "threads": threads,
-                    "bounds": f"([{bbox[0]},{bbox[2]}],[{bbox[1]},{bbox[3]}])"
+                    # PDAL expects bounds in the format: ([xmin,xmax],[ymin,ymax])
+                    "polygon": bounding_box_to_geojson(bbox)#f"([{bbox[0]},{bbox[2]}],[{bbox[1]},{bbox[3]}])"
                 }
             ]
         }
@@ -421,123 +422,87 @@ def create_pointcloud_stack(bbox, start_date, end_date, stac_source, collection,
         try:
             pipeline.execute()
             arrays = pipeline.arrays
-            if len(arrays) > 0:
+            if arrays:
                 point_clouds.append(arrays[0])
         except Exception as e:
-            print(f"Pipeline execution error: {e}")
+            print(f"Error processing point cloud: {e}")
             continue
         finally:
             del pipeline
             gc.collect()
+    
     try:
+        # If more than one point cloud was returned, combine them.
+        if len(point_clouds) > 1:
+            # print(f"Number of point clouds: {len(point_clouds)}")
+            # for idx, pc in enumerate(point_clouds):
+                # print(f"Point cloud {idx} contains {len(pc)} points")
+                # print_point_cloud_bounds(pc, label=f"Point Cloud {idx} Bounds")
 
-        # If at least one point cloud was created, compute additional fields.
-        if point_clouds:
-            for i, pc in enumerate(point_clouds):
-                # Process the current point cloud.
-                uav_point_cloud = pc
-                            
-                #add a constant to convert from ellipsoid height. Constant found from here:
-                #https://geographiclib.sourceforge.io/cgi-bin/GeoidEval?input=33.1332887778855%2C+-116.60471670447386&option=Submit
-                #NOTE: THIS CONSTANT ONLY APPLIES TO VOLCAN MTN. IT WILL NEED TO BE ADJUSTED FOR SEDGWICK.
-                uav_point_cloud['Z'] = uav_point_cloud['Z'] + 31.8684
-                
-                # Compute the approximate DSM (max of Z) and DTM (min of Z) at 0.5m resolution.
-                dsm_50cm, _, _, _ = aggregate_grid(uav_point_cloud, resolution=0.5,
-                                                     agg_func=np.max, field='Z',
-                                                     remove_outliers=True, outlier_threshold=3, bounding_box=bbox)
-                
-                dtm_50cm, x_orig, y_orig, res = aggregate_grid(uav_point_cloud, resolution=0.5,
-                                                                 agg_func=np.min, field='Z',
-                                                                 remove_outliers=True, outlier_threshold=3, bounding_box=bbox)
-                # Compute approximate canopy height (CHM)
-                ch_50cm = dsm_50cm - dtm_50cm
-                
-                # Assign the raw approximate canopy height to a new field.
-                uav_point_cloud = assign_aggregated_values(uav_point_cloud, ch_50cm,
-                                                             x_orig, y_orig, res, new_field='ch_50cm')
-            
-                # Compute the approximate DSM (max of Z) and DTM (min of Z) at 1m resolution.
-                dsm_1m, _, _, _ = aggregate_grid(uav_point_cloud, resolution=1,
-                                                   agg_func=np.max, field='Z',
-                                                   remove_outliers=True, outlier_threshold=3, bounding_box=bbox)
-                
-                dtm_1m, x_orig, y_orig, res = aggregate_grid(uav_point_cloud, resolution=1,
-                                                               agg_func=np.min, field='Z',
-                                                               remove_outliers=True, outlier_threshold=3, bounding_box=bbox)
-                # Compute approximate canopy height (CHM)
-                ch_1m = dsm_1m - dtm_1m
-                
-                # Assign the raw approximate canopy height to a new field.
-                uav_point_cloud = assign_aggregated_values(uav_point_cloud, ch_1m,
-                                                             x_orig, y_orig, res, new_field='ch_1m')
-                
-                # Replace the processed point cloud back into the list.
-                point_clouds[i] = uav_point_cloud
+            combined_pc = np.concatenate(point_clouds)
+            # print(f"z{len(combined_pc)} total points")
+        else:
+            combined_pc = point_clouds[0]
+        # print_point_cloud_bounds(combined_pc, label=f"Combined Point Cloud {idx} Bounds")
+
+        # Adjust Z values (e.g., convert from ellipsoidal to orthometric height).
+        combined_pc['Z'] = combined_pc['Z'] + 31.8684
+        
+        # Compute the approximate DSM and DTM at 0.5m resolution.
+        dsm_50cm, x_orig, y_orig, res = aggregate_grid(
+            combined_pc, resolution=0.5,
+            agg_func=np.max, field='Z',
+            remove_outliers=True, outlier_threshold=3,
+            bounding_box=bbox, interpolate=True
+        )
+        
+        dtm_50cm, x_orig, y_orig, res = aggregate_grid(
+            combined_pc, resolution=0.5,
+            agg_func=np.min, field='Z',
+            remove_outliers=False, outlier_threshold=3,
+            bounding_box=bbox, interpolate=True
+        )
+        ch_50cm = dsm_50cm - dtm_50cm
+        
+        combined_pc = assign_aggregated_values(
+            combined_pc, ch_50cm,
+            x_orig, y_orig, res, new_field='ch_50cm'
+        )
+    
+        # Compute the approximate DSM and DTM at 1m resolution.
+        dsm_1m, _, _, _ = aggregate_grid(
+            combined_pc, resolution=1,
+            agg_func=np.max, field='Z',
+            remove_outliers=True, outlier_threshold=3,
+            bounding_box=bbox, interpolate=True
+        )
+        
+        dtm_1m, x_orig, y_orig, res = aggregate_grid(
+            combined_pc, resolution=1,
+            agg_func=np.min, field='Z',
+            remove_outliers=False, bounding_box=bbox,
+            interpolate=True
+        )
+        ch_1m = dsm_1m - dtm_1m
+        
+        combined_pc = assign_aggregated_values(
+            combined_pc, ch_1m,
+            x_orig, y_orig, res, new_field='ch_1m'
+        )
+        
+        # Return the combined point cloud (in a list for compatibility with the original signature)
+        point_clouds = [combined_pc]
                         
     except Exception as e:
-        print(f"dtm, dsm or chm error: {e}")
+        print(f"Error processing DSM/DTM: {e}")
     
-    # Clean up catalog items (if desired)
     del items, catalog
     gc.collect()
 
     return point_clouds, dsm_50cm, dtm_50cm, dsm_1m, dtm_1m
 
-# def create_pointcloud_stack(bbox, start_date, end_date, stac_source, collection, threads = 4, bbox_crs="EPSG:4326", target_crs=None):
 
-#     catalog = pystac.read_file(stac_source)
-#     items = []
-#     for item in catalog.get_all_items():
-#         if item.collection_id == collection:
-#             item_date = item.datetime.date()
-#             if start_date <= str(item_date) <= end_date:
-#                 items.append(item)
 
-#     if not items:
-#         raise ValueError("No items found for the specified parameters.")
-
-#     point_clouds = []
-#     for item in items:
-#         if 'copc' not in item.assets:
-#             continue
-
-#         pc_file = item.assets['copc'].href
-
-#         pipeline = {
-#             "pipeline": [
-#                 {
-#                     "type": "readers.copc",
-#                     "filename": pc_file,
-#                     "threads": threads,  # Use the threads argument here
-#                     "bounds": f"([{bbox[0]},{bbox[2]}],[{bbox[1]},{bbox[3]}])"
-#                 }
-#             ]
-#         }
-
-#         if target_crs and target_crs != bbox_crs:
-#             pipeline["pipeline"].append({
-#                 "type": "filters.reprojection",
-#                 "out_srs": target_crs
-#             })
-
-#         pipeline = pdal.Pipeline(json.dumps(pipeline))
-#         try:
-#             pipeline.execute()
-#             arrays = pipeline.arrays
-#             if len(arrays) > 0:
-#                 point_clouds.append(arrays[0])
-#         except Exception as e:
-#             print(f"Pipeline execution error: {e}")
-            
-#             continue
-        
-#         del pipeline
-#         del arrays
-#         del items 
-#         del catalog
-#         gc.collect()
-#     return point_clouds
 
 
 def visualize_pointclouds(point_clouds, elev=45, azim=45):
@@ -597,11 +562,6 @@ def visualize_pointclouds(point_clouds, elev=45, azim=45):
 
 
 
-def bounding_box_to_geojson(bbox):
-    """
-    Converts a bounding box to a GeoJSON polygon.
-    """
-    return json.dumps(mapping(box(bbox[0], bbox[1], bbox[2], bbox[3])))
 
 def create_3dep_stack(bbox, start_date, end_date, threads = 4, target_crs=None):
     client = Client.open(
@@ -767,70 +727,126 @@ def sample_bounding_boxes_within_catalog(catalog_path, n, box_width, box_height,
     return sampled_bboxes
 
 
+def create_tiles(bbox, tile_width, tile_height, overlap_ratio):
+    """
+    Creates a list of tile bounding boxes within a given bounding box.
+
+    Parameters:
+        bbox (tuple): A tuple (minx, miny, maxx, maxy) defining the full bounding box.
+        tile_width (float): The width of each tile.
+        tile_height (float): The height of each tile.
+        overlap_ratio (float): The fraction of overlap between adjacent tiles (0 to 1).
+
+    Returns:
+        list: A list of tuples, each representing a tile's bounding box as 
+              (tile_minx, tile_miny, tile_maxx, tile_maxy).
+    """
+    # Unpack the full bounding box
+    minx, miny, maxx, maxy = bbox
+
+    # Validate the overlap ratio
+    if not (0 <= overlap_ratio < 1):
+        raise ValueError("overlap_ratio must be between 0 and 1 (non-inclusive of 1)")
+    
+    # Calculate step sizes. With an overlap_ratio of 0.5, the step is half the tile size.
+    step_x = tile_width * (1 - overlap_ratio)
+    step_y = tile_height * (1 - overlap_ratio)
+
+    tiles = []
+    x = minx
+
+    # Slide the tile window along the x-axis.
+    while x + tile_width <= maxx:
+        y = miny
+        # Slide along the y-axis.
+        while y + tile_height <= maxy:
+            tile = (x, y, x + tile_width, y + tile_height)
+            tiles.append(tile)
+            y += step_y
+        x += step_x
+
+    return tiles
+
+
+
 
 def process_bbox(args):
-    
-    i, bbox, start_date, end_date, stac_source, collection, bbox_crs = args
-    # print(f"Start bounding box {i}")
+    # The args tuple is now: (i, bbox, start_date, end_date, stac_source, bbox_crs)
+    i, bbox, start_date, end_date, stac_source, bbox_crs = args
     try:
         # UAV LiDAR point clouds, DTM, and DSM
-        uav_pc, dsm_50cm, dtm_50cm, dsm_1m, dtm_1m= create_pointcloud_stack(
+        uav_pc, dsm_50cm, dtm_50cm, dsm_1m, dtm_1m = create_pointcloud_stack(
             bbox=bbox,
             start_date=start_date,
             end_date=end_date,
             stac_source=stac_source,
-            collection=collection,
             bbox_crs=bbox_crs,
+            threads = 1
         )
-        
-        # print(f"bounding box {i}: done uav_pc")
+        # print(uav_pc)
         if not uav_pc or len(uav_pc) == 0:
-            print(f"No UAV points found for bounding box {i}. Skipping.")
             return None
 
-        xyz_uav = np.array([(p['X'], p['Y'], p['Z'] ) for p in uav_pc], dtype=np.float32)
-
-        ch_50cm = np.array([(p['ch_50cm']) for p in uav_pc], dtype=np.float32)
-
-        ch_1m = np.array([(p['ch_1m']) for p in uav_pc], dtype=np.float32)
+        # Extract x,y,z values from the UAV point cloud.
+        xyz_uav = np.array([(p['X'], p['Y'], p['Z']) for p in uav_pc], dtype=np.float32)
+        # Also extract additional fields from the UAV point cloud.
+        intensity_uav = np.array([p['Intensity'] for p in uav_pc], dtype=np.int32)
+        return_number_uav = np.array([p['ReturnNumber'] for p in uav_pc], dtype=np.int32)
+        num_returns_uav = np.array([p['NumberOfReturns'] for p in uav_pc], dtype=np.int32)
+        
+        ch_50cm = np.array([p['ch_50cm'] for p in uav_pc], dtype=np.float32)
+        ch_1m = np.array([p['ch_1m'] for p in uav_pc], dtype=np.float32)
+        
         # 3DEP LiDAR point clouds
+        from pyproj import Transformer
         transformer = Transformer.from_crs(bbox_crs, "EPSG:4326", always_xy=True)
         bbox_wgs84 = transformer.transform_bounds(*bbox)
 
         dep_pc = create_3dep_stack(
             bbox=bbox_wgs84,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            threads = 1
         )
         
         if not dep_pc or len(dep_pc) == 0:
-            print(f"No 3DEP points found for bounding box {i}. Skipping.")
             return None
         
+        # For the 3DEP data, we concatenate the returned arrays.
         xyz_dep = np.vstack([np.column_stack((p['X'], p['Y'], p['Z'])) for p in dep_pc]).astype(np.float32)
-        print(f"Bounding box {i}: {bbox}: UAV: {xyz_uav.shape}; 3DEP: {xyz_dep.shape} ---> Memory usage: {psutil.virtual_memory().percent}%, Open file descriptors: {psutil.Process().num_fds()}")
+        intensity_dep = np.concatenate([p['Intensity'] for p in dep_pc]).astype(np.int32)
+        return_number_dep = np.concatenate([p['ReturnNumber'] for p in dep_pc]).astype(np.int32)
+        num_returns_dep = np.concatenate([p['NumberOfReturns'] for p in dep_pc]).astype(np.int32)
         
         del transformer
         del bbox_wgs84
         del uav_pc
         del dep_pc
-        gc.collect
+        import gc
+        gc.collect()
+        import torch
         return {
             'dep_points': torch.tensor(xyz_dep, dtype=torch.float32),
             'uav_points': torch.tensor(xyz_uav.squeeze(), dtype=torch.float32).T,
-        
             'dsm_50cm': torch.tensor(dsm_50cm, dtype=torch.float32),
             'dtm_50cm': torch.tensor(dtm_50cm, dtype=torch.float32),
             'dsm_1m': torch.tensor(dsm_1m, dtype=torch.float32),
             'dtm_1m': torch.tensor(dtm_1m, dtype=torch.float32),
-        
             'ch_50cm': torch.tensor(ch_50cm, dtype=torch.float32),
             'ch_1m': torch.tensor(ch_1m, dtype=torch.float32),
-            'bbox':bbox
+            'uav_intensity': torch.tensor(intensity_uav, dtype=torch.int32),
+            'uav_return_number': torch.tensor(return_number_uav, dtype=torch.int32),
+            'uav_num_returns': torch.tensor(num_returns_uav, dtype=torch.int32),
+            'dep_intensity': torch.tensor(intensity_dep, dtype=torch.int32),
+            'dep_return_number': torch.tensor(return_number_dep, dtype=torch.int32),
+            'dep_num_returns': torch.tensor(num_returns_dep, dtype=torch.int32),
+            'bbox': bbox
         }
     except Exception as e:
-        error_msg = f"Error processing bounding box {i}: {e}"
+        print(f"Error processing bounding box {i}: {e}")
         return None
+
+
 
 import math
 
@@ -841,28 +857,29 @@ def chunk_data(data, chunk_size):
 
 
 def process_and_store_training_data(
-    catalog_path, 
-    n, 
-    box_width, 
-    box_height, 
+    bounding_box, 
+    tile_height, 
+    tile_width, 
+    tile_overlap_ratio,
     start_date, 
     end_date, 
     stac_source, 
     collection, 
     bbox_crs="EPSG:32611", 
     target_crs="EPSG:32611",
-    shrink_percentage=0, 
     max_threads=2,
     chunk_size=100,
     output_dir="training_data_chunks"
 ):
-    sampled_bboxes = sample_bounding_boxes_within_catalog(catalog_path, n, box_width, box_height, shrink_percentage)
+
+    tile_bounding_boxes = create_tiles(bounding_box, tile_width, tile_height, tile_overlap_ratio)
+    print(f"collecting {len(tile_bounding_boxes)} tiles.")
     
     # Create the output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
 
     # Split sampled bounding boxes into chunks
-    chunks = list(chunk_data(sampled_bboxes, chunk_size))
+    chunks = list(chunk_data(tile_bounding_boxes, chunk_size))
     print(f"Processing {len(chunks)} chunks of bounding boxes, with up to {chunk_size} per chunk.")
 
     for chunk_index, chunk in enumerate(chunks, start=1):
@@ -870,7 +887,7 @@ def process_and_store_training_data(
         
         # Prepare arguments for parallel processing
         args_list = [
-            (i, bbox, start_date, end_date, stac_source, collection, bbox_crs)
+            (i, bbox, start_date, end_date, stac_source, bbox_crs)
             for i, bbox in enumerate(chunk, start=1)
         ]
         
@@ -902,30 +919,54 @@ def process_and_store_training_data(
 
 
 
+
+
+import argparse
+from datetime import datetime
+import os
+import gc
+
 if __name__ == "__main__":
-    catalog_path = "uavls_stac/catalog.json"
-    n =4000 # Number of bounding boxes to sample
-    box_width = 10  # Width of each bounding box
-    box_height = 10  # Height of each bounding box
-    start_date = "2014-01-01"
-    end_date = "2025-01-27"
-    stac_source = "uavls_stac/catalog.json"
-    collection = "pointcloud_20241025_205750"
+    parser = argparse.ArgumentParser(
+        description="Process training data with a bounding box passed from the terminal."
+    )
+    parser.add_argument(
+        "--bbox",
+        type=str,
+        required=True,
+        help="Bounding box in the format min_x,min_y,max_x,max_y (comma separated)"
+    )
     
-    n_target_points = 1000  # Target points for training data
-    shrink_percentage =10
-    # Run the function
+    parser.add_argument(
+        "--outdir",
+        type=str,
+        required=True,
+        help="output directory"
+    )
+
+    args = parser.parse_args()
+
+    # Convert the comma-separated string into a list of floats (or ints if appropriate)
+    bbox = [float(x) for x in args.bbox.split(",")]
+    # print(bbox)
+    outdir = args.outdir
+    # train_bbox = [536462,3666020,537660,3666261]
+    # test_bbox= [536462,3665920,537660,3666020]
+    # bbox= [536462,3665920,536562,3666020]
+    
+    # Call your processing function with the given bounding box and other parameters
     training_data = process_and_store_training_data(
-        catalog_path=catalog_path,
-        n=n,
-        box_width=box_width,
-        box_height=box_height,
-        start_date=start_date,
-        end_date=end_date,
-        stac_source=stac_source,
-        collection=collection,
-        shrink_percentage = shrink_percentage,
-        max_threads = 15,
-        chunk_size=100,
-        output_dir="training_data_chunks/point_clouds/"
+        bounding_box=bbox, 
+        tile_height=10, 
+        tile_width=10, 
+        tile_overlap_ratio=0,
+        start_date="2014-01-01", 
+        end_date="2025-02-27", 
+        stac_source="local_stac/catalog.json", 
+        collection="volcan_mtn_uav_lidar", 
+        bbox_crs="EPSG:32611", 
+        target_crs="EPSG:32611",
+        max_threads=10,
+        chunk_size=20,
+        output_dir= outdir
     )
