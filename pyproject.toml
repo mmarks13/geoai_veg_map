@@ -10,7 +10,7 @@ package-mode = false
 python = "^3.11"
 geopandas = "^1.0.1"
 numpy = "<2"
-laspy = "^2.5.4"
+laspy = {extras = ["lazrs"], version = "^2.5.4"}
 rasterio = "^1.4.2"
 stackstac = "^0.5.1"
 torch = "^2.5.1"
@@ -63,6 +63,12 @@ torch-geometric = "^2.6.1"
 matplotlib = "^3.10.0"
 pytorch3d = { version = "*", optional = true }
 geographiclib = "^2.0"
+pot = "^0.9.5"
+geomloss = "^0.2.6"
+pykeops = "^2.2.3"
+torchsummary = "^1.5.1"
+optuna = "^4.2.0"
+pylas = "^0.4.3"
 
 
 [tool.poetry.extras]

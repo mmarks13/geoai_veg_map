@@ -826,21 +826,21 @@ def process_bbox(args):
         gc.collect()
         import torch
         return {
-            'dep_points': torch.tensor(xyz_dep, dtype=torch.float32),
-            'uav_points': torch.tensor(xyz_uav.squeeze(), dtype=torch.float32).T,
-            'dsm_50cm': torch.tensor(dsm_50cm, dtype=torch.float32),
-            'dtm_50cm': torch.tensor(dtm_50cm, dtype=torch.float32),
-            'dsm_1m': torch.tensor(dsm_1m, dtype=torch.float32),
-            'dtm_1m': torch.tensor(dtm_1m, dtype=torch.float32),
-            'ch_50cm': torch.tensor(ch_50cm, dtype=torch.float32),
-            'ch_1m': torch.tensor(ch_1m, dtype=torch.float32),
-            'uav_intensity': torch.tensor(intensity_uav, dtype=torch.int32),
-            'uav_return_number': torch.tensor(return_number_uav, dtype=torch.int32),
-            'uav_num_returns': torch.tensor(num_returns_uav, dtype=torch.int32),
-            'dep_intensity': torch.tensor(intensity_dep, dtype=torch.int32),
-            'dep_return_number': torch.tensor(return_number_dep, dtype=torch.int32),
-            'dep_num_returns': torch.tensor(num_returns_dep, dtype=torch.int32),
-            'bbox': bbox
+            'dep_points': torch.tensor(xyz_dep, dtype=torch.float32),                # shape: (N_dep, 3)
+            'uav_points': torch.tensor(xyz_uav.squeeze(), dtype=torch.float32).T,      # shape: (N_uav, 3) after transpose
+            'dsm_50cm': torch.tensor(dsm_50cm, dtype=torch.float32),                   # shape: (rows_50cm, cols_50cm)
+            'dtm_50cm': torch.tensor(dtm_50cm, dtype=torch.float32),                   # shape: (rows_50cm, cols_50cm)
+            'dsm_1m': torch.tensor(dsm_1m, dtype=torch.float32),                       # shape: (rows_1m, cols_1m)
+            'dtm_1m': torch.tensor(dtm_1m, dtype=torch.float32),                       # shape: (rows_1m, cols_1m)
+            'ch_50cm': torch.tensor(ch_50cm, dtype=torch.float32),                     # shape: (rows_50cm, cols_50cm)
+            'ch_1m': torch.tensor(ch_1m, dtype=torch.float32),                         # shape: (rows_1m, cols_1m)
+            'uav_intensity': torch.tensor(intensity_uav, dtype=torch.int32),           # shape: (N_uav,)
+            'uav_return_number': torch.tensor(return_number_uav, dtype=torch.int32),   # shape: (N_uav,)
+            'uav_num_returns': torch.tensor(num_returns_uav, dtype=torch.int32),       # shape: (N_uav,)
+            'dep_intensity': torch.tensor(intensity_dep, dtype=torch.int32),           # shape: (N_dep,)
+            'dep_return_number': torch.tensor(return_number_dep, dtype=torch.int32),   # shape: (N_dep,)
+            'dep_num_returns': torch.tensor(num_returns_dep, dtype=torch.int32),       # shape: (N_dep,)
+            'bbox': bbox                                                             # list of 4 floats: [min_x, min_y, max_x, max_y]
         }
     except Exception as e:
         print(f"Error processing bounding box {i}: {e}")
