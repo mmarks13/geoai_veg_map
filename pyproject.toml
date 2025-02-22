@@ -7,27 +7,24 @@ readme = "README.md"
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.10,<3.12"
 geopandas = "^1.0.1"
 numpy = "<2"
 laspy = {extras = ["lazrs"], version = "^2.5.4"}
 rasterio = "^1.4.2"
 stackstac = "^0.5.1"
-torch = "^2.5.1"
-torchvision = "^0.20.1"
+torch = {version = "2.5.1", extras = ["cuda12.4"]}  # Explicitly specify CUDA 12.4
 einops = "^0.8.0"
 shapely = "^2.0.6"
 uavsar-pytools = "^0.7.1"
 pystac-client = "^0.8.5"
 scikit-learn = "^1.5.2"
-gdal = "3.4.1"
+# gdal = "3.4.1"
 open3d = "^0.18.0"
 pyvista = {extras = ["jupyter"], version = "^0.44.1"}
 s3fs = "^2024.10.0"
 ipykernel = "^6.29.5"
-trame = "^3.7.0"
 ipywidgets = "^8.1.5"
-vtk = "^9.3.1"
 addict = "^2.4.0"
 conda-lock = "~2.5.6"
 fiona = "~1.9.5"
@@ -52,13 +49,12 @@ stacchip = "0.1.35"
 torch-summary = "^1.4.5"
 hiddenlayer = "^0.3"
 tensorboard = "^2.18.0"
-jupyter-copilot = "^0.1.4"
 rio-cogeo = "^5.4.0"
 elevation = "^1.1.3"
 pyproj = "^3.7.0"
 plotly = "^5.24.1"
 pyvirtualdisplay = "^3.0"
-pdal = "^3.4.5"
+# pdal = "^3.4.5"
 torch-geometric = "^2.6.1"
 matplotlib = "^3.10.0"
 pytorch3d = { version = "*", optional = true }
@@ -69,12 +65,15 @@ pykeops = "^2.2.3"
 torchsummary = "^1.5.1"
 optuna = "^4.2.0"
 pylas = "^0.4.3"
+tqdm = "^4.67.1"
 
 
 [tool.poetry.extras]
 pytorch-osx = ["torch"]
 pytorch-linux-cuda12 = ["torch"]
 
+[tool.poetry.group.cuda.dependencies]
+torch-cluster = {version = "^1.6.3", extras = ["cuda"]}
 
 [build-system]
 requires = ["poetry-core"]

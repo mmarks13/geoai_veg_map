@@ -1,15 +1,13 @@
-myenv/
-chips/
-clay_model/
-geoidheight/
-imagery/
-lightning_logs/
-local_stac/
-model_checkpoints/
-pytorch3d/
-training_data_chunks/
-uavlidar/
+
 *.pth
-untitled*
-Untitled*
+
 **/*.cpython-311..pyc
+*.ipynb_checkpoints/
+# Ignore temporary files and directories
+__pycache__/
+*.pyc.ipynb_checkpoints/
+
+# Ignore data files (adjust as needed)
+data/*
+*vsix
+*.ipynb
