@@ -4,9 +4,11 @@ Script Summary:
 --------------
 This script processes point cloud LAS/LAZ files by converting them to COPC files using PDAL.
 For each input file in the specified input directory, a COPC file is created and saved in the output
-directory. A corresponding STAC item is then generated using the spatial bounds extracted from the
-COPC file and an acquisition date extracted from the filename. If the filename contains an 8-digit
-date (in YYYYMMDD format), that date is used; otherwise, the current UTC time is used.
+directory. All point clouds are reprojected to the specified target CRS only if they have a different CRS.
+Point clouds without a CRS are assumed to be in the target CRS. A corresponding STAC item 
+is then generated using the spatial bounds extracted from the COPC file and an acquisition date 
+extracted from the filename. If the filename contains an 8-digit date (in YYYYMMDD format), that date 
+is used; otherwise, the current UTC time is used.
 The script loads an existing STAC catalog from the output directory if one exists and appends new items,
 skipping duplicates. The output directory will contain both the COPC files and the STAC catalog.
 
@@ -15,13 +17,17 @@ Command-line arguments:
   --output           Output directory to store both the COPC files and the STAC catalog.
   --collection-id    Collection ID for the STAC catalog.
   --collection-title Collection title for the STAC catalog.
+  --target-crs       Target CRS for all point clouds (e.g., 'EPSG:4326').
+  --filename-regex   Optional regex pattern to filter input files by filename.
 
 Example usage:
   python make_local_uavlidar_stac.py \
     --input data/raw/study_las \
     --output data/stac/uavlidar \
     --collection-id uav_lidar \
-    --collection-title "UAV LiDAR Point Clouds"
+    --collection-title "UAV LiDAR Point Clouds" \
+    --target-crs "EPSG:4326" \
+    --filename-regex "^2023.*"
 """
 
 import os
@@ -74,21 +80,74 @@ def extract_date_from_filename(filename):
     return datetime.utcnow()
 
 
+def parse_epsg_code(crs_string):
+    """
+    Parse an EPSG code from a CRS string.
+    Examples: 'EPSG:4326' returns 4326, 'EPSG:32633' returns 32633
+    """
+    if crs_string.upper().startswith('EPSG:'):
+        try:
+            return int(crs_string.split(':')[1])
+        except (IndexError, ValueError):
+            logging.warning(f"Could not parse EPSG code from '{crs_string}', returning None")
+    return None
+
+
 class PointCloudProcessor:
     """
     Processes a single LAS/LAZ file:
       - Converts the file to a COPC file using a PDAL pipeline.
+      - Reprojects the point cloud to the target CRS only if needed.
       - Stores PDAL metadata (used for bounds extraction).
     """
-    def __init__(self, input_file, output_dir):
+    def __init__(self, input_file, output_dir, target_crs):
         self.input_file = input_file
         self.output_dir = output_dir
+        self.target_crs = target_crs
         self.metadata = None
+        self.source_crs = None
         os.makedirs(output_dir, exist_ok=True)
+        
+    def get_source_crs(self):
+        """
+        Determine the source CRS of the input file.
+        Returns the source CRS if found, None otherwise.
+        """
+        # Create a pipeline to read the input file and get its metadata
+        info_pipeline_def = [
+            {
+                "type": "readers.las",
+                "filename": self.input_file
+            }
+        ]
+        
+        info_pipeline = pdal.Pipeline(json.dumps(info_pipeline_def))
+        try:
+            # Execute the pipeline to get metadata
+            info_pipeline.execute()
+            metadata = info_pipeline.metadata
+            
+            # Try to extract the CRS information
+            if 'metadata' in metadata and 'readers.las' in metadata['metadata']:
+                las_metadata = metadata['metadata']['readers.las']
+                
+                # Check if spatial reference is defined
+                if 'srs' in las_metadata and 'wkt' in las_metadata['srs'] and las_metadata['srs']['wkt']:
+                    logging.info(f"Found CRS in file: {self.input_file}")
+                    return las_metadata['srs']['wkt']
+                
+            logging.info(f"No CRS found in file: {self.input_file}. Assuming it's already in target CRS.")
+            return None
+            
+        except Exception as e:
+            logging.warning(f"Error getting source CRS for {self.input_file}: {e}")
+            return None
 
     def create_copc(self, output_filename=None):
         """
         Create a COPC file from the input LAS/LAZ file using PDAL.
+        The point cloud is reprojected to the target CRS only if it has a different CRS.
+        If no CRS is present, assumes it's already in the target CRS.
         The COPC filename defaults to the input file's basename with a .copc.laz extension.
         """
         logging.info(f"Reading input file: {self.input_file}")
@@ -96,13 +155,32 @@ class PointCloudProcessor:
             output_filename = f"{os.path.splitext(os.path.basename(self.input_file))[0]}.copc.laz"
         copc_path = os.path.join(self.output_dir, output_filename)
 
-        # PDAL pipeline: read LAS, compute stats, and write COPC.
+        # Get the source CRS
+        self.source_crs = self.get_source_crs()
+        
+        # Build pipeline steps
         pipeline_def = [
             {
                 "type": "readers.las",
                 "filename": self.input_file,
                 "threads": 24
-            },
+            }
+        ]
+        
+        # Only add reprojection if the source has a CRS and it's different from target
+        if self.source_crs is not None:
+            pipeline_def.append({
+                "type": "filters.reprojection",
+                "in_srs": self.source_crs,
+                "out_srs": self.target_crs
+            })
+            logging.info(f"Will reproject from source CRS to {self.target_crs}")
+        else:
+            # No source CRS, we'll assume it's already in target CRS
+            logging.info(f"Skipping reprojection as no source CRS found. Assuming already in {self.target_crs}")
+            
+        # Add remaining steps
+        pipeline_def.extend([
             {
                 "type": "filters.stats",
                 "dimensions": "X,Y,Z"
@@ -111,9 +189,10 @@ class PointCloudProcessor:
                 "type": "writers.copc",
                 "filename": copc_path,
                 "forward": "all",
+                # "a_srs": self.target_crs,
                 "threads": 24
             }
-        ]
+        ])
 
         pipeline = pdal.Pipeline(json.dumps(pipeline_def))
         try:
@@ -153,7 +232,7 @@ class PointCloudProcessor:
         }
 
 
-def create_stac_catalog(items, overall_bounds, output_dir, collection_id, collection_title):
+def create_stac_catalog(items, overall_bounds, output_dir, collection_id, collection_title, target_crs):
     """
     Create (or update) a STAC catalog from a list of STAC items.
     overall_bounds: dictionary with keys: minx, miny, maxx, maxy, minz, maxz.
@@ -182,6 +261,11 @@ def create_stac_catalog(items, overall_bounds, output_dir, collection_id, collec
         ),
         title=collection_title
     )
+    
+    # Add projection information to collection
+    epsg_code = parse_epsg_code(target_crs)
+    if epsg_code:
+        collection.extra_fields["proj:epsg"] = epsg_code
 
     # Add new items that are not already in the catalog.
     for item in items:
@@ -224,6 +308,18 @@ def main():
         required=True,
         help="Collection title for the STAC catalog."
     )
+    parser.add_argument(
+        "--target-crs",
+        type=str,
+        required=True,
+        help="Target CRS for all point clouds (e.g., 'EPSG:4326')."
+    )
+    parser.add_argument(
+        "--filename-regex",
+        type=str,
+        required=False,
+        help="Optional regex pattern to filter input files by filename."
+    )
     args = parser.parse_args()
 
     items = []
@@ -235,6 +331,11 @@ def main():
     # Process each LAS/LAZ file in the input directory.
     for filename in os.listdir(args.input):
         if filename.lower().endswith((".las", ".laz")):
+            # Skip files that don't match the regex pattern if provided
+            if args.filename_regex and not re.search(args.filename_regex, filename):
+                logging.info(f"Skipping {filename} as it doesn't match the regex pattern: {args.filename_regex}")
+                continue
+                
             file_path = os.path.join(args.input, filename)
             # Use the base filename (without extension) as the STAC item ID.
             item_id = os.path.splitext(filename)[0]
@@ -244,7 +345,7 @@ def main():
                 continue
 
             logging.info(f"Processing {file_path}")
-            processor = PointCloudProcessor(file_path, args.output)
+            processor = PointCloudProcessor(file_path, args.output, args.target_crs)
             copc_path = processor.create_copc()
             if copc_path is None:
                 logging.error(f"Skipping {file_path} due to processing error.")
@@ -271,7 +372,8 @@ def main():
                 bounds['minx'], bounds['miny'], bounds['minz'],
                 bounds['maxx'], bounds['maxy'], bounds['maxz']
             ]
-            # Create the STAC item.
+            
+            # Create the STAC item with projection information
             item = Item(
                 id=item_id,
                 geometry=geometry,
@@ -279,6 +381,19 @@ def main():
                 datetime=acq_datetime,
                 properties={}
             )
+            
+            # Add projection information to item properties
+            epsg_code = parse_epsg_code(args.target_crs)
+            if epsg_code:
+                item.properties["proj:epsg"] = epsg_code
+                
+            # Add information about whether reprojection was performed
+            if processor.source_crs is not None:
+                item.properties["pc:reprojected"] = True
+                item.properties["pc:original_crs"] = "Unknown" if not processor.source_crs else "Present"
+            else:
+                item.properties["pc:reprojected"] = False
+            
             # Use a relative path for the COPC asset.
             rel_path = os.path.join(args.output, os.path.basename(copc_path))
             item.add_asset(
@@ -293,7 +408,7 @@ def main():
             logging.info(f"Added item '{item_id}' from file {file_path}.")
 
     # Create (or update) the STAC catalog with the new items.
-    create_stac_catalog(items, overall_bounds, args.output, args.collection_id, args.collection_title)
+    create_stac_catalog(items, overall_bounds, args.output, args.collection_id, args.collection_title, args.target_crs)
 
 
 if __name__ == "__main__":

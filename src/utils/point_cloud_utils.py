@@ -573,6 +573,61 @@ def plot_georeferenced_rasters_with_geometries(tiff_files, geometries=None, rast
 
 
 
+def visualize_pointclouds(point_clouds, elev=45, azim=45):
+    """
+    Visualize a list of point clouds in a 3D scatter plot with adjustable viewing angles.
+
+    :param point_clouds: list of NumPy structured arrays, each containing point data (X, Y, Z, etc.).
+    :param elev: elevation angle in degrees (default=30).
+    :param azim: azimuth angle in degrees (default=45).
+    """
+    if not point_clouds:
+        print("No point clouds to visualize.")
+        return
+
+    # Get the common fields across all point clouds
+    common_fields = set(point_clouds[0].dtype.names)
+    for pc in point_clouds:
+        common_fields.intersection_update(pc.dtype.names)
+
+    # Normalize all arrays to have only the common fields
+    normalized_point_clouds = []
+    for pc in point_clouds:
+        # Create a new array with only the common fields
+        normalized_pc = np.zeros(pc.shape, dtype=[(field, pc.dtype[field]) for field in common_fields])
+        for field in common_fields:
+            normalized_pc[field] = pc[field]
+        normalized_point_clouds.append(normalized_pc)
+
+    # Concatenate all normalized point clouds into one array
+    all_points = np.concatenate(normalized_point_clouds)
+
+    # Extract X, Y, Z
+    x = all_points['X']
+    y = all_points['Y']
+    z = all_points['Z']
+
+    fig = plt.figure(figsize=(8, 6))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Plot
+    sc = ax.scatter(x, y, z, c=z, s=0.1, cmap='viridis')
+
+    # Label axes
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+
+    # Set the viewing angle
+    ax.view_init(elev=elev, azim=azim)
+
+    # Optionally fix aspect ratio so the axes scales are consistent:
+    ax.set_box_aspect((np.ptp(x), np.ptp(y), np.ptp(z)))
+
+    plt.title("Point Cloud Visualization")
+    plt.show()
+
+
 
     
 
