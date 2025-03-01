@@ -21,8 +21,9 @@ export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
 #   --input data/raw/uavlidar/study_las \
 #   --output data/stac/uavlidar \
 #   --collection-id uav_lidar \
-#   --collection-title "UAV LiDAR Point Clouds"
-
+#   --collection-title "UAV LiDAR Point Clouds"\
+#   --target-crs "EPSG:32611"  #\
+#   #--filename-regex "210014|TREX"
 
 # # get naip imagery from planetary computer and save it locally. 
 # python src/data_prep/make_local_naip_stac.py\
@@ -44,4 +45,11 @@ export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
 
 
 # python src/data_prep/process_uav_lidar.py
-python src/data_prep/create_training_tile_bboxes.py
+# python src/data_prep/create_training_tile_bboxes.py 
+python src/data_prep/generate_training_data.py\
+ --tiles_geojson data/processed/tiles.geojson \
+ --stac_source data/stac/uavlidar/catalog.json \
+ --outdir output/test \
+ --chunk_size 20 \
+ --sample 500 \
+ --max-api-retries 20

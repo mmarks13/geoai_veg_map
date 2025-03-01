@@ -192,7 +192,7 @@ def create_pointcloud_stack(bbox, start_date, end_date, stac_source, threads=4,
     return point_clouds
 
 
-def create_3dep_stack(bbox, start_date, end_date, threads=4, target_crs=None, max_retries=5, initial_delay=2):
+def create_3dep_stack(bbox, start_date, end_date, threads=4, target_crs=None):
     """
     Create a stack of point clouds from 3DEP STAC items.
     
@@ -208,125 +208,83 @@ def create_3dep_stack(bbox, start_date, end_date, threads=4, target_crs=None, ma
         Number of threads for processing
     target_crs : str
         Target coordinate reference system for reprojection
-    max_retries : int
-        Maximum number of retry attempts for the Planetary Computer API
-    initial_delay : float
-        Initial delay in seconds between retries (will be doubled for each retry)
     """
-    import time
-    from pystac_client.exceptions import APIError
-    
     client = Client.open(
         "https://planetarycomputer.microsoft.com/api/stac/v1",
         modifier=planetary_computer.sign_inplace
     )
 
-    items = None
-    attempt = 0
-    last_exception = None
-    search = None
-    
-    while attempt < max_retries and items is None:
-        try:
-            if attempt > 0:
-                print(f"Planetary Computer API retry attempt {attempt}/{max_retries}")
-            
-            search = client.search(
-                collections=["3dep-lidar-copc"],
-                bbox=bbox,
-                datetime=f"{start_date}/{end_date}"
-            )
-            items = list(search.items())
-            
-            if not items:
-                print("No items found for the specified parameters.")
-                raise ValueError("No items found for the specified parameters.")
-            
-            # If we got here, the call was successful
-            if attempt > 0:
-                print(f"✅ API call succeeded after {attempt+1} attempts!")
-                
-        except (APIError, Exception) as e:
-            last_exception = e
-            print(f"API error on attempt {attempt+1}: {str(e)}")
-            
-            if attempt < max_retries - 1:
-                # Calculate backoff time with exponential increase
-                sleep_time = initial_delay * (2 ** attempt)
-                print(f"Retrying in {sleep_time:.1f} seconds...")
-                time.sleep(sleep_time)
-            else:
-                print(f"❌ All {max_retries} retry attempts failed. Giving up.")
-            
-            attempt += 1
-    
-    # If we've exhausted all retries and still have no items, raise the last exception
-    if items is None:
-        print(f"Failed to retrieve data after {max_retries} attempts")
-        raise last_exception or ValueError("API request failed with no specific error")
-        
     try:
-        # Continue with processing the items
-        pass
+        search = client.search(
+            collections=["3dep-lidar-copc"],
+            bbox=bbox,
+            datetime=f"{start_date}/{end_date}"
+        )
+        items = list(search.items())
+        if not items:
+            raise ValueError("No items found for the specified parameters.")
+        
+        polygon = bounding_box_to_geojson(bbox)
+        point_clouds = []
+        for tile in items:
+            try:
+                if "data" not in tile.assets:
+                    continue
+                    
+                url = planetary_computer.sign(tile.assets["data"].href)
+                
+                pipeline_dict = {
+                    "pipeline": [
+                        {
+                            "type": "readers.copc",
+                            "filename": url,
+                            "polygon": polygon,
+                            "requests": 4,
+                            "keep_alive": 30
+                        }
+                    ]
+                }
+                
+                if target_crs:
+                    pipeline_dict["pipeline"].append({
+                        "type": "filters.reprojection",
+                        "out_srs": target_crs
+                    })
+                
+                pipeline = pdal.Pipeline(json.dumps(pipeline_dict))
+                pipeline.execute()
+                
+                arrays = pipeline.arrays
+                if len(arrays) > 0 and arrays[0].size > 0:
+                    point_clouds.append(arrays[0])
+                del pipeline
+            except Exception as e:
+                print(f"Error processing tile {url}: {str(e)}")
+                continue
+        
+        if not point_clouds:
+            raise ValueError("No point cloud data was successfully retrieved")
+        
+        # Find the common fields across all arrays
+        common_fields = set(point_clouds[0].dtype.names)
+        for pc in point_clouds[1:]:
+            common_fields.intersection_update(pc.dtype.names)
+
+        # Keep only the common fields and return as a list of structured arrays
+        common_fields = list(common_fields)
+        filtered_point_clouds = [
+            pc[common_fields].copy() for pc in point_clouds
+        ]
+        
+        del point_clouds
+        del items
+        del common_fields
+        return filtered_point_clouds
     finally:
         del client
-        if search:
+        if 'search' in locals():
             del search
         gc.collect()
-    
-    polygon = bounding_box_to_geojson(bbox)
-    point_clouds = []
-    for tile in items:
-        try:
-            url = planetary_computer.sign(tile.assets["data"].href)
-            
-            pipeline_dict = {
-                "pipeline": [
-                    {
-                        "type": "readers.copc",
-                        "filename": url,
-                        "polygon": polygon,
-                        "requests": 4,
-                        "keep_alive": 30
-                    }
-                ]
-            }
-            
-            if target_crs:
-                pipeline_dict["pipeline"].append({
-                    "type": "filters.reprojection",
-                    "out_srs": target_crs
-                })
-            
-            pipeline = pdal.Pipeline(json.dumps(pipeline_dict))
-            pipeline.execute()
-            
-            arrays = pipeline.arrays
-            if len(arrays) > 0 and arrays[0].size > 0:
-                point_clouds.append(arrays[0])
-            del pipeline
-        except Exception as e:
-            print(f"Error processing tile {url}: {str(e)}")
-            continue
-    
-    if not point_clouds:
-        raise ValueError("No point cloud data was successfully retrieved")
-    
-    # Find the common fields across all arrays
-    common_fields = set(point_clouds[0].dtype.names)
-    for pc in point_clouds[1:]:
-        common_fields.intersection_update(pc.dtype.names)
-
-    # Keep only the common fields and return as a list of structured arrays
-    common_fields = list(common_fields)
-    filtered_point_clouds = [
-        pc[common_fields].copy() for pc in point_clouds
-    ]
-    del point_clouds
-    del items
-    del common_fields
-    gc.collect()
-    return filtered_point_clouds
 
 
 def process_bbox(args):
@@ -338,6 +296,7 @@ def process_bbox(args):
     # Extract optional retry parameters if provided
     max_retries = args[6] if len(args) > 6 else 5
     initial_delay = args[7] if len(args) > 7 else 2
+    
     try:
         print(f"Processing tile {i}: {bbox}")
         
@@ -362,21 +321,51 @@ def process_bbox(args):
         return_number_uav = np.array([p['ReturnNumber'] for p in uav_pc[0]], dtype=np.int32)
         num_returns_uav = np.array([p['NumberOfReturns'] for p in uav_pc[0]], dtype=np.int32)
         
-        # 3DEP LiDAR point clouds
+        # 3DEP LiDAR point clouds - with retry logic
         transformer = Transformer.from_crs(bbox_crs, "EPSG:4326", always_xy=True)
         bbox_wgs84 = transformer.transform_bounds(*bbox)
 
-        dep_pc = create_3dep_stack(
-            bbox=bbox_wgs84,
-            start_date=start_date,
-            end_date=end_date,
-            threads=1,
-            max_retries=max_retries,
-            initial_delay=initial_delay
-        )
+        # Add retry logic for 3DEP stack creation
+        import time
+        from pystac_client.exceptions import APIError
         
-        if not dep_pc or len(dep_pc) == 0:
-            print(f"No 3DEP point cloud data found for tile {i}")
+        dep_pc = None
+        attempt = 0
+        last_exception = None
+        
+        while attempt < max_retries and dep_pc is None:
+            try:
+                if attempt > 0:
+                    print(f"3DEP data retrieval retry attempt {attempt}/{max_retries} for tile {i}")
+                
+                dep_pc = create_3dep_stack(
+                    bbox=bbox_wgs84,
+                    start_date=start_date,
+                    end_date=end_date,
+                    threads=1
+                )
+                
+                # If we got here, the call was successful
+                if attempt > 0:
+                    print(f"✅ 3DEP data retrieval succeeded after {attempt+1} attempts for tile {i}!")
+                    
+            except Exception as e:
+                last_exception = e
+                # print(f"Error retrieving 3DEP data for tile {i} (attempt {attempt+1}): {str(e)}")
+                
+                if attempt < max_retries - 1:
+                    # Calculate backoff time with exponential increase
+                    sleep_time = initial_delay * (2 ** attempt)
+                    # print(f"Retrying 3DEP data retrieval in {sleep_time:.1f} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    print(f"❌ All {max_retries} 3DEP data retrieval attempts failed for tile {i}. Giving up.")
+                
+                attempt += 1
+        
+        # If all attempts failed, return None
+        if dep_pc is None:
+            print(f"Failed to retrieve 3DEP data for tile {i} after {max_retries} attempts")
             return None
         
         # For the 3DEP data, we concatenate the returned arrays
@@ -451,10 +440,16 @@ def process_tiles_from_geojson(
     
     # Extract bounding boxes from tile geometries
     tile_bounding_boxes = []
-    for _, row in gdf.iterrows():
+    tile_ids = []  # Track tile IDs if available, otherwise use index
+    
+    for idx, row in gdf.iterrows():
         geom = row['geometry']
         bbox = [geom.bounds[0], geom.bounds[1], geom.bounds[2], geom.bounds[3]]
         tile_bounding_boxes.append(bbox)
+        
+        # Use ID field if available, otherwise use index
+        tile_id = row.get('id', idx)
+        tile_ids.append(tile_id)
     
     print(f"Processing {len(tile_bounding_boxes)} tiles from {tiles_geojson}")
     
@@ -462,8 +457,14 @@ def process_tiles_from_geojson(
     os.makedirs(output_dir, exist_ok=True)
 
     # Split tiles into chunks
-    chunks = list(chunk_data(tile_bounding_boxes, chunk_size))
+    chunks = list(chunk_data(list(zip(tile_ids, tile_bounding_boxes)), chunk_size))
     print(f"Processing {len(chunks)} chunks of tiles, with up to {chunk_size} per chunk.")
+
+    # Track processing results
+    results_tracker = {
+        'successful': [],
+        'failed': []
+    }
 
     for chunk_index, chunk in enumerate(chunks, start=1):
         print(f"Processing chunk {chunk_index}/{len(chunks)}...")
@@ -471,15 +472,32 @@ def process_tiles_from_geojson(
         # Prepare arguments for parallel processing
         args_list = [
             (i, bbox, start_date, end_date, stac_source, bbox_crs, max_api_retries, initial_retry_delay)
-            for i, bbox in enumerate(chunk, start=1)
+            for i, (tile_id, bbox) in enumerate(chunk, start=1)
         ]
         
         chunk_results = []
+        chunk_failures = []
+        
         try:
             with ProcessPoolExecutor(max_workers=max_threads) as executor:
-                for result in executor.map(process_bbox, args_list):
-                    if result is not None:
-                        chunk_results.append(result)
+                future_to_tile = {executor.submit(process_bbox, args): (i, tile_id) for i, (args, (i, tile_id)) in 
+                                 enumerate(zip(args_list, enumerate([tid for tid, _ in chunk], start=1)))}
+                
+                for future in future_to_tile:
+                    i, tile_id = future_to_tile[future]
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            chunk_results.append(result)
+                            results_tracker['successful'].append((tile_id, "Successfully processed"))
+                        else:
+                            # Failed to process tile
+                            chunk_failures.append(tile_id)
+                            results_tracker['failed'].append((tile_id, "Failed to process - see logs for details"))
+                    except Exception as e:
+                        chunk_failures.append(tile_id)
+                        results_tracker['failed'].append((tile_id, f"Error: {str(e)[:100]}..."))  # Truncate very long error messages
+                
         except Exception as e:
             print(f"Error during parallel processing of chunk {chunk_index}: {e}")
         
@@ -498,7 +516,27 @@ def process_tiles_from_geojson(
         del chunk_results
         gc.collect()
 
+    # Print summary report
+    print("\n" + "="*80)
+    print(f"PROCESSING SUMMARY REPORT")
+    print("="*80)
+    
+    total_tiles = len(tile_ids)
+    successful_count = len(results_tracker['successful'])
+    failed_count = len(results_tracker['failed'])
+    
+    print(f"Total tiles processed: {total_tiles}")
+    print(f"Successfully processed: {successful_count} ({successful_count/total_tiles*100:.1f}%)")
+    print(f"Failed to process: {failed_count} ({failed_count/total_tiles*100:.1f}%)")
+    
+    if failed_count > 0:
+        print("\nFailed tiles:")
+        for tile_id, reason in results_tracker['failed']:
+            print(f"  - Tile {tile_id}: {reason}")
+    
+    print("="*80)
     print("Completed processing all chunks.")
+    print("="*80)
 
 
 if __name__ == "__main__":
