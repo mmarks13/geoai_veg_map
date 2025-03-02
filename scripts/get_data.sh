@@ -25,13 +25,13 @@ export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
 #   --target-crs "EPSG:32611"  #\
 #   #--filename-regex "210014|TREX"
 
-# get naip imagery from planetary computer and save it locally. 
-python src/data_prep/make_local_naip_stac.py\
-  --bbox -116.674113 33.096041 -116.567707 33.170647 \
-  --bbox -120.127900 34.649349 -119.938771 34.775782 \
-  --start 2014-01-01 \
-  --end 2025-12-31 \
-  --output /home/jovyan/geoai_veg_map/data/stac/naip/
+# # get naip imagery from planetary computer and save it locally. 
+# python src/data_prep/make_local_naip_stac.py\
+#   --bbox -116.674113 33.096041 -116.567707 33.170647 \
+#   --bbox -120.127900 34.649349 -119.938771 34.775782 \
+#   --start 2014-01-01 \
+#   --end 2025-12-31 \
+#   --output /home/jovyan/geoai_veg_map/data/stac/naip/
 
 
 # # get 3dep point clouds from planetary computer and save it locally. 
@@ -47,11 +47,12 @@ python src/data_prep/make_local_naip_stac.py\
 # python src/data_prep/process_uav_lidar.py
 # python src/data_prep/create_training_tile_bboxes.py 
 
-# python src/data_prep/generate_training_data.py\
-#  --tiles_geojson data/processed/tiles.geojson \
-#  --stac_source data/stac/uavlidar/catalog.json \
-#  --outdir output/test \
-#  --chunk_size 30 \
-#  --sample 10000 \
-#  --max-api-retries 20\
-
+python src/data_prep/generate_training_data.py\
+ --tiles_geojson data/processed/tiles.geojson \
+ --lidar_stac_source data/stac/uavlidar/catalog.json \
+ --outdir data/output/test \
+ --chunk_size 5 \
+ --sample 5 \
+ --max-api-retries 20\
+ --uavsar_stac_source data/stac/uavsar/catalog.json \
+ --naip_stac_source data/stac/naip/catalog.json

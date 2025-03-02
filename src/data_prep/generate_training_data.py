@@ -1,32 +1,599 @@
 #!/usr/bin/env python3
 """
-Generate LiDAR Training Data from Tiles
+Generate Combined LiDAR and Imagery Training Data from Tiles
 
 This script reads tile geometries from a GeoJSON file (created by create_tiles.py),
-retrieves LiDAR data for each tile from UAV and 3DEP sources, processes the data,
-and saves the results as PyTorch tensors.
+retrieves LiDAR data for each tile from UAV and 3DEP sources, processes imagery data 
+from STAC catalogs (UAVSAR and NAIP), and saves the combined results as PyTorch tensors.
 
-Usage:
-    python generate_training_data.py --tiles_geojson data/processed/tiles.geojson --outdir output/test
-    python generate_training_data.py --tiles_geojson data/processed/tiles.geojson --outdir output/test --sample 10
+The script handles:
+- UAV LiDAR point clouds from a local STAC catalog
+- 3DEP LiDAR point clouds from Planetary Computer
+- UAVSAR imagery (multi-band SAR data)
+- NAIP aerial imagery (multi-band optical data)
+
+For each tile, the script creates a dictionary containing:
+- Point cloud data from both LiDAR sources
+- Imagery data from both image sources (if available)
+- Associated metadata for all data sources
+
+All outputs are saved as PyTorch tensors for easy loading in deep learning models.
+
+Example usage:
+    python src/data_prep/generate_training_data.py \\
+     --tiles_geojson data/processed/tiles.geojson \\
+     --lidar_stac_source data/stac/uavlidar/catalog.json \\
+     --outdir data/output/test \\
+     --chunk_size 30 \\
+     --sample 4 \\
+     --max-api-retries 20 \\
+     --uavsar_stac_source data/stac/uavsar/catalog.json \\
+     --naip_stac_source data/stac/naip/catalog.json
 """
 
 import os
 import gc
 import json
+import math
 import torch
 import numpy as np
 import geopandas as gpd
+import xarray as xr
+import dask.array as da
+from dask import delayed
 import time
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
+import rasterio
+from rasterio.warp import reproject, Resampling
+from rasterio.transform import from_origin
+from rasterio.enums import Resampling
 from pyproj import Transformer
+from shapely.geometry import mapping, box
 import argparse
 import pdal
 import pystac
 from pystac_client import Client
 import planetary_computer
-from shapely.geometry import mapping, box
+from stackstac import stack
+import pandas as pd
+import copy
+
+
+def bboxes_intersect(bbox1, bbox2):
+    """
+    Check if two bounding boxes intersect.
+    
+    Parameters:
+      bbox1 (tuple): (minx, miny, maxx, maxy)
+      bbox2 (tuple): (minx, miny, maxx, maxy)
+      
+    Returns:
+      bool: True if bounding boxes intersect, False otherwise
+    """
+    # Extract coordinates
+    minx1, miny1, maxx1, maxy1 = bbox1
+    minx2, miny2, maxx2, maxy2 = bbox2
+    
+    # Check if one box is to the left of the other
+    if maxx1 < minx2 or maxx2 < minx1:
+        return False
+    
+    # Check if one box is above the other
+    if maxy1 < miny2 or maxy2 < miny1:
+        return False
+    
+    # If neither of the above is true, the boxes must intersect
+    return True
+
+
+def create_stac_stack(bbox, start_date, end_date, stac_source, 
+                      out_resolution=0.5, bbox_crs="EPSG:4326", target_crs=None, 
+                      resampling_method=Resampling.cubic, fill_value=0, 
+                      assets=None, is_multiband=False, verbose=False):
+    """
+    Wrapper function that creates a data stack from a local STAC catalog, handling both
+    single-band and multi-band imagery.
+    
+    Parameters:
+    ----------
+    bbox : list or tuple
+        Bounding box in the format [xmin, ymin, xmax, ymax]
+    start_date : str
+        Start date for filtering in YYYY-MM-DD format
+    end_date : str
+        End date for filtering in YYYY-MM-DD format
+    stac_source : str
+        Path to the local STAC catalog
+    out_resolution : float, optional
+        Output resolution in meters. Default is 0.5.
+    bbox_crs : str, optional
+        CRS of the input bounding box. Default is "EPSG:4326"
+    target_crs : str, optional
+        Target CRS for the output. If None, will use the CRS from the first item.
+    resampling_method : Resampling, optional
+        Resampling method to use. Default is cubic.
+    fill_value : int, optional
+        Value to use for areas with no data. Default is 0.
+    assets : list, optional
+        List of asset names to include in the stack. For multi-band imagery, provide a single asset name.
+        Default is None, which will attempt to use a default asset.
+    is_multiband : bool, optional
+        Flag indicating whether the assets contain multi-band imagery. Default is False.
+        
+    Returns:
+    -------
+    tuple:
+        - xarray.DataArray: The computed data stack
+        - dict: Metadata dictionary for the most recent item
+    """
+    catalog = None
+    items = []
+    item_metadata = []
+    
+    try:
+        # -- Common preprocessing steps --
+        
+        # 1. Reproject bbox to EPSG:4326 for filtering if needed
+        if bbox_crs != "EPSG:4326":
+            transformer = Transformer.from_crs(bbox_crs, "EPSG:4326", always_xy=True)
+            if len(bbox) == 4:  # Assuming [minx, miny, maxx, maxy]
+                bbox_4326 = transformer.transform_bounds(*bbox)
+            else:
+                minx, miny, maxx, maxy = bbox
+                minx, miny = transformer.transform(minx, miny)
+                maxx, maxy = transformer.transform(maxx, maxy)
+                bbox_4326 = (minx, miny, maxx, maxy)
+        else:
+            bbox_4326 = bbox
+        
+        # 2. Read the local STAC catalog
+        if verbose:
+            print("Opening local STAC catalog...")
+        catalog = pystac.read_file(stac_source)
+        
+        # 3. Filter items by date and spatial intersection
+        for item in catalog.get_all_items():
+            # Check the date
+            item_date = item.datetime.date()
+            if not (start_date <= str(item_date) <= end_date):
+                continue
+                
+            # Check horizontal bounding box intersection
+            if item.bbox:
+                if bboxes_intersect(bbox_4326, item.bbox):
+                    items.append(item)
+                    
+                    # Create metadata for this item
+                    meta = {
+                        'id': item.id,
+                        'datetime': item.datetime.isoformat() if item.datetime else None,
+                        'bbox': item.bbox,
+                        'collection': item.collection_id if hasattr(item, 'collection_id') else None
+                    }
+                    
+                    # Add additional properties if available
+                    for key in ['eo:cloud_cover', 'platform', 'instrument', 'gsd', 'proj:epsg']:
+                        if key in item.properties:
+                            meta[key] = item.properties[key]
+                    
+                    item_metadata.append(meta)
+        
+        # 4. Check if items were found
+        if not items:
+            raise ValueError("No items found for the specified date range and bounding box.")
+        if verbose:
+            print(f"Found {len(items)} items between {start_date} and {end_date} that intersect with the bounding box")
+        
+        # 5. Sort items by datetime
+        items.sort(key=lambda x: x.datetime)
+        
+        # 6. Determine target CRS if not provided
+        if target_crs is None:
+            if 'proj:epsg' in items[0].properties:
+                target_crs = f"EPSG:{items[0].properties['proj:epsg']}"
+            else:
+                raise ValueError("target_crs not provided and cannot be inferred from items.")
+        if verbose:
+            print(f"Target CRS: {target_crs}")
+        
+        # 7. Reproject input bbox to target_crs
+        gdf = gpd.GeoDataFrame(geometry=[box(*bbox)], crs=bbox_crs)
+        gdf_target = gdf.to_crs(target_crs)
+        reproj_bounds = gdf_target.geometry.iloc[0].bounds  # (minx, miny, maxx, maxy)
+        if verbose:
+            print(f"Reprojected Bounding Box: {reproj_bounds}")
+        
+        # 8. Call the appropriate function based on is_multiband flag
+        if is_multiband:
+            # Make sure we have at least one asset specified
+            if assets is None or len(assets) == 0:
+                assets = ["image"]  # Default asset for multi-band imagery
+            
+            # Multi-band mode - use the first asset
+            return _process_multiband_stack(
+                items=items,
+                item_metadata=item_metadata,  # Pass the full metadata list
+                reproj_bounds=reproj_bounds,
+                target_crs=target_crs,
+                asset=assets[0],  # Use the first asset for multi-band
+                out_resolution=out_resolution,
+                resampling_method=resampling_method,
+                fill_value=fill_value,
+                verbose=verbose
+            )
+        else:
+            # Make sure we have assets
+            if assets is None or len(assets) == 0:
+                raise ValueError("No assets specified for single-band processing")
+                
+            # Single-band mode
+            return _process_singleband_stack(
+                items=items,
+                item_metadata=item_metadata,  # Pass the full metadata list
+                reproj_bounds=reproj_bounds,
+                target_crs=target_crs,
+                assets=assets,
+                out_resolution=out_resolution,
+                resampling_method=resampling_method,
+                fill_value=fill_value,
+                verbose=verbose
+            )
+    
+    
+    except Exception as e:
+        print(f"Error in create_stac_stack: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, {}
+    
+    finally:
+        # Clean up resources
+        if items:
+            del items
+        
+        if catalog:
+            del catalog
+        
+        gc.collect()
+
+
+def _process_singleband_stack(items, item_metadata, reproj_bounds, target_crs, assets, 
+                            out_resolution, resampling_method=Resampling.cubic,
+                            fill_value=0, verbose=False):
+    """
+    Internal function to process single-band imagery using stackstac.
+    
+    [docstring with parameters...]
+        
+    Returns:
+    -------
+    tuple:
+        - xarray.DataArray: The computed data stack
+        - list: List of metadata dictionaries for all items
+    """
+    try:
+        # Stack the imagery using stackstac
+        stack_data = stack(
+            items,
+            bounds=reproj_bounds,
+            snap_bounds=False,  # Explicitly set to False to use exact bounds
+            epsg=int(target_crs.split(":")[1]),
+            resolution=out_resolution,
+            fill_value=fill_value,
+            assets=assets,
+            resampling=resampling_method,
+            rescale=False
+        )
+        
+        computed_stack = stack_data.compute()
+        
+        # Print stats about the output
+        if verbose:
+            print(f"Stack dimensions: {computed_stack.sizes}")
+            print(f"Resolution: {out_resolution}m")
+        
+        # Return computed_stack AND the full list of metadata
+        return computed_stack, item_metadata
+        
+    except Exception as e:
+        print(f"Error in _process_singleband_stack: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, []
+
+
+def _process_multiband_stack(items, item_metadata, reproj_bounds, target_crs, asset, 
+                           out_resolution, resampling_method=Resampling.cubic,
+                           fill_value=0, verbose=False):
+    """
+    Internal function to process multi-band imagery using custom implementation.
+    
+    Parameters:
+    ----------
+    items : list
+        List of STAC items
+    item_metadata : list
+        List of metadata dictionaries for the items
+    reproj_bounds : tuple
+        Reprojected bounding box (minx, miny, maxx, maxy) in target_crs
+    target_crs : str
+        Target CRS 
+    asset : str
+        The asset key to use from each item
+    out_resolution : float
+        Output resolution in meters
+    resampling_method : Resampling, optional
+        Resampling method to use. Default is cubic.
+    fill_value : int, optional
+        Value to use for areas with no data. Default is 0.
+        
+    -------
+    tuple:
+        - xarray.DataArray: The computed data stack
+        - list: List of metadata dictionaries for all items
+    """
+    computed_da = None
+    
+    try:
+        minx_t, miny_t, maxx_t, maxy_t = reproj_bounds
+        width = math.ceil((maxx_t - minx_t) / out_resolution)
+        height = math.ceil((maxy_t - miny_t) / out_resolution)
+        # Use rasterio's from_origin; note that the "origin" is the top-left corner.
+        transform = from_origin(minx_t, maxy_t, out_resolution, out_resolution)
+        if verbose:
+            print(f"Output grid: {width} x {height} pixels")
+
+        # -- Get number of bands from the first item --
+        with rasterio.open(items[0].assets[asset].href) as src:
+            nbands = src.count
+            dtype = src.dtypes[0]
+        if verbose:
+            print(f"Number of bands: {nbands}")
+            print(f"Data type: {dtype}")
+        
+        # -- Function to reproject an item's asset onto the common grid --
+        def process_item(item):
+            asset_obj = item.assets[asset]
+            if verbose:
+                print(f"Processing: {asset_obj.href}")
+
+            with rasterio.open(asset_obj.href) as src:
+                if verbose:
+                    print(f"CRS: {src.crs}, Shape: {src.shape}")
+                src_nbands = src.count
+                # Prepare destination array with shape (bands, height, width)
+                dest = np.full((src_nbands, height, width), fill_value, dtype=dtype)
+                reproject(
+                    source=src.read(),
+                    destination=dest,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=target_crs,
+                    resampling=resampling_method,
+                    dst_nodata=fill_value
+                )
+                return dest
+
+        # -- Create a delayed dask array for each item --
+        delayed_arrays = []
+        times = []
+        
+        for item in items:
+            # Create a delayed version of the processed image
+            darr = delayed(process_item)(item)
+            # Wrap with dask.array.from_delayed; shape is (nbands, height, width)
+            darr = da.from_delayed(darr, shape=(nbands, height, width), dtype=dtype)
+            delayed_arrays.append(darr)
+            times.append(np.datetime64(item.datetime.date()))  # use numpy datetime64 for coordinates
+
+        # Stack along a new "time" axis (resulting shape: (time, band, y, x))
+        data = da.stack(delayed_arrays, axis=0)
+        if verbose:
+            print(f"Stacked data shape: {data.shape}")
+        
+        # -- Define spatial coordinate arrays based on the affine transform --
+        # The top-left corner is at (transform.c, transform.f)
+        x_coords = transform.c + np.arange(width) * out_resolution
+        y_coords = transform.f - np.arange(height) * out_resolution
+
+        # Create the DataArray
+        da_stack = xr.DataArray(
+            data,
+            dims=("time", "band", "y", "x"),
+            coords={
+                "time": times,
+                "band": np.arange(1, nbands + 1),
+                "x": x_coords,
+                "y": y_coords
+            },
+            attrs={
+                "crs": target_crs,
+                "transform": transform.to_gdal(),  # GDAL-style transform tuple
+                "resolution": out_resolution,
+                "created": np.datetime64('now').astype(str)
+            }
+        )
+        computed_da = da_stack.compute(scheduler="threads")
+        return computed_da,item_metadata
+        
+    except Exception as e:
+        print(f"Error in _process_multiband_stack: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, []
+
+
+def convert_stack_to_tensors(data_stack, metadata_list, bbox, resolution):
+    """
+    Convert xarray DataArray from create_stac_stack() to a dictionary of torch tensors with metadata.
+    
+    Parameters:
+    -----------
+    data_stack : xarray.DataArray
+        The stacked imagery from create_stac_stack()
+    metadata_list : list
+        List of metadata dictionaries for each item from create_stac_stack()
+    bbox : list or tuple
+        The bounding box used in the create_stac_stack() call [xmin, ymin, xmax, ymax]
+    resolution : float
+        The output resolution used in the create_stac_stack() call
+        
+    Returns:
+    --------
+    dict
+        A dictionary containing the imagery as torch tensors and associated metadata
+    """
+    if data_stack is None:
+        return None
+        
+    # Get the date and id attributes from the xarray
+    times = data_stack.time.values
+    
+    # Create a dictionary to hold the tensors and metadata
+    result = {
+        'imgs': [],
+        'imgs_meta': [],
+        'bbox': bbox,
+        'resolution': resolution
+    }
+    
+    # Convert each time slice to a torch tensor and capture metadata
+    for i, time in enumerate(times):
+        # Extract data for this time
+        img_data = data_stack.sel(time=time).values
+        
+        # Convert to torch tensor - shape is (band, y, x)
+        img_tensor = torch.tensor(img_data, dtype=torch.float32)
+        
+        # Add to imgs list
+        result['imgs'].append(img_tensor)
+        
+        # Parse datetime
+        if isinstance(time, np.datetime64):
+            date_str = pd.Timestamp(time).strftime('%Y-%m-%d')
+        else:
+            date_str = time
+        
+        # Get corresponding metadata from the metadata_list if available
+        item_meta = {}
+        if i < len(metadata_list):
+            item_meta = metadata_list[i]
+        
+        # Create metadata entry, combining metadata from the list with xarray information
+        bands = data_stack.band.values if 'band' in data_stack.dims else np.array([1])
+        
+        img_metadata = {
+            'id': item_meta.get('id', f'item_{i}'),
+            'date': date_str,
+            'datetime': pd.Timestamp(time).isoformat(),
+            'bbox': bbox,
+            'resolution': resolution,
+            'bands': list(bands),
+            'shape': img_tensor.shape,
+            'index': i
+        }
+        
+        # Add all the additional metadata from item_meta
+        for key, value in item_meta.items():
+            if key not in img_metadata:  # Don't overwrite existing keys
+                img_metadata[key] = value
+                
+        # Add to imgs_meta list
+        result['imgs_meta'].append(img_metadata)
+    
+    # Consolidate tensors into a single batch tensor if all have the same shape
+    if all(tensor.shape == result['imgs'][0].shape for tensor in result['imgs']):
+        result['imgs_tensor'] = torch.stack(result['imgs'])
+    
+    return result
+
+
+
+
+def process_imagery_data(bbox, start_date, end_date, stac_source, assets=None, out_resolution=0.5, 
+                        bbox_crs="EPSG:4326", target_crs=None, resampling_method=None,
+                        is_multiband=False, verbose=False):
+    """
+    Helper function to process imagery data using create_stac_stack and convert to tensors.
+    
+    Parameters are the same as create_stac_stack.
+    
+    Returns:
+    --------
+    dict
+        A dictionary containing the imagery as torch tensors and associated metadata
+    """
+    # Set default resampling method if none provided
+    if resampling_method is None:
+        resampling_method = Resampling.cubic
+    
+    # Call create_stac_stack to get the data
+    data_stack, metadata_list = create_stac_stack(
+        bbox=bbox,
+        start_date=start_date,
+        end_date=end_date,
+        stac_source=stac_source,
+        assets=assets,
+        out_resolution=out_resolution,
+        bbox_crs=bbox_crs,
+        target_crs=target_crs,
+        resampling_method=resampling_method,
+        is_multiband=is_multiband,
+        verbose=verbose
+    )
+    
+    # Convert to tensors and return
+    return convert_stack_to_tensors(data_stack, metadata_list, bbox, out_resolution)
+
+
+
+
+def combine_imagery_pointcloud(imagery_data, pointcloud_data):
+    """
+    Combine imagery tensor dictionary with point cloud tensor dictionary.
+    
+    Parameters:
+    -----------
+    imagery_data : dict
+        Dictionary containing imagery tensors and metadata from convert_stack_to_tensors()
+    pointcloud_data : dict
+        Dictionary containing point cloud tensors and metadata from process_bbox()
+        
+    Returns:
+    --------
+    dict
+        A combined dictionary with both imagery and point cloud data
+    """
+    if imagery_data is None or pointcloud_data is None:
+        print("Error: Either imagery data or point cloud data is None.")
+        return None
+    
+    # Create a deep copy to avoid modifying the originals
+    combined_data = copy.deepcopy(pointcloud_data)
+    
+    # Add imagery data
+    combined_data['imgs'] = imagery_data['imgs']
+    combined_data['imgs_meta'] = imagery_data['imgs_meta']
+    combined_data['img_resolution'] = imagery_data['resolution']
+    
+    # If we have a stacked tensor, add it
+    if 'imgs_tensor' in imagery_data:
+        combined_data['imgs_tensor'] = imagery_data['imgs_tensor']
+    
+    # Add validation flag - True if both point cloud and imagery data are present
+    combined_data['has_imagery'] = True
+    combined_data['has_pointcloud'] = True
+    
+    return combined_data
+
+
+def bounding_box_to_geojson(bbox):
+    """
+    Converts a bounding box to a GeoJSON polygon.
+    """
+    return json.dumps(mapping(box(bbox[0], bbox[1], bbox[2], bbox[3])))
 
 
 def calculate_geoid_undulation(x, y, input_crs="EPSG:32611"):
@@ -72,20 +639,11 @@ def calculate_geoid_undulation(x, y, input_crs="EPSG:32611"):
         # When ellipsoidal_height = 0: adjustment_value = orthometric_height
         adjustment_value = orth_height
         
-        # print(f"Calculated height adjustment: {adjustment_value:.4f}m at location ({lon:.6f}, {lat:.6f})")
-        # print(f"(Add this value to ellipsoidal heights to get NAVD88 heights)")
         return adjustment_value
         
     except Exception as e:
         print(f"Error calculating height adjustment at location ({lon:.6f}, {lat:.6f})): {e}")
         return 0  # Return default value in case of error
-
-
-def bounding_box_to_geojson(bbox):
-    """
-    Converts a bounding box to a GeoJSON polygon.
-    """
-    return json.dumps(mapping(box(bbox[0], bbox[1], bbox[2], bbox[3])))
 
 
 def create_pointcloud_stack(bbox, start_date, end_date, stac_source, threads=4,
@@ -427,17 +985,23 @@ def create_3dep_stack(bbox, start_date, end_date, threads=4, target_crs=None):
 
 def process_bbox(args):
     """
-    Process a single bounding box to retrieve and format LiDAR data.
+    Process a single bounding box to retrieve and format LiDAR data and imagery data.
     """
-    # The args tuple is: (i, tile_id, bbox, start_date, end_date, stac_source, bbox_crs, max_retries, initial_delay, current_tile_index, total_tiles, verbose)
-    i, tile_id, bbox, start_date, end_date, stac_source, bbox_crs = args[:7]
+    # Extract the base arguments
+    i, tile_id, bbox, start_date, end_date, lidar_stac_source, bbox_crs = args[:7]
+    
     # Extract optional retry parameters if provided
     max_retries = args[7] if len(args) > 7 else 5
     initial_delay = args[8] if len(args) > 8 else 2
+    
     # Extract progress tracking information
     current_tile_index = args[9] if len(args) > 9 else 0
     total_tiles = args[10] if len(args) > 10 else 0
     verbose = args[11] if len(args) > 11 else False
+    
+    # Extract imagery processing parameters if provided
+    uavsar_stac_source = args[12] if len(args) > 12 else None
+    naip_stac_source = args[13] if len(args) > 13 else None
     
     # Calculate the overall tile number for progress reporting
     overall_tile_index = current_tile_index + i
@@ -451,17 +1015,19 @@ def process_bbox(args):
     uav_pnt_attr = None
     dep_pnt_attr = None
     bbox_wgs84 = None
+    uavsar_data = None
+    naip_data = None
     
     try:
         if verbose:
             print(f"Processing tile {tile_id} (index {i}): {bbox}")
         
-        # UAV LiDAR point clouds with metadata
+        # Step 1: UAV LiDAR point clouds with metadata
         uav_pc, uav_meta = create_pointcloud_stack(
             bbox=bbox,
             start_date=start_date,
             end_date=end_date,
-            stac_source=stac_source,
+            stac_source=lidar_stac_source,
             bbox_crs=bbox_crs,
             threads=1
         )
@@ -486,7 +1052,7 @@ def process_bbox(args):
         uav_pc = None
         gc.collect()
         
-        # 3DEP LiDAR point clouds - with retry logic
+        # Step 2: 3DEP LiDAR point clouds - with retry logic
         transformer = Transformer.from_crs(bbox_crs, "EPSG:4326", always_xy=True)
         bbox_wgs84 = transformer.transform_bounds(*bbox)
 
@@ -547,7 +1113,50 @@ def process_bbox(args):
         dep_pc = None
         gc.collect()
         
-        # Create result dictionary with tensors
+        # Step 3: Process UAVSAR imagery if catalog path is provided
+        if uavsar_stac_source:
+            if verbose:
+                print(f"Processing UAVSAR imagery for tile {tile_id}")
+                
+            uavsar_data = process_imagery_data(
+                bbox=bbox,
+                start_date=start_date,
+                end_date=end_date,
+                stac_source=uavsar_stac_source,
+                assets=["HHHH", "HHHV", "VVVV", "HVVV", "HVHV", "HHVV"],
+                out_resolution=6.17,
+                bbox_crs=bbox_crs,
+                target_crs=bbox_crs,
+                resampling_method=Resampling.cubic,
+                is_multiband=False,
+                verbose=verbose
+            )
+            
+            if not uavsar_data and verbose:
+                print(f"No UAVSAR imagery data found for tile {tile_id}")
+        
+        # Step 4: Process NAIP imagery if catalog path is provided
+        if naip_stac_source:
+            if verbose:
+                print(f"Processing NAIP imagery for tile {tile_id}")
+                
+            naip_data = process_imagery_data(
+                bbox=bbox,
+                start_date=start_date,
+                end_date=end_date,
+                stac_source=naip_stac_source,
+                out_resolution=1.0,
+                bbox_crs=bbox_crs,
+                target_crs=bbox_crs,
+                resampling_method=Resampling.cubic,
+                is_multiband=True,
+                verbose=verbose
+            )
+            
+            if not naip_data and verbose:
+                print(f"No NAIP imagery data found for tile {tile_id}")
+        
+        # Create result dictionary with tensors for LiDAR data
         result = {
             'dep_points': torch.tensor(xyz_dep, dtype=torch.float32),
             'dep_pnt_attr': torch.tensor(dep_pnt_attr, dtype=torch.float32),
@@ -556,12 +1165,48 @@ def process_bbox(args):
             'uav_pnt_attr': torch.tensor(uav_pnt_attr, dtype=torch.float32),
             'uav_meta': uav_meta,
             'bbox': bbox,
-            'tile_id': tile_id
+            'tile_id': tile_id,
+            'has_imagery': False,
+            'has_pointcloud': True
         }
+        
+        # Add UAVSAR data if available
+        if uavsar_data:
+            result['uavsar_imgs'] = uavsar_data['imgs']
+            result['uavsar_imgs_meta'] = uavsar_data['imgs_meta']
+            result['uavsar_resolution'] = uavsar_data['resolution']
+            if 'imgs_tensor' in uavsar_data:
+                result['uavsar_imgs_tensor'] = uavsar_data['imgs_tensor']
+            result['has_uavsar'] = True
+        else:
+            result['has_uavsar'] = False
+            
+        # Add NAIP data if available
+        if naip_data:
+            result['naip_imgs'] = naip_data['imgs']
+            result['naip_imgs_meta'] = naip_data['imgs_meta']
+            result['naip_resolution'] = naip_data['resolution']
+            if 'imgs_tensor' in naip_data:
+                result['naip_imgs_tensor'] = naip_data['imgs_tensor']
+            result['has_naip'] = True
+        else:
+            result['has_naip'] = False
+            
+        # Set the overall imagery flag
+        result['has_imagery'] = result['has_uavsar'] or result['has_naip']
         
         # Print progress with overall count if total_tiles is provided
         if total_tiles > 0:
-            print(f"Completed tile {overall_tile_index}/{total_tiles} (ID: {tile_id}): UAV points: {xyz_uav.shape[0]:,}, 3DEP points: {xyz_dep.shape[0]:,}")
+            imagery_status = []
+            if 'has_uavsar' in result and result['has_uavsar']:
+                imagery_status.append(f"UAVSAR: {len(result['uavsar_imgs'])} images")
+            if 'has_naip' in result and result['has_naip']:
+                imagery_status.append(f"NAIP: {len(result['naip_imgs'])} images")
+                
+            imagery_info = ", ".join(imagery_status) if imagery_status else "No imagery"
+            
+            print(f"Completed tile {overall_tile_index}/{total_tiles} (ID: {tile_id}): "
+                  f"UAV points: {xyz_uav.shape[0]:,}, 3DEP points: {xyz_dep.shape[0]:,}, {imagery_info}")
         else:
             print(f"Successfully processed tile {tile_id}: UAV points: {xyz_uav.shape[0]:,}, 3DEP points: {xyz_dep.shape[0]:,}")
         
@@ -600,6 +1245,10 @@ def process_bbox(args):
             del dep_pnt_attr
         if bbox_wgs84 is not None:
             del bbox_wgs84
+        if uavsar_data is not None:
+            del uavsar_data
+        if naip_data is not None:
+            del naip_data
             
         # Force garbage collection
         gc.collect()
@@ -617,7 +1266,7 @@ def process_chunk(
     total_chunks,
     start_date, 
     end_date, 
-    stac_source, 
+    lidar_stac_source, 
     bbox_crs, 
     max_threads, 
     output_dir, 
@@ -626,7 +1275,9 @@ def process_chunk(
     initial_retry_delay,
     current_tile_index=0,
     total_tiles=0,
-    verbose=False
+    verbose=False,
+    uavsar_stac_source=None,
+    naip_stac_source=None
 ):
     """
     Process a single chunk of tiles.
@@ -636,8 +1287,8 @@ def process_chunk(
     
     # Prepare arguments for parallel processing
     args_list = [
-        (i, tile_id, bbox, start_date, end_date, stac_source, bbox_crs, max_api_retries, initial_retry_delay,
-         current_tile_index + i, total_tiles, verbose)
+        (i, tile_id, bbox, start_date, end_date, lidar_stac_source, bbox_crs, max_api_retries, initial_retry_delay,
+         current_tile_index + i, total_tiles, verbose, uavsar_stac_source, naip_stac_source)
         for i, (tile_id, bbox) in enumerate(chunk, start=1)
     ]
     
@@ -714,7 +1365,7 @@ def process_tiles_from_geojson(
     tiles_geojson,
     start_date, 
     end_date, 
-    stac_source, 
+    lidar_stac_source, 
     bbox_crs="EPSG:32611", 
     max_threads=2,
     chunk_size=20,
@@ -722,24 +1373,48 @@ def process_tiles_from_geojson(
     sample_size=None,
     max_api_retries=5,
     initial_retry_delay=2,
-    retry_failed=True,  # New parameter to control retry behavior
-    verbose=False  # Control level of logging detail
+    retry_failed=True,
+    verbose=False,
+    uavsar_stac_source=None,
+    naip_stac_source=None
 ):
     """
-    Process LiDAR data using pre-defined tiles from a GeoJSON file.
+    Process LiDAR and imagery data using pre-defined tiles from a GeoJSON file.
     
     Parameters
     ----------
     tiles_geojson : str
         Path to GeoJSON file containing tile geometries.
+    start_date : str
+        Start date for filtering in YYYY-MM-DD format
+    end_date : str
+        End date for filtering in YYYY-MM-DD format
+    lidar_stac_source : str
+        Path to the local LiDAR STAC catalog
+    bbox_crs : str, optional
+        CRS of the tile bounding boxes. Default is "EPSG:32611"
+    max_threads : int, optional
+        Maximum number of parallel processes. Default is 2.
+    chunk_size : int, optional
+        Number of tiles to process in each chunk. Default is 20.
+    output_dir : str, optional
+        Directory to save output files. Default is "training_data_chunks".
     sample_size : int, optional
         Number of tiles to randomly sample from the input GeoJSON.
         If None, all tiles will be processed.
+    max_api_retries : int, optional
+        Maximum number of retry attempts for API calls. Default is 5.
+    initial_retry_delay : float, optional
+        Initial delay in seconds between retry attempts. Default is 2.
     retry_failed : bool, optional
         Whether to retry processing failed tiles after the initial processing is complete.
         Default is True.
     verbose : bool, optional
-        Control the level of logging detail. If False, only show completion logs.
+        Control the level of logging detail. Default is False.
+    uavsar_stac_source : str, optional
+        Path to the local UAVSAR STAC catalog. If None, UAVSAR imagery won't be processed.
+    naip_stac_source : str, optional
+        Path to the local NAIP STAC catalog. If None, NAIP imagery won't be processed.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Starting processing of {tiles_geojson}")
@@ -793,7 +1468,7 @@ def process_tiles_from_geojson(
             len(chunks),
             start_date, 
             end_date, 
-            stac_source, 
+            lidar_stac_source, 
             bbox_crs, 
             max_threads, 
             output_dir, 
@@ -802,7 +1477,9 @@ def process_tiles_from_geojson(
             initial_retry_delay,
             current_tile_index,
             total_tiles,
-            verbose
+            verbose,
+            uavsar_stac_source,
+            naip_stac_source
         )
         
         # Give the system a moment to recover between chunks
@@ -863,7 +1540,7 @@ def process_tiles_from_geojson(
                 len(retry_chunks),
                 start_date, 
                 end_date, 
-                stac_source, 
+                lidar_stac_source, 
                 bbox_crs, 
                 max(max_threads // 2, 1),  # Use fewer threads for retries
                 retry_output_dir, 
@@ -872,7 +1549,9 @@ def process_tiles_from_geojson(
                 initial_retry_delay * 2,  # Use longer initial delay for retries
                 0,  # Reset to 0 for retry chunks
                 len(failed_tiles),
-                verbose
+                verbose,
+                uavsar_stac_source,
+                naip_stac_source
             )
             
             # Give the system more time to recover between retry chunks
@@ -949,10 +1628,24 @@ if __name__ == "__main__":
     )
     
     parser.add_argument(
-        "--stac_source",
+        "--lidar_stac_source",
         type=str,
         default="local_stac/catalog.json",
-        help="Path to STAC catalog"
+        help="Path to LiDAR STAC catalog"
+    )
+    
+    parser.add_argument(
+        "--uavsar_stac_source",
+        type=str,
+        default=None,
+        help="Path to UAVSAR STAC catalog (optional)"
+    )
+    
+    parser.add_argument(
+        "--naip_stac_source",
+        type=str,
+        default=None,
+        help="Path to NAIP STAC catalog (optional)"
     )
     
     parser.add_argument(
@@ -1023,7 +1716,7 @@ if __name__ == "__main__":
         tiles_geojson=args.tiles_geojson, 
         start_date=args.start_date, 
         end_date=args.end_date, 
-        stac_source=args.stac_source, 
+        lidar_stac_source=args.lidar_stac_source, 
         bbox_crs="EPSG:32611", 
         max_threads=args.threads,
         chunk_size=args.chunk_size,
@@ -1031,6 +1724,8 @@ if __name__ == "__main__":
         sample_size=args.sample,
         max_api_retries=args.max_api_retries,
         initial_retry_delay=args.initial_retry_delay,
-        retry_failed=not args.no_retry_failed,  # By default, retry failed tiles unless --no-retry-failed is specified
-        verbose=args.verbose  # By default, less verbose output unless --verbose is specified
+        retry_failed=not args.no_retry_failed,
+        verbose=args.verbose,
+        uavsar_stac_source=args.uavsar_stac_source,
+        naip_stac_source=args.naip_stac_source
     )
