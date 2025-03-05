@@ -982,7 +982,46 @@ def create_3dep_stack(bbox, start_date, end_date, threads=4, target_crs=None):
             
         gc.collect()
 
+def voxel_downsample_mask(points, voxel_size_cm):
+    """
+    Creates a boolean mask for voxel grid downsampling.
+    Uses a vectorized approach with numpy's unique function.
+    
+    Parameters:
+      points (np.ndarray): (N,3) array of point coordinates in meters.
+      voxel_size_cm (float): Size of voxel (grid cell) in centimeters.
+    
+    Returns:
+      np.ndarray: Boolean mask where True indicates points to keep.
+    """
+    # Convert voxel size from centimeters to meters
+    voxel_size = voxel_size_cm / 100.0
+    
+    # Calculate the minimum coordinates for the entire point cloud
+    min_coords = np.min(points, axis=0)
+    
+    # Compute the voxel indices for each point
+    voxel_indices = np.floor((points - min_coords) / voxel_size).astype(int)
+    
+    # Create a single integer hash for each 3D voxel index
+    max_indices = np.max(voxel_indices, axis=0) + 1
+    hash_keys = (voxel_indices[:, 0] + 
+                voxel_indices[:, 1] * max_indices[0] + 
+                voxel_indices[:, 2] * max_indices[0] * max_indices[1])
+    
+    # Find unique voxels and the index of their first occurrence
+    _, unique_indices = np.unique(hash_keys, return_index=True)
+    
+    # Create boolean mask initialized to False
+    mask = np.zeros(len(points), dtype=bool)
+    
+    # Set True for the first occurrence of each voxel
+    mask[unique_indices] = True
+    
+    return mask
 
+
+    
 def process_bbox(args):
     """
     Process a single bounding box to retrieve and format LiDAR data and imagery data.
@@ -1002,6 +1041,9 @@ def process_bbox(args):
     # Extract imagery processing parameters if provided
     uavsar_stac_source = args[12] if len(args) > 12 else None
     naip_stac_source = args[13] if len(args) > 13 else None
+    
+    # Extract the voxel size parameter (in cm)
+    voxel_size_cm = args[14] if len(args) > 14 else 5.0  # Default to 5cm if not provided
     
     # Calculate the overall tile number for progress reporting
     overall_tile_index = current_tile_index + i
@@ -1029,7 +1071,8 @@ def process_bbox(args):
             end_date=end_date,
             stac_source=lidar_stac_source,
             bbox_crs=bbox_crs,
-            threads=1
+            threads=1,
+            target_crs = "EPSG:32611"
         )
         
         if not uav_pc or len(uav_pc) == 0:
@@ -1045,6 +1088,12 @@ def process_bbox(args):
             np.array([p['ReturnNumber'] for p in uav_pc[0]], dtype=np.float32),
             np.array([p['NumberOfReturns'] for p in uav_pc[0]], dtype=np.float32)
         ))
+        
+        # Generate the voxel downsampling mask
+        downsample_mask = voxel_downsample_mask(xyz_uav, voxel_size_cm)
+        
+        # Count how many points would be kept after downsampling
+        num_downsampled_points = np.sum(downsample_mask)
         
         # Clean up UAV point cloud data after extraction
         for pc in uav_pc:
@@ -1071,7 +1120,8 @@ def process_bbox(args):
                     bbox=bbox_wgs84,
                     start_date=start_date,
                     end_date=end_date,
-                    threads=1
+                    threads=1,
+                    target_crs = "EPSG:32611"
                 )
                 
                 # If we got here, the call was successful
@@ -1113,18 +1163,39 @@ def process_bbox(args):
         dep_pc = None
         gc.collect()
         
+        ## double the size of the bounding box to get imagery
+        # Calculate the centroid of the original bounding box
+        centroid_x = (bbox[0] + bbox[2]) / 2
+        centroid_y = (bbox[1] + bbox[3]) / 2
+
+        # Calculate the width and height of the original bounding box
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+
+        # Double the width and height to get the new bounding box dimensions
+        new_width = width * 2
+        new_height = height * 2
+
+        # Calculate the new bounding box coordinates
+        img_bbox = [
+            centroid_x - new_width / 2,
+            centroid_y - new_height / 2,
+            centroid_x + new_width / 2,
+            centroid_y + new_height / 2
+        ]
+
         # Step 3: Process UAVSAR imagery if catalog path is provided
         if uavsar_stac_source:
             if verbose:
                 print(f"Processing UAVSAR imagery for tile {tile_id}")
                 
             uavsar_data = process_imagery_data(
-                bbox=bbox,
+                bbox=img_bbox,
                 start_date=start_date,
                 end_date=end_date,
                 stac_source=uavsar_stac_source,
                 assets=["HHHH", "HHHV", "VVVV", "HVVV", "HVHV", "HHVV"],
-                out_resolution=6.17,
+                out_resolution=5,
                 bbox_crs=bbox_crs,
                 target_crs=bbox_crs,
                 resampling_method=Resampling.cubic,
@@ -1141,11 +1212,11 @@ def process_bbox(args):
                 print(f"Processing NAIP imagery for tile {tile_id}")
                 
             naip_data = process_imagery_data(
-                bbox=bbox,
+                bbox=img_bbox,
                 start_date=start_date,
                 end_date=end_date,
                 stac_source=naip_stac_source,
-                out_resolution=1.0,
+                out_resolution=0.5,
                 bbox_crs=bbox_crs,
                 target_crs=bbox_crs,
                 resampling_method=Resampling.cubic,
@@ -1164,6 +1235,8 @@ def process_bbox(args):
             'uav_points': torch.tensor(xyz_uav, dtype=torch.float32),
             'uav_pnt_attr': torch.tensor(uav_pnt_attr, dtype=torch.float32),
             'uav_meta': uav_meta,
+            'uav_downsample_mask': torch.from_numpy(downsample_mask),  # Add the downsampling mask
+            'voxel_size_cm': voxel_size_cm,  # Store the voxel size used
             'bbox': bbox,
             'tile_id': tile_id,
             'has_imagery': False,
@@ -1195,6 +1268,7 @@ def process_bbox(args):
         # Set the overall imagery flag
         result['has_imagery'] = result['has_uavsar'] or result['has_naip']
         
+        
         # Print progress with overall count if total_tiles is provided
         if total_tiles > 0:
             imagery_status = []
@@ -1205,10 +1279,14 @@ def process_bbox(args):
                 
             imagery_info = ", ".join(imagery_status) if imagery_status else "No imagery"
             
+            # Update the print statement to include downsampled point count
             print(f"Completed tile {overall_tile_index}/{total_tiles} (ID: {tile_id}): "
-                  f"UAV points: {xyz_uav.shape[0]:,}, 3DEP points: {xyz_dep.shape[0]:,}, {imagery_info}")
+                  f"UAV points: {xyz_uav.shape[0]:,}, Downsampled: {num_downsampled_points:,}, "
+                  f"3DEP points: {xyz_dep.shape[0]:,}, {imagery_info}")
         else:
-            print(f"Successfully processed tile {tile_id}: UAV points: {xyz_uav.shape[0]:,}, 3DEP points: {xyz_dep.shape[0]:,}")
+            # Update the print statement to include downsampled point count
+            print(f"Successfully processed tile {tile_id}: UAV points: {xyz_uav.shape[0]:,}, "
+                  f"Downsampled: {num_downsampled_points:,}, 3DEP points: {xyz_dep.shape[0]:,}")
         
         return result
         
@@ -1277,7 +1355,8 @@ def process_chunk(
     total_tiles=0,
     verbose=False,
     uavsar_stac_source=None,
-    naip_stac_source=None
+    naip_stac_source=None,
+    voxel_size_cm=5.0  # Add voxel_size_cm parameter with default value
 ):
     """
     Process a single chunk of tiles.
@@ -1285,12 +1364,13 @@ def process_chunk(
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Processing chunk {chunk_index}/{total_chunks}...")
     
-    # Prepare arguments for parallel processing
+    # Prepare arguments for parallel processing, including voxel_size_cm
     args_list = [
         (i, tile_id, bbox, start_date, end_date, lidar_stac_source, bbox_crs, max_api_retries, initial_retry_delay,
-         current_tile_index + i, total_tiles, verbose, uavsar_stac_source, naip_stac_source)
+         current_tile_index + i, total_tiles, verbose, uavsar_stac_source, naip_stac_source, voxel_size_cm)
         for i, (tile_id, bbox) in enumerate(chunk, start=1)
     ]
+    
     
     chunk_results = []
     future_to_tile = {}
@@ -1376,7 +1456,8 @@ def process_tiles_from_geojson(
     retry_failed=True,
     verbose=False,
     uavsar_stac_source=None,
-    naip_stac_source=None
+    naip_stac_source=None,
+    voxel_size_cm=5.0
 ):
     """
     Process LiDAR and imagery data using pre-defined tiles from a GeoJSON file.
@@ -1415,6 +1496,9 @@ def process_tiles_from_geojson(
         Path to the local UAVSAR STAC catalog. If None, UAVSAR imagery won't be processed.
     naip_stac_source : str, optional
         Path to the local NAIP STAC catalog. If None, NAIP imagery won't be processed.
+    voxel_size_cm : float, optional
+        Size of voxel (grid cell) in centimeters for point cloud downsampling. Default is 5.0 cm.
+
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Starting processing of {tiles_geojson}")
@@ -1551,7 +1635,8 @@ def process_tiles_from_geojson(
                 len(failed_tiles),
                 verbose,
                 uavsar_stac_source,
-                naip_stac_source
+                naip_stac_source,
+                voxel_size_cm
             )
             
             # Give the system more time to recover between retry chunks
@@ -1709,6 +1794,13 @@ if __name__ == "__main__":
         help="Enable verbose logging (shows more details during processing)"
     )
 
+    parser.add_argument(
+        "--voxel-size-cm",
+        type=float,
+        default=5.0,
+        help="Size of voxel (grid cell) in centimeters for point cloud downsampling (default: 5.0 cm)"
+    )
+    
     args = parser.parse_args()
     
     # Call processing function with the given tiles and other parameters
@@ -1727,5 +1819,6 @@ if __name__ == "__main__":
         retry_failed=not args.no_retry_failed,
         verbose=args.verbose,
         uavsar_stac_source=args.uavsar_stac_source,
-        naip_stac_source=args.naip_stac_source
+        naip_stac_source=args.naip_stac_source,
+        voxel_size_cm=args.voxel_size_cm  # Pass the voxel_size_cm parameter
     )

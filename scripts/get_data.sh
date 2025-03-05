@@ -51,8 +51,9 @@ python src/data_prep/generate_training_data.py\
  --tiles_geojson data/processed/tiles.geojson \
  --lidar_stac_source data/stac/uavlidar/catalog.json \
  --outdir data/output/test \
- --chunk_size 5 \
- --sample 5 \
+ --chunk_size 30 \
+ --sample 150 \
  --max-api-retries 20\
  --uavsar_stac_source data/stac/uavsar/catalog.json \
- --naip_stac_source data/stac/naip/catalog.json
+ --naip_stac_source data/stac/naip/catalog.json\
+ --voxel-size-cm 5
