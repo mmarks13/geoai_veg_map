@@ -56,3 +56,9 @@ python src/data_prep/generate_training_data.py\
  --threads 12 \
  --initial-voxel-size-cm 4 \
  --max-points 20000
+
+
+python src/data_prep/h5_loader.py \
+ --input_dir data/processed/training_data_chunks/sample_test \
+ --output_path data/processed/model_data/combined_training_data.pt
+ --verbose
