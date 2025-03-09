@@ -5,8 +5,6 @@ cd /home/jovyan/geoai_veg_map/
 export EARTHDATA_USERNAME=mmarks13
 export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
 
-
-
 # #UAVSAR
 # python src/data_prep/make_local_uavsar_stac.py\
 #   --bbox -120.127900 34.649349 -119.938771 34.775782 \
@@ -50,10 +48,11 @@ export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
 python src/data_prep/generate_training_data.py\
  --tiles_geojson data/processed/tiles.geojson \
  --lidar_stac_source data/stac/uavlidar/catalog.json \
- --outdir data/output/test \
- --chunk_size 30 \
- --sample 150 \
+ --outdir data/processed/training_data_chunks/ \
+ --chunk_size 200 \
  --max-api-retries 20\
  --uavsar_stac_source data/stac/uavsar/catalog.json \
  --naip_stac_source data/stac/naip/catalog.json\
- --voxel-size-cm 5
+ --threads 12 \
+ --initial-voxel-size-cm 4 \
+ --max-points 20000

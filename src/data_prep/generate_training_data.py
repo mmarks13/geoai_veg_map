@@ -2,9 +2,10 @@
 """
 Generate Combined LiDAR and Imagery Training Data from Tiles
 
-This script reads tile geometries from a GeoJSON file (created by create_tiles.py),
-retrieves LiDAR data for each tile from UAV and 3DEP sources, processes imagery data 
-from STAC catalogs (UAVSAR and NAIP), and saves the combined results as PyTorch tensors.
+This script reads tile geometries from a GeoJSON file,
+retrieves LiDAR data for each tile from UAV and 3DEP sources,
+processes imagery data from STAC catalogs (UAVSAR and NAIP),
+and saves the combined results as HDF5 files.
 
 The script handles:
 - UAV LiDAR point clouds from a local STAC catalog
@@ -17,25 +18,26 @@ For each tile, the script creates a dictionary containing:
 - Imagery data from both image sources (if available)
 - Associated metadata for all data sources
 
-All outputs are saved as PyTorch tensors for easy loading in deep learning models.
 
 Example usage:
     python src/data_prep/generate_training_data.py \\
      --tiles_geojson data/processed/tiles.geojson \\
      --lidar_stac_source data/stac/uavlidar/catalog.json \\
      --outdir data/output/test \\
-     --chunk_size 30 \\
+     --chunk_size 30
      --sample 4 \\
      --max-api-retries 20 \\
      --uavsar_stac_source data/stac/uavsar/catalog.json \\
-     --naip_stac_source data/stac/naip/catalog.json
+     --naip_stac_source data/stac/naip/catalog.json \\
+     --threads 12 \\
+     --initial-voxel-size-cm 4 \\
+     --max-points 20000
 """
 
 import os
 import gc
 import json
 import math
-import torch
 import numpy as np
 import geopandas as gpd
 import xarray as xr
@@ -44,6 +46,7 @@ from dask import delayed
 import time
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as mp
 import rasterio
 from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_origin
@@ -58,7 +61,10 @@ import planetary_computer
 from stackstac import stack
 import pandas as pd
 import copy
+import h5py
 
+# Configure environment
+os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'  # Helps with network filesystems
 
 def bboxes_intersect(bbox1, bbox2):
     """
@@ -185,8 +191,21 @@ def create_stac_stack(bbox, start_date, end_date, stac_source,
         if verbose:
             print(f"Found {len(items)} items between {start_date} and {end_date} that intersect with the bounding box")
         
-        # 5. Sort items by datetime
-        items.sort(key=lambda x: x.datetime)
+        # 5. Sort items and metadata by datetime
+        if item_metadata:
+            # Create a list of (item, metadata) pairs
+            combined = list(zip(items, item_metadata))
+            
+            # Sort the combined list by the datetime of the item
+            combined.sort(key=lambda x: x[0].datetime)
+            
+            # Unpack the sorted pairs back into separate lists
+            items, item_metadata = zip(*combined)
+            items = list(items)  # Convert back to list if needed
+            item_metadata = list(item_metadata)
+        else:
+            # Sort only items if there's no metadata (shouldn't happen)
+            items.sort(key=lambda x: x.datetime)
         
         # 6. Determine target CRS if not provided
         if target_crs is None:
@@ -427,23 +446,7 @@ def _process_multiband_stack(items, item_metadata, reproj_bounds, target_crs, as
 
 def convert_stack_to_tensors(data_stack, metadata_list, bbox, resolution):
     """
-    Convert xarray DataArray from create_stac_stack() to a dictionary of torch tensors with metadata.
-    
-    Parameters:
-    -----------
-    data_stack : xarray.DataArray
-        The stacked imagery from create_stac_stack()
-    metadata_list : list
-        List of metadata dictionaries for each item from create_stac_stack()
-    bbox : list or tuple
-        The bounding box used in the create_stac_stack() call [xmin, ymin, xmax, ymax]
-    resolution : float
-        The output resolution used in the create_stac_stack() call
-        
-    Returns:
-    --------
-    dict
-        A dictionary containing the imagery as torch tensors and associated metadata
+    Convert xarray DataArray from create_stac_stack() to a dictionary with NumPy arrays and metadata.
     """
     if data_stack is None:
         return None
@@ -451,24 +454,22 @@ def convert_stack_to_tensors(data_stack, metadata_list, bbox, resolution):
     # Get the date and id attributes from the xarray
     times = data_stack.time.values
     
-    # Create a dictionary to hold the tensors and metadata
+    # Create a dictionary to hold the arrays and metadata
     result = {
         'imgs': [],
         'imgs_meta': [],
-        'bbox': bbox,
-        'resolution': resolution
+        'bbox': bbox,  # This is the image bbox, which differs from the point cloud bbox
+        'resolution': resolution,
+        'img_bbox': bbox  # Add this explicit field to distinguish from point cloud bbox
     }
     
-    # Convert each time slice to a torch tensor and capture metadata
+    # Convert each time slice to a numpy array and capture metadata
     for i, time in enumerate(times):
         # Extract data for this time
         img_data = data_stack.sel(time=time).values
         
-        # Convert to torch tensor - shape is (band, y, x)
-        img_tensor = torch.tensor(img_data, dtype=torch.float32)
-        
         # Add to imgs list
-        result['imgs'].append(img_tensor)
+        result['imgs'].append(img_data)
         
         # Parse datetime
         if isinstance(time, np.datetime64):
@@ -481,17 +482,18 @@ def convert_stack_to_tensors(data_stack, metadata_list, bbox, resolution):
         if i < len(metadata_list):
             item_meta = metadata_list[i]
         
-        # Create metadata entry, combining metadata from the list with xarray information
+        # Create metadata entry
         bands = data_stack.band.values if 'band' in data_stack.dims else np.array([1])
         
         img_metadata = {
             'id': item_meta.get('id', f'item_{i}'),
             'date': date_str,
             'datetime': pd.Timestamp(time).isoformat(),
-            'bbox': bbox,
+            'bbox': bbox,  # Explicitly include the bbox for this image
+            'img_bbox': bbox,  # Add this alias for clarity
             'resolution': resolution,
             'bands': list(bands),
-            'shape': img_tensor.shape,
+            'shape': img_data.shape,
             'index': i
         }
         
@@ -503,13 +505,11 @@ def convert_stack_to_tensors(data_stack, metadata_list, bbox, resolution):
         # Add to imgs_meta list
         result['imgs_meta'].append(img_metadata)
     
-    # Consolidate tensors into a single batch tensor if all have the same shape
-    if all(tensor.shape == result['imgs'][0].shape for tensor in result['imgs']):
-        result['imgs_tensor'] = torch.stack(result['imgs'])
+    # Create a stacked array if all images have the same shape
+    if all(arr.shape == result['imgs'][0].shape for arr in result['imgs']):
+        result['imgs_array'] = np.stack(result['imgs'])
     
     return result
-
-
 
 
 def process_imagery_data(bbox, start_date, end_date, stac_source, assets=None, out_resolution=0.5, 
@@ -523,7 +523,7 @@ def process_imagery_data(bbox, start_date, end_date, stac_source, assets=None, o
     Returns:
     --------
     dict
-        A dictionary containing the imagery as torch tensors and associated metadata
+        A dictionary containing the imagery as tensors and associated metadata
     """
     # Set default resampling method if none provided
     if resampling_method is None:
@@ -543,50 +543,48 @@ def process_imagery_data(bbox, start_date, end_date, stac_source, assets=None, o
         is_multiband=is_multiband,
         verbose=verbose
     )
-    
+
     # Convert to tensors and return
     return convert_stack_to_tensors(data_stack, metadata_list, bbox, out_resolution)
 
 
-
-
-def combine_imagery_pointcloud(imagery_data, pointcloud_data):
-    """
-    Combine imagery tensor dictionary with point cloud tensor dictionary.
+# def combine_imagery_pointcloud(imagery_data, pointcloud_data):
+#     """
+#     Combine imagery tensor dictionary with point cloud tensor dictionary.
     
-    Parameters:
-    -----------
-    imagery_data : dict
-        Dictionary containing imagery tensors and metadata from convert_stack_to_tensors()
-    pointcloud_data : dict
-        Dictionary containing point cloud tensors and metadata from process_bbox()
+#     Parameters:
+#     -----------
+#     imagery_data : dict
+#         Dictionary containing imagery tensors and metadata from convert_stack_to_tensors()
+#     pointcloud_data : dict
+#         Dictionary containing point cloud tensors and metadata from process_bbox()
         
-    Returns:
-    --------
-    dict
-        A combined dictionary with both imagery and point cloud data
-    """
-    if imagery_data is None or pointcloud_data is None:
-        print("Error: Either imagery data or point cloud data is None.")
-        return None
+#     Returns:
+#     --------
+#     dict
+#         A combined dictionary with both imagery and point cloud data
+#     """
+#     if imagery_data is None or pointcloud_data is None:
+#         print("Error: Either imagery data or point cloud data is None.")
+#         return None
     
-    # Create a deep copy to avoid modifying the originals
-    combined_data = copy.deepcopy(pointcloud_data)
+#     # Create a deep copy to avoid modifying the originals
+#     combined_data = copy.deepcopy(pointcloud_data)
     
-    # Add imagery data
-    combined_data['imgs'] = imagery_data['imgs']
-    combined_data['imgs_meta'] = imagery_data['imgs_meta']
-    combined_data['img_resolution'] = imagery_data['resolution']
+#     # Add imagery data
+#     combined_data['imgs'] = imagery_data['imgs']
+#     combined_data['imgs_meta'] = imagery_data['imgs_meta']
+#     combined_data['img_resolution'] = imagery_data['resolution']
     
-    # If we have a stacked tensor, add it
-    if 'imgs_tensor' in imagery_data:
-        combined_data['imgs_tensor'] = imagery_data['imgs_tensor']
+#     # If we have a stacked tensor, add it
+#     if 'imgs_tensor' in imagery_data:
+#         combined_data['imgs_tensor'] = imagery_data['imgs_tensor']
     
-    # Add validation flag - True if both point cloud and imagery data are present
-    combined_data['has_imagery'] = True
-    combined_data['has_pointcloud'] = True
+#     # Add validation flag - True if both point cloud and imagery data are present
+#     combined_data['has_imagery'] = True
+#     combined_data['has_pointcloud'] = True
     
-    return combined_data
+#     return combined_data
 
 
 def bounding_box_to_geojson(bbox):
@@ -646,7 +644,7 @@ def calculate_geoid_undulation(x, y, input_crs="EPSG:32611"):
         return 0  # Return default value in case of error
 
 
-def create_pointcloud_stack(bbox, start_date, end_date, stac_source, threads=4,
+def create_pointcloud_stack(bbox, start_date, end_date, stac_source, threads=8,
                             bbox_crs="EPSG:4326", target_crs=None):
     """
     Create a stack of point clouds from STAC items filtered by date and bounding box.
@@ -817,7 +815,7 @@ def create_pointcloud_stack(bbox, start_date, end_date, stac_source, threads=4,
         gc.collect()
 
 
-def create_3dep_stack(bbox, start_date, end_date, threads=4, target_crs=None):
+def create_3dep_stack(bbox, start_date, end_date, threads=8, target_crs=None):
     """
     Create a stack of point clouds from 3DEP STAC items.
     
@@ -982,73 +980,456 @@ def create_3dep_stack(bbox, start_date, end_date, threads=4, target_crs=None):
             
         gc.collect()
 
-def voxel_downsample_mask(points, voxel_size_cm):
+def voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list):
     """
-    Creates a boolean mask for voxel grid downsampling.
-    Uses a vectorized approach with numpy's unique function.
+    Creates boolean masks for voxel grid downsampling for each value in max_points_list.
+    For each maximum point count, the function adjusts the voxel size until the
+    downsampled point cloud has no more than the specified number of points.
     
     Parameters:
-      points (np.ndarray): (N,3) array of point coordinates in meters.
-      voxel_size_cm (float): Size of voxel (grid cell) in centimeters.
+        points (np.ndarray): (N, 3) array of point coordinates in meters.
+        initial_voxel_size_cm (float): The starting voxel size in centimeters.
+        max_points_list (List[int]): A list of maximum allowed number of points for the downsampled cloud.
     
     Returns:
-      np.ndarray: Boolean mask where True indicates points to keep.
+        Tuple[List[np.ndarray], List[float]]:
+            - masks: List of boolean masks, one for each maximum point threshold.
+            - voxel_sizes: List of voxel sizes (in centimeters) used for each mask.
     """
-    # Convert voxel size from centimeters to meters
-    voxel_size = voxel_size_cm / 100.0
-    
-    # Calculate the minimum coordinates for the entire point cloud
+    # Precompute values that remain constant for all iterations
     min_coords = np.min(points, axis=0)
+    points_shifted = points - min_coords  # Precompute shifted points
     
-    # Compute the voxel indices for each point
-    voxel_indices = np.floor((points - min_coords) / voxel_size).astype(int)
+    # Sort max_points_list in descending order to efficiently reuse voxel sizes
+    sorted_indices = np.argsort(max_points_list)[::-1]
+    sorted_max_points = [max_points_list[i] for i in sorted_indices]
     
-    # Create a single integer hash for each 3D voxel index
-    max_indices = np.max(voxel_indices, axis=0) + 1
-    hash_keys = (voxel_indices[:, 0] + 
-                voxel_indices[:, 1] * max_indices[0] + 
-                voxel_indices[:, 2] * max_indices[0] * max_indices[1])
+    masks = [None] * len(max_points_list)
+    voxel_sizes = [None] * len(max_points_list)
     
-    # Find unique voxels and the index of their first occurrence
-    _, unique_indices = np.unique(hash_keys, return_index=True)
+    # Track the previous voxel size for reuse
+    prev_voxel_size_cm = initial_voxel_size_cm
     
-    # Create boolean mask initialized to False
-    mask = np.zeros(len(points), dtype=bool)
+    for i, max_points in enumerate(sorted_max_points):
+        # Use binary search for optimal voxel size
+        min_voxel_size = prev_voxel_size_cm  # Start from previous result
+        max_voxel_size = prev_voxel_size_cm * 10  # Reasonable upper bound
+        
+        best_mask = None
+        best_voxel_size = None
+        best_count = float('inf')
+        
+        # Helper function to compute voxelized mask for a given size
+        def compute_voxel_mask(voxel_size_cm):
+            voxel_size = voxel_size_cm / 100.0  # Convert to meters
+            
+            # Compute voxel indices for each point
+            voxel_indices = np.floor(points_shifted / voxel_size).astype(int)
+            
+            # Optimized hashing to avoid integer overflow
+            # Use a tuple-based approach for smaller point clouds
+            if len(points) < 1_000_000:
+                # Dictionary-based approach for better memory performance
+                voxel_dict = {}
+                for i, (point, voxel_idx) in enumerate(zip(points, voxel_indices)):
+                    voxel_key = tuple(voxel_idx)
+                    if voxel_key not in voxel_dict:
+                        voxel_dict[voxel_key] = []
+                    voxel_dict[voxel_key].append(i)
+                
+                # Create mask
+                mask = np.zeros(len(points), dtype=bool)
+                for indices in voxel_dict.values():
+                    if not indices:
+                        continue
+                    # Compute centroid of points in this voxel
+                    voxel_points = points[indices]
+                    centroid = np.mean(voxel_points, axis=0)
+                    # Use squared distance (faster than np.linalg.norm)
+                    distances = np.sum((voxel_points - centroid)**2, axis=1)
+                    closest_idx = indices[np.argmin(distances)]
+                    mask[closest_idx] = True
+            else:
+                # For very large point clouds, use a more memory-efficient approach
+                # with vectorized operations where possible
+                # Create a unique hash for each voxel using bit shifts
+                hash_keys = (voxel_indices[:, 0].astype(np.int64) | 
+                           (voxel_indices[:, 1].astype(np.int64) << 21) | 
+                           (voxel_indices[:, 2].astype(np.int64) << 42))
+                
+                # Find unique voxels and group assignment
+                unique_keys, inverse, counts = np.unique(hash_keys, return_inverse=True, return_counts=True)
+                n_voxels = len(unique_keys)
+                
+                # Vectorized centroid calculation
+                centroids = np.zeros((n_voxels, 3))
+                for dim in range(3):
+                    np.add.at(centroids[:, dim], inverse, points[:, dim])
+                centroids /= counts[:, None]
+                
+                # Create mask - find closest point to each centroid
+                mask = np.zeros(len(points), dtype=bool)
+                for voxel_idx in range(n_voxels):
+                    voxel_points_idx = np.where(inverse == voxel_idx)[0]
+                    if len(voxel_points_idx) > 0:
+                        # Squared Euclidean distance
+                        distances = np.sum((points[voxel_points_idx] - centroids[voxel_idx])**2, axis=1)
+                        closest_idx = voxel_points_idx[np.argmin(distances)]
+                        mask[closest_idx] = True
+            
+            return mask, np.sum(mask)
+        
+        # Use binary search to find optimal voxel size
+        iterations = 0
+        max_iterations = 10  # Prevent infinite loops
+        
+        while max_voxel_size - min_voxel_size > 0.5 and iterations < max_iterations:
+            iterations += 1
+            current_voxel_size_cm = (min_voxel_size + max_voxel_size) / 2
+            
+            mask, point_count = compute_voxel_mask(current_voxel_size_cm)
+            
+            if point_count <= max_points:
+                # This voxel size works, try a smaller size
+                if point_count > best_count or best_count > max_points:
+                    best_mask = mask
+                    best_voxel_size = current_voxel_size_cm
+                    best_count = point_count
+                max_voxel_size = current_voxel_size_cm
+            else:
+                # Too many points, try a larger voxel size
+                min_voxel_size = current_voxel_size_cm
+        
+        # If binary search didn't converge, use linear increase as fallback
+        if best_mask is None or best_count > max_points:
+            current_voxel_size_cm = min_voxel_size
+            while True:
+                mask, point_count = compute_voxel_mask(current_voxel_size_cm)
+                if point_count <= max_points:
+                    best_mask = mask
+                    best_voxel_size = current_voxel_size_cm
+                    break
+                # Adaptive increment to converge faster
+                current_voxel_size_cm += 2 * (point_count / max_points)
+        
+        # Store the result in the original order
+        original_idx = sorted_indices[i]
+        masks[original_idx] = best_mask
+        voxel_sizes[original_idx] = best_voxel_size
+        
+        # Save this voxel size for the next iteration
+        prev_voxel_size_cm = best_voxel_size
     
-    # Set True for the first occurrence of each voxel
-    mask[unique_indices] = True
-    
-    return mask
+    return masks, voxel_sizes
 
 
+
+import numpy as np
+
+def anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list, vertical_ratio=0.3):
+    """
+    Creates boolean masks for anisotropic voxel grid downsampling for each value in max_points_list.
+    Uses different voxel sizes in horizontal (x,y) vs vertical (z) directions.
     
+    Parameters:
+        points (np.ndarray): (N, 3) array of point coordinates in meters.
+        initial_voxel_size_cm (float): The starting voxel size in centimeters for horizontal dimensions.
+        max_points_list (List[int]): A list of maximum allowed number of points for the downsampled cloud.
+        vertical_ratio (float): Ratio of vertical to horizontal voxel size (default 0.3).
+                               Lower values preserve more vertical detail.
+    
+    Returns:
+        Tuple[List[np.ndarray], List[float]]:
+            - masks: List of boolean masks, one for each maximum point threshold.
+            - voxel_sizes: List of horizontal voxel sizes (in centimeters) used for each mask.
+              Note: vertical voxel size = horizontal_size * vertical_ratio
+    """
+    # Precompute values that remain constant for all iterations
+    min_coords = np.min(points, axis=0)
+    points_shifted = points - min_coords  # Precompute shifted points
+    
+    # Sort max_points_list in descending order to efficiently reuse voxel sizes
+    sorted_indices = np.argsort(max_points_list)[::-1]
+    sorted_max_points = [max_points_list[i] for i in sorted_indices]
+    
+    masks = [None] * len(max_points_list)
+    voxel_sizes = [None] * len(max_points_list)
+    
+    # Track the previous voxel size for reuse
+    prev_voxel_size_cm = initial_voxel_size_cm
+    
+    # Cache computed masks to avoid redundant calculations
+    voxel_size_cache = {}
+    
+    for i, max_points in enumerate(sorted_max_points):
+        original_idx = sorted_indices[i]
+
+        # Check if the original point cloud already has fewer points than max_points
+        if len(points) <= max_points:
+            # Return a mask of all True values
+            masks[original_idx] = np.ones(len(points), dtype=bool)
+            voxel_sizes[original_idx] = initial_voxel_size_cm
+            continue  # Skip to the next threshold
+
+
+        # Use binary search for optimal voxel size
+        min_voxel_size = prev_voxel_size_cm  # Start from previous result
+        max_voxel_size = prev_voxel_size_cm * 10  # Reasonable upper bound
+        
+        best_mask = None
+        best_voxel_size = None
+        best_count = float('inf')
+        
+        # Helper function to compute voxelized mask for a given size
+        def compute_voxel_mask(horizontal_voxel_size_cm):
+            # Check if we've already computed this voxel size
+            if horizontal_voxel_size_cm in voxel_size_cache:
+                return voxel_size_cache[horizontal_voxel_size_cm]
+                
+            # Convert to meters
+            horizontal_voxel_size = horizontal_voxel_size_cm / 100.0
+            vertical_voxel_size = horizontal_voxel_size * vertical_ratio
+            
+            # Create anisotropic voxel size array [x_size, y_size, z_size]
+            voxel_sizes = np.array([horizontal_voxel_size, horizontal_voxel_size, vertical_voxel_size])
+            
+            # Compute voxel indices with different scales for each dimension
+            voxel_indices = np.floor(points_shifted / voxel_sizes).astype(int)
+            
+            # Optimized hashing to avoid integer overflow
+            # Use a tuple-based approach for smaller point clouds
+            if len(points) < 1_000_000:
+                # Dictionary-based approach for better memory performance
+                voxel_dict = {}
+                for idx, (point, voxel_idx) in enumerate(zip(points, voxel_indices)):
+                    voxel_key = tuple(voxel_idx)
+                    if voxel_key not in voxel_dict:
+                        voxel_dict[voxel_key] = []
+                    voxel_dict[voxel_key].append(idx)
+                
+                # Create mask
+                mask = np.zeros(len(points), dtype=bool)
+                for indices in voxel_dict.values():
+                    if not indices:
+                        continue
+                    # Compute centroid of points in this voxel
+                    voxel_points = points[indices]
+                    centroid = np.mean(voxel_points, axis=0)
+                    # Use squared distance (faster than np.linalg.norm)
+                    distances = np.sum((voxel_points - centroid)**2, axis=1)
+                    closest_idx = indices[np.argmin(distances)]
+                    mask[closest_idx] = True
+            else:
+                # For very large point clouds, use a more memory-efficient approach
+                # with vectorized operations where possible
+                # Create a unique hash for each voxel using bit shifts
+                hash_keys = (voxel_indices[:, 0].astype(np.int64) | 
+                           (voxel_indices[:, 1].astype(np.int64) << 21) | 
+                           (voxel_indices[:, 2].astype(np.int64) << 42))
+                
+                # Find unique voxels and group assignment
+                unique_keys, inverse, counts = np.unique(hash_keys, return_inverse=True, return_counts=True)
+                n_voxels = len(unique_keys)
+                
+                # Vectorized centroid calculation
+                centroids = np.zeros((n_voxels, 3))
+                for dim in range(3):
+                    np.add.at(centroids[:, dim], inverse, points[:, dim])
+                centroids /= counts[:, None]
+                
+                # Create mask - find closest point to each centroid
+                mask = np.zeros(len(points), dtype=bool)
+                for voxel_idx in range(n_voxels):
+                    voxel_points_idx = np.where(inverse == voxel_idx)[0]
+                    if len(voxel_points_idx) > 0:
+                        # Squared Euclidean distance
+                        distances = np.sum((points[voxel_points_idx] - centroids[voxel_idx])**2, axis=1)
+                        closest_idx = voxel_points_idx[np.argmin(distances)]
+                        mask[closest_idx] = True
+            
+            result = (mask, np.sum(mask))
+            # Cache the result for this voxel size
+            voxel_size_cache[horizontal_voxel_size_cm] = result
+            return result
+        
+        # Use binary search to find optimal voxel size
+        iterations = 0
+        max_iterations = 10  # Prevent infinite loops
+        
+        while max_voxel_size - min_voxel_size > 0.5 and iterations < max_iterations:
+            iterations += 1
+            current_voxel_size_cm = (min_voxel_size + max_voxel_size) / 2
+            
+            mask, point_count = compute_voxel_mask(current_voxel_size_cm)
+            
+            if point_count <= max_points:
+                # This voxel size works, try a smaller size
+                if point_count > best_count or best_count > max_points:
+                    best_mask = mask
+                    best_voxel_size = current_voxel_size_cm
+                    best_count = point_count
+                max_voxel_size = current_voxel_size_cm
+            else:
+                # Too many points, try a larger voxel size
+                min_voxel_size = current_voxel_size_cm
+        
+        # If binary search didn't converge, use adaptive linear increase as fallback
+        if best_mask is None or best_count > max_points:
+            current_voxel_size_cm = min_voxel_size
+            
+            # Start with small step sizes and gradually increase if needed
+            step_factor = 0.5
+            max_step = 5.0
+            
+            while True:
+                mask, point_count = compute_voxel_mask(current_voxel_size_cm)
+                
+                if point_count <= max_points:
+                    best_mask = mask
+                    best_voxel_size = current_voxel_size_cm
+                    break
+                    
+                # Adaptive increment to converge faster
+                step_size = min(max_step, step_factor * (point_count / max_points))
+                current_voxel_size_cm += step_size
+                step_factor *= 1.2  # Gradually increase step factor
+        
+        # Store the result in the original order
+        original_idx = sorted_indices[i]
+        masks[original_idx] = best_mask
+        voxel_sizes[original_idx] = best_voxel_size
+        
+        # Save this voxel size for the next iteration
+        prev_voxel_size_cm = best_voxel_size
+    
+    return masks, voxel_sizes
+
+
+
+def remove_duplicate_images(images_data, tolerance=1e-6, verbose=False):
+    """
+    Removes duplicate images from imagery data dictionary and logs information
+    about identified duplicates.
+    
+    Parameters:
+    -----------
+    images_data : dict
+        Dictionary containing imagery data from process_imagery_data()
+    tolerance : float, optional
+        Tolerance for considering timestamps as duplicate (in seconds)
+    verbose : bool, optional
+        Whether to print additional debug information
+        
+    Returns:
+    --------
+    dict
+        The same dictionary with duplicates removed
+    """
+    if not images_data or 'imgs' not in images_data or not images_data['imgs']:
+        return images_data
+    
+    # Create a deep copy to avoid modifying the original
+    result = copy.deepcopy(images_data)
+    
+    # Track unique identifiers for images
+    unique_ids = set()
+    
+    # Track indices to keep and which ones are duplicates
+    indices_to_keep = []
+    duplicate_info = []
+    
+    # Check each image
+    for i, meta in enumerate(result['imgs_meta']):
+        # print(meta)
+        # Try multiple ways to identify duplicates
+        img_id = meta.get('id', 'unknown_id')
+        img_datetime = meta.get('datetime', 'unknown_datetime')
+        img_date = meta.get('date', 'unknown_date')
+        
+        # Convert to hash for easier comparison 
+        identifier = f"{img_id}_{img_datetime}"
+        # print(identifier)
+        # If we haven't seen this image before, keep it
+        if identifier not in unique_ids:
+            unique_ids.add(identifier)
+            indices_to_keep.append(i)
+        else:
+            # Log information about the duplicate
+            duplicate_info.append({
+                'index': i,
+                'id': img_id,
+                'datetime': img_datetime,
+                'date': img_date,
+                'shape': result['imgs'][i].shape if i < len(result['imgs']) else None
+            })
+    
+    # If we found duplicates, filter the data and log details
+    if len(duplicate_info) > 0:
+        # Determine the data type (UAVSAR or NAIP) for more informative logging
+        data_type = "imagery"
+        if 'imgs_meta' in result and result['imgs_meta']:
+            # Try to determine the type from metadata
+            first_meta = result['imgs_meta'][0]
+            if 'collection' in first_meta:
+                if 'uavsar' in first_meta['collection'].lower():
+                    data_type = "UAVSAR"
+                elif 'naip' in first_meta['collection'].lower():
+                    data_type = "NAIP"
+        
+        print(f"Found {len(duplicate_info)} duplicate {data_type} images out of {len(result['imgs'])} total images")
+        
+        # Log each duplicate with detailed information
+        if verbose or len(duplicate_info) <= 10:  # Show all if <= 10 duplicates or verbose mode
+            for dup in duplicate_info:
+                print(f"  Duplicate {data_type} image at index {dup['index']}: ID={dup['id']}, " 
+                      f"Date={dup['date']}, Datetime={dup['datetime']}")
+        else:  # Only show first 5 and last 5 if more than 10 duplicates
+            for dup in duplicate_info[:5]:
+                print(f"  Duplicate {data_type} image at index {dup['index']}: ID={dup['id']}, " 
+                      f"Date={dup['date']}, Datetime={dup['datetime']}")
+            print(f"  ... and {len(duplicate_info) - 10} more duplicates ...")
+            for dup in duplicate_info[-5:]:
+                print(f"  Duplicate {data_type} image at index {dup['index']}: ID={dup['id']}, " 
+                      f"Date={dup['date']}, Datetime={dup['datetime']}")
+        
+        # Filter imgs and imgs_meta
+        result['imgs'] = [result['imgs'][i] for i in indices_to_keep]
+        result['imgs_meta'] = [result['imgs_meta'][i] for i in indices_to_keep]
+        
+        # Recreate stacked array if it exists
+        if 'imgs_array' in result:
+            if indices_to_keep:
+                result['imgs_array'] = np.stack([result['imgs'][i] for i in indices_to_keep])
+            else:
+                del result['imgs_array']
+        
+        print(f"After removing duplicates: {len(result['imgs'])} {data_type} images remaining")
+    
+    return result
+
+
+
 def process_bbox(args):
     """
     Process a single bounding box to retrieve and format LiDAR data and imagery data.
+    Returns data as NumPy arrays instead of PyTorch tensors.
     """
-    # Extract the base arguments
+    # Extract arguments
     i, tile_id, bbox, start_date, end_date, lidar_stac_source, bbox_crs = args[:7]
-    
-    # Extract optional retry parameters if provided
     max_retries = args[7] if len(args) > 7 else 5
     initial_delay = args[8] if len(args) > 8 else 2
-    
-    # Extract progress tracking information
     current_tile_index = args[9] if len(args) > 9 else 0
     total_tiles = args[10] if len(args) > 10 else 0
     verbose = args[11] if len(args) > 11 else False
-    
-    # Extract imagery processing parameters if provided
     uavsar_stac_source = args[12] if len(args) > 12 else None
     naip_stac_source = args[13] if len(args) > 13 else None
-    
-    # Extract the voxel size parameter (in cm)
-    voxel_size_cm = args[14] if len(args) > 14 else 5.0  # Default to 5cm if not provided
+    initial_voxel_size_cm = args[14] if len(args) > 14 else 5.0
+    max_points_list = args[15] if len(args) > 15 else [20000, 30000, 40000]
     
     # Calculate the overall tile number for progress reporting
     overall_tile_index = current_tile_index + i
     
-    # Set up proper cleanup/resource tracking
+    # Resource tracking variables
     uav_pc = None
     dep_pc = None
     transformer = None
@@ -1064,15 +1445,15 @@ def process_bbox(args):
         if verbose:
             print(f"Processing tile {tile_id} (index {i}): {bbox}")
         
-        # Step 1: UAV LiDAR point clouds with metadata
+        # Step 1: UAV LiDAR point clouds
         uav_pc, uav_meta = create_pointcloud_stack(
             bbox=bbox,
             start_date=start_date,
             end_date=end_date,
             stac_source=lidar_stac_source,
             bbox_crs=bbox_crs,
-            threads=1,
-            target_crs = "EPSG:32611"
+            threads=10,
+            target_crs="EPSG:32611"
         )
         
         if not uav_pc or len(uav_pc) == 0:
@@ -1082,18 +1463,18 @@ def process_bbox(args):
         # Extract x,y,z values from the UAV point cloud
         xyz_uav = np.array([(p['X'], p['Y'], p['Z']) for p in uav_pc[0]], dtype=np.float32)
         
-        # Extract and combine point attributes (Intensity, ReturnNumber, NumberOfReturns)
+        # Extract and combine point attributes
         uav_pnt_attr = np.column_stack((
             np.array([p['Intensity'] for p in uav_pc[0]], dtype=np.float32),
             np.array([p['ReturnNumber'] for p in uav_pc[0]], dtype=np.float32),
             np.array([p['NumberOfReturns'] for p in uav_pc[0]], dtype=np.float32)
         ))
         
-        # Generate the voxel downsampling mask
-        downsample_mask = voxel_downsample_mask(xyz_uav, voxel_size_cm)
+        # Generate the voxel downsampling masks with different thresholds
+        downsample_masks, voxel_sizes = anisotropic_voxel_downsample_masks(xyz_uav, initial_voxel_size_cm, max_points_list, vertical_ratio=0.3)
         
-        # Count how many points would be kept after downsampling
-        num_downsampled_points = np.sum(downsample_mask)
+        # Count how many points would be kept with each mask
+        num_downsampled_points = [np.sum(mask) for mask in downsample_masks]
         
         # Clean up UAV point cloud data after extraction
         for pc in uav_pc:
@@ -1109,7 +1490,6 @@ def process_bbox(args):
         dep_pc = None
         dep_meta = None
         attempt = 0
-        last_exception = None
         
         while attempt < max_retries and dep_pc is None:
             try:
@@ -1120,11 +1500,10 @@ def process_bbox(args):
                     bbox=bbox_wgs84,
                     start_date=start_date,
                     end_date=end_date,
-                    threads=1,
-                    target_crs = "EPSG:32611"
+                    threads=8,
+                    target_crs="EPSG:32611"
                 )
                 
-                # If we got here, the call was successful
                 if attempt > 0 and verbose:
                     print(f"✅ 3DEP data retrieval succeeded after {attempt+1} attempts for tile {tile_id}!")
                     
@@ -1132,7 +1511,6 @@ def process_bbox(args):
                 last_exception = e
                 
                 if attempt < max_retries - 1:
-                    # Calculate backoff time with exponential increase
                     sleep_time = initial_delay * (2 ** attempt)
                     time.sleep(sleep_time)
                 else:
@@ -1140,7 +1518,6 @@ def process_bbox(args):
                 
                 attempt += 1
         
-        # If all attempts failed, return None
         if dep_pc is None:
             print(f"Failed to retrieve 3DEP data for tile {tile_id} after {max_retries} attempts")
             return None
@@ -1163,20 +1540,13 @@ def process_bbox(args):
         dep_pc = None
         gc.collect()
         
-        ## double the size of the bounding box to get imagery
-        # Calculate the centroid of the original bounding box
+        # Calculate expanded bounding box for imagery (double size)
         centroid_x = (bbox[0] + bbox[2]) / 2
         centroid_y = (bbox[1] + bbox[3]) / 2
-
-        # Calculate the width and height of the original bounding box
         width = bbox[2] - bbox[0]
         height = bbox[3] - bbox[1]
-
-        # Double the width and height to get the new bounding box dimensions
         new_width = width * 2
         new_height = height * 2
-
-        # Calculate the new bounding box coordinates
         img_bbox = [
             centroid_x - new_width / 2,
             centroid_y - new_height / 2,
@@ -1184,7 +1554,7 @@ def process_bbox(args):
             centroid_y + new_height / 2
         ]
 
-        # Step 3: Process UAVSAR imagery if catalog path is provided
+        # Process UAVSAR imagery if catalog path is provided
         if uavsar_stac_source:
             if verbose:
                 print(f"Processing UAVSAR imagery for tile {tile_id}")
@@ -1202,11 +1572,22 @@ def process_bbox(args):
                 is_multiband=False,
                 verbose=verbose
             )
+            # print(uavsar_data['imgs_meta'])
+            # Explicitly store the image bbox in UAVSAR data
+            if uavsar_data:
+                uavsar_data = remove_duplicate_images(uavsar_data, verbose=verbose)
+
+                uavsar_data['img_bbox'] = img_bbox
+                
+                # Update each image metadata to include proper bbox
+                if 'imgs_meta' in uavsar_data:
+                    for meta in uavsar_data['imgs_meta']:
+                        meta['img_bbox'] = img_bbox
             
             if not uavsar_data and verbose:
                 print(f"No UAVSAR imagery data found for tile {tile_id}")
         
-        # Step 4: Process NAIP imagery if catalog path is provided
+        # Process NAIP imagery if catalog path is provided
         if naip_stac_source:
             if verbose:
                 print(f"Processing NAIP imagery for tile {tile_id}")
@@ -1223,21 +1604,35 @@ def process_bbox(args):
                 is_multiband=True,
                 verbose=verbose
             )
+            # print(naip_data['imgs_meta'])
+            # Explicitly store the image bbox in NAIP data
+            if naip_data:
+                naip_data = remove_duplicate_images(naip_data, verbose=verbose)
+
+                naip_data['img_bbox'] = img_bbox
+                
+                # Update each image metadata to include proper bbox
+                if 'imgs_meta' in naip_data:
+                    for meta in naip_data['imgs_meta']:
+                        meta['img_bbox'] = img_bbox
             
             if not naip_data and verbose:
                 print(f"No NAIP imagery data found for tile {tile_id}")
         
-        # Create result dictionary with tensors for LiDAR data
+        # Create result dictionary with NumPy arrays
         result = {
-            'dep_points': torch.tensor(xyz_dep, dtype=torch.float32),
-            'dep_pnt_attr': torch.tensor(dep_pnt_attr, dtype=torch.float32),
+            'dep_points': xyz_dep,
+            'dep_pnt_attr': dep_pnt_attr,
             'dep_meta': dep_meta,
-            'uav_points': torch.tensor(xyz_uav, dtype=torch.float32),
-            'uav_pnt_attr': torch.tensor(uav_pnt_attr, dtype=torch.float32),
+            'uav_points': xyz_uav,
+            'uav_pnt_attr': uav_pnt_attr,
             'uav_meta': uav_meta,
-            'uav_downsample_mask': torch.from_numpy(downsample_mask),  # Add the downsampling mask
-            'voxel_size_cm': voxel_size_cm,  # Store the voxel size used
-            'bbox': bbox,
+            'uav_downsample_masks': downsample_masks,
+            'voxel_sizes_cm': voxel_sizes,
+            'max_points_list': max_points_list,
+            'initial_voxel_size_cm': initial_voxel_size_cm,
+            'bbox': bbox,  # Original bounding box for point clouds
+            'img_bbox': img_bbox,  # Expanded bounding box for imagery
             'tile_id': tile_id,
             'has_imagery': False,
             'has_pointcloud': True
@@ -1248,8 +1643,9 @@ def process_bbox(args):
             result['uavsar_imgs'] = uavsar_data['imgs']
             result['uavsar_imgs_meta'] = uavsar_data['imgs_meta']
             result['uavsar_resolution'] = uavsar_data['resolution']
-            if 'imgs_tensor' in uavsar_data:
-                result['uavsar_imgs_tensor'] = uavsar_data['imgs_tensor']
+            result['uavsar_img_bbox'] = img_bbox  # Store expanded bbox explicitly
+            if 'imgs_array' in uavsar_data:
+                result['uavsar_imgs_array'] = uavsar_data['imgs_array']
             result['has_uavsar'] = True
         else:
             result['has_uavsar'] = False
@@ -1259,15 +1655,15 @@ def process_bbox(args):
             result['naip_imgs'] = naip_data['imgs']
             result['naip_imgs_meta'] = naip_data['imgs_meta']
             result['naip_resolution'] = naip_data['resolution']
-            if 'imgs_tensor' in naip_data:
-                result['naip_imgs_tensor'] = naip_data['imgs_tensor']
+            result['naip_img_bbox'] = img_bbox  # Store expanded bbox explicitly
+            if 'imgs_array' in naip_data:
+                result['naip_imgs_array'] = naip_data['imgs_array']
             result['has_naip'] = True
         else:
             result['has_naip'] = False
             
         # Set the overall imagery flag
         result['has_imagery'] = result['has_uavsar'] or result['has_naip']
-        
         
         # Print progress with overall count if total_tiles is provided
         if total_tiles > 0:
@@ -1279,14 +1675,19 @@ def process_bbox(args):
                 
             imagery_info = ", ".join(imagery_status) if imagery_status else "No imagery"
             
-            # Update the print statement to include downsampled point count
-            print(f"Completed tile {overall_tile_index}/{total_tiles} (ID: {tile_id}): "
-                  f"UAV points: {xyz_uav.shape[0]:,}, Downsampled: {num_downsampled_points:,}, "
+            # Update the print statement to include downsampled point counts for each threshold
+            downsampled_info = ", ".join([f"{count:,} (at {size:.1f}cm)" for count, size in 
+                                         zip(num_downsampled_points, voxel_sizes)])
+            
+            print(f"Completed tile {overall_tile_index}/{total_tiles} (ID: {tile_id}, Loc: {int(bbox[0])}, {int(bbox[1])}): "
+                  f"UAV points: {xyz_uav.shape[0]:,}, Downsampled: [{downsampled_info}], "
                   f"3DEP points: {xyz_dep.shape[0]:,}, {imagery_info}")
         else:
-            # Update the print statement to include downsampled point count
+            downsampled_info = ", ".join([f"{count:,} (at {size}cm)" for count, size in 
+                                         zip(num_downsampled_points, voxel_sizes)])
+            
             print(f"Successfully processed tile {tile_id}: UAV points: {xyz_uav.shape[0]:,}, "
-                  f"Downsampled: {num_downsampled_points:,}, 3DEP points: {xyz_dep.shape[0]:,}")
+                  f"Downsampled: [{downsampled_info}], 3DEP points: {xyz_dep.shape[0]:,}")
         
         return result
         
@@ -1356,27 +1757,27 @@ def process_chunk(
     verbose=False,
     uavsar_stac_source=None,
     naip_stac_source=None,
-    voxel_size_cm=5.0  # Add voxel_size_cm parameter with default value
+    initial_voxel_size_cm=5.0,
+    max_points_list=[20000, 30000, 40000]
 ):
     """
-    Process a single chunk of tiles.
+    Process a single chunk of tiles and save results as HDF5 files.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Processing chunk {chunk_index}/{total_chunks}...")
     
-    # Prepare arguments for parallel processing, including voxel_size_cm
+    # Prepare arguments for parallel processing, including voxel downsampling parameters
     args_list = [
         (i, tile_id, bbox, start_date, end_date, lidar_stac_source, bbox_crs, max_api_retries, initial_retry_delay,
-         current_tile_index + i, total_tiles, verbose, uavsar_stac_source, naip_stac_source, voxel_size_cm)
+         current_tile_index + i, total_tiles, verbose, uavsar_stac_source, naip_stac_source, initial_voxel_size_cm, max_points_list)
         for i, (tile_id, bbox) in enumerate(chunk, start=1)
     ]
-    
     
     chunk_results = []
     future_to_tile = {}
     
     try:
-        with ProcessPoolExecutor(max_workers=max_threads) as executor:
+        with ProcessPoolExecutor(max_workers=max_threads, mp_context=mp.get_context('spawn')) as executor:
             future_to_tile = {
                 executor.submit(process_bbox, args): (i, tile_id) 
                 for i, (args, (i, tile_id)) in enumerate(
@@ -1400,16 +1801,269 @@ def process_chunk(
     except Exception as e:
         print(f"Error during parallel processing of chunk {chunk_index}: {e}")
     
-    # Write chunk results to disk
+    # Write chunk results to disk using HDF5
     if chunk_results:
         # Generate a timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         # Create directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
-        chunk_file = os.path.join(output_dir, f"chunk_{timestamp}.pt")
-        torch.save(chunk_results, chunk_file)
-        end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{end_timestamp}] Saved chunk {chunk_index} with {len(chunk_results)} results to {chunk_file}")
+        chunk_file = os.path.join(output_dir, f"chunk_{timestamp}.h5")
+        
+        try:
+            # Save data in smaller batches to reduce memory pressure
+            batch_size = min(10, len(chunk_results))
+            
+            with h5py.File(chunk_file, 'w') as f:
+                # Create a root group for the chunk metadata
+                f.attrs['timestamp'] = timestamp
+                f.attrs['chunk_index'] = chunk_index
+                f.attrs['total_chunks'] = total_chunks
+                f.attrs['num_tiles'] = len(chunk_results)
+                
+                # Save tiles in batches
+                for batch_start in range(0, len(chunk_results), batch_size):
+                    batch_end = min(batch_start + batch_size, len(chunk_results))
+                    batch = chunk_results[batch_start:batch_end]
+                    
+                    for i, result in enumerate(batch):
+                        idx = batch_start + i
+                        tile_id = str(result['tile_id'])
+                        # Create a group for this tile
+                        tile_group = f.create_group(f"tile_{tile_id}")
+                        
+                        # Save tile metadata
+                        tile_group.attrs['tile_id'] = tile_id
+                        tile_group.attrs['bbox'] = result['bbox']  # Original bbox (for point clouds)
+                        
+                        # Save expanded bbox if available
+                        if 'img_bbox' in result:
+                            tile_group.attrs['img_bbox'] = result['img_bbox']  # Expanded bbox (for imagery)
+                        
+                        tile_group.attrs['has_imagery'] = result['has_imagery']
+                        tile_group.attrs['has_pointcloud'] = result['has_pointcloud']
+                        tile_group.attrs['initial_voxel_size_cm'] = result['initial_voxel_size_cm']
+                        
+                        # Store max_points_list
+                        if 'max_points_list' in result:
+                            tile_group.create_dataset('max_points_list', data=np.array(result['max_points_list']))
+                        
+                        # Store voxel sizes
+                        if 'voxel_sizes_cm' in result:
+                            tile_group.create_dataset('voxel_sizes_cm', data=np.array(result['voxel_sizes_cm']))
+                            
+                        # Save point cloud data
+                        pc_group = tile_group.create_group('point_clouds')
+                        pc_group.create_dataset('uav_points', data=result['uav_points'], compression='gzip')
+                        pc_group.create_dataset('uav_pnt_attr', data=result['uav_pnt_attr'], compression='gzip')
+                        pc_group.create_dataset('dep_points', data=result['dep_points'], compression='gzip')
+                        pc_group.create_dataset('dep_pnt_attr', data=result['dep_pnt_attr'], compression='gzip')
+                        
+                        # Save downsample masks
+                        masks_group = tile_group.create_group('downsample_masks')
+                        for j, mask in enumerate(result['uav_downsample_masks']):
+                            masks_group.create_dataset(f'mask_{j}', data=mask, compression='gzip')
+                        
+                        # Save metadata as attributes or datasets
+                        meta_group = tile_group.create_group('metadata')
+                        
+                        # Function to recursively store metadata
+                        def store_metadata(group, meta_dict, prefix=''):
+                            if meta_dict is None:
+                                return
+                                
+                            for key, value in meta_dict.items():
+                                full_key = f"{prefix}{key}"
+                                
+                                # Handle different data types appropriately
+                                if isinstance(value, (str, int, float, bool, np.number)):
+                                    group.attrs[full_key] = value
+                                elif isinstance(value, (list, tuple)):
+                                    # Try to convert to numpy array
+                                    try:
+                                        arr = np.array(value)
+                                        group.create_dataset(full_key, data=arr)
+                                    except:
+                                        # If can't convert, store as string
+                                        group.attrs[full_key] = str(value)
+                                elif isinstance(value, dict):
+                                    # Recursively store dictionaries
+                                    subgroup = group.create_group(full_key)
+                                    store_metadata(subgroup, value)
+                                else:
+                                    # For other types, convert to string
+                                    group.attrs[full_key] = str(value)
+                        
+                        # Store UAV metadata
+                        if 'uav_meta' in result and result['uav_meta']:
+                            uav_meta_group = meta_group.create_group('uav_meta')
+                            store_metadata(uav_meta_group, result['uav_meta'])
+                            
+                        # Store 3DEP metadata
+                        if 'dep_meta' in result and result['dep_meta']:
+                            dep_meta_group = meta_group.create_group('dep_meta')
+                            store_metadata(dep_meta_group, result['dep_meta'])
+                        
+                        # Save UAVSAR imagery if available
+                        if 'has_uavsar' in result and result['has_uavsar']:
+                            uavsar_group = tile_group.create_group('uavsar')
+                            uavsar_group.attrs['resolution'] = result['uavsar_resolution']
+                            
+                            # Save expanded bbox explicitly at UAVSAR group level
+                            if 'uavsar_img_bbox' in result:
+                                uavsar_group.attrs['img_bbox'] = result['uavsar_img_bbox']
+                            elif 'img_bbox' in result:
+                                uavsar_group.attrs['img_bbox'] = result['img_bbox']
+                            
+                            # Save UAVSAR images
+                            imgs_group = uavsar_group.create_group('images')
+                            for j, img in enumerate(result['uavsar_imgs']):
+                                imgs_group.create_dataset(f'img_{j}', data=img, compression='gzip')
+                            
+                            # Save metadata for each image with bbox as direct attribute
+                            if 'uavsar_imgs_meta' in result:
+                                meta_group = uavsar_group.create_group('metadata')
+                                for j, meta in enumerate(result['uavsar_imgs_meta']):
+                                    img_meta_group = meta_group.create_group(f'img_{j}')
+                                    
+                                    # Store bbox directly in each image metadata
+                                    if 'bbox' in meta:
+                                        img_meta_group.attrs['bbox'] = meta['bbox']
+                                    elif 'img_bbox' in meta:
+                                        img_meta_group.attrs['bbox'] = meta['img_bbox']
+                                    elif 'uavsar_img_bbox' in result:
+                                        img_meta_group.attrs['bbox'] = result['uavsar_img_bbox']
+                                    elif 'img_bbox' in result:
+                                        img_meta_group.attrs['bbox'] = result['img_bbox']
+                                    
+                                    # Store resolution directly
+                                    if 'resolution' in meta:
+                                        img_meta_group.attrs['resolution'] = meta['resolution']
+                                    elif 'uavsar_resolution' in result:
+                                        img_meta_group.attrs['resolution'] = result['uavsar_resolution']
+                                    
+                                    # Store other metadata
+                                    for key, value in meta.items():
+                                        if key not in ['bbox', 'img_bbox', 'resolution']:  # Already handled
+                                            if isinstance(value, (str, int, float, bool, np.number)):
+                                                img_meta_group.attrs[key] = value
+                                            elif isinstance(value, (list, tuple)):
+                                                try:
+                                                    arr = np.array(value)
+                                                    img_meta_group.create_dataset(key, data=arr)
+                                                except:
+                                                    img_meta_group.attrs[key] = str(value)
+                            
+                            # Save stacked array if available
+                            if 'uavsar_imgs_array' in result:
+                                uavsar_group.create_dataset('stacked_imgs', 
+                                                          data=result['uavsar_imgs_array'], 
+                                                          compression='gzip')
+                        
+                        # Save NAIP imagery if available
+                        if 'has_naip' in result and result['has_naip']:
+                            naip_group = tile_group.create_group('naip')
+                            naip_group.attrs['resolution'] = result['naip_resolution']
+                            
+                            # Save expanded bbox explicitly at NAIP group level
+                            if 'naip_img_bbox' in result:
+                                naip_group.attrs['img_bbox'] = result['naip_img_bbox']
+                            elif 'img_bbox' in result:
+                                naip_group.attrs['img_bbox'] = result['img_bbox']
+                            
+                            # Save NAIP images
+                            imgs_group = naip_group.create_group('images')
+                            for j, img in enumerate(result['naip_imgs']):
+                                imgs_group.create_dataset(f'img_{j}', data=img, compression='gzip')
+                            
+                            # Save metadata for each image with bbox as direct attribute
+                            if 'naip_imgs_meta' in result:
+                                meta_group = naip_group.create_group('metadata')
+                                for j, meta in enumerate(result['naip_imgs_meta']):
+                                    img_meta_group = meta_group.create_group(f'img_{j}')
+                                    
+                                    # Store bbox directly in each image metadata
+                                    if 'bbox' in meta:
+                                        img_meta_group.attrs['bbox'] = meta['bbox']
+                                    elif 'img_bbox' in meta:
+                                        img_meta_group.attrs['bbox'] = meta['img_bbox']
+                                    elif 'naip_img_bbox' in result:
+                                        img_meta_group.attrs['bbox'] = result['naip_img_bbox']
+                                    elif 'img_bbox' in result:
+                                        img_meta_group.attrs['bbox'] = result['img_bbox']
+                                    
+                                    # Store resolution directly
+                                    if 'resolution' in meta:
+                                        img_meta_group.attrs['resolution'] = meta['resolution']
+                                    elif 'naip_resolution' in result:
+                                        img_meta_group.attrs['resolution'] = result['naip_resolution']
+                                    
+                                    # Store other metadata
+                                    for key, value in meta.items():
+                                        if key not in ['bbox', 'img_bbox', 'resolution']:  # Already handled
+                                            if isinstance(value, (str, int, float, bool, np.number)):
+                                                img_meta_group.attrs[key] = value
+                                            elif isinstance(value, (list, tuple)):
+                                                try:
+                                                    arr = np.array(value)
+                                                    img_meta_group.create_dataset(key, data=arr)
+                                                except:
+                                                    img_meta_group.attrs[key] = str(value)
+                            
+                            # Save stacked array if available
+                            if 'naip_imgs_array' in result:
+                                naip_group.create_dataset('stacked_imgs', 
+                                                        data=result['naip_imgs_array'], 
+                                                        compression='gzip')
+                        
+                    # Clean up batch memory
+                    for result in batch:
+                        del result
+                    gc.collect()
+            
+            end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{end_timestamp}] Saved chunk {chunk_index} with {len(chunk_results)} results to {chunk_file}")
+            
+        except Exception as e:
+            print(f"Error saving chunk {chunk_index} to HDF5: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Try a fallback method with smaller batches
+            try:
+                fallback_dir = os.path.join(output_dir, f"chunk_{timestamp}_tiles")
+                os.makedirs(fallback_dir, exist_ok=True)
+                
+                print(f"Attempting fallback: saving individual tile files to {fallback_dir}")
+                
+                for i, result in enumerate(chunk_results):
+                    tile_id = result['tile_id']
+                    tile_file = os.path.join(fallback_dir, f"tile_{tile_id}.h5")
+                    
+                    with h5py.File(tile_file, 'w') as f:
+                        # Store basic data only
+                        f.attrs['tile_id'] = str(tile_id)
+                        f.attrs['bbox'] = result['bbox']
+                        
+                        # Also store expanded bbox if available
+                        if 'img_bbox' in result:
+                            f.attrs['img_bbox'] = result['img_bbox']
+                        
+                        # Point clouds
+                        f.create_dataset('uav_points', data=result['uav_points'], compression='gzip')
+                        f.create_dataset('dep_points', data=result['dep_points'], compression='gzip')
+                        
+                        # Save at least one mask
+                        if len(result['uav_downsample_masks']) > 0:
+                            f.create_dataset('downsample_mask', data=result['uav_downsample_masks'][0], compression='gzip')
+                    
+                    # Clean up after each file
+                    del result
+                    gc.collect()
+                
+                print(f"Fallback save successful: {len(chunk_results)} individual tile files saved.")
+                
+            except Exception as e2:
+                print(f"Fallback save also failed: {e2}")
     else:
         end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{end_timestamp}] No results for chunk {chunk_index}. Skipping saving.")
@@ -1457,7 +2111,8 @@ def process_tiles_from_geojson(
     verbose=False,
     uavsar_stac_source=None,
     naip_stac_source=None,
-    voxel_size_cm=5.0
+    initial_voxel_size_cm=5.0,
+    max_points_list=None
 ):
     """
     Process LiDAR and imagery data using pre-defined tiles from a GeoJSON file.
@@ -1496,12 +2151,18 @@ def process_tiles_from_geojson(
         Path to the local UAVSAR STAC catalog. If None, UAVSAR imagery won't be processed.
     naip_stac_source : str, optional
         Path to the local NAIP STAC catalog. If None, NAIP imagery won't be processed.
-    voxel_size_cm : float, optional
-        Size of voxel (grid cell) in centimeters for point cloud downsampling. Default is 5.0 cm.
-
+    initial_voxel_size_cm : float, optional
+        Initial size of voxel (grid cell) in centimeters for point cloud downsampling. Default is 5.0 cm.
+    max_points_list : list, optional
+        List of maximum point thresholds for downsampling. Default is [20000, 30000, 40000].
     """
+    # Default list of maximum point thresholds if not provided
+    if max_points_list is None:
+        max_points_list = [20000, 30000, 40000]
+    
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Starting processing of {tiles_geojson}")
+    print(f"Using initial voxel size: {initial_voxel_size_cm}cm and point thresholds: {max_points_list}")
     
     # Read the tiles from GeoJSON
     gdf = gpd.read_file(tiles_geojson)
@@ -1563,7 +2224,9 @@ def process_tiles_from_geojson(
             total_tiles,
             verbose,
             uavsar_stac_source,
-            naip_stac_source
+            naip_stac_source,
+            initial_voxel_size_cm,
+            max_points_list
         )
         
         # Give the system a moment to recover between chunks
@@ -1636,7 +2299,8 @@ def process_tiles_from_geojson(
                 verbose,
                 uavsar_stac_source,
                 naip_stac_source,
-                voxel_size_cm
+                initial_voxel_size_cm,
+                max_points_list
             )
             
             # Give the system more time to recover between retry chunks
@@ -1795,10 +2459,18 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--voxel-size-cm",
+        "--initial-voxel-size-cm",
         type=float,
         default=5.0,
-        help="Size of voxel (grid cell) in centimeters for point cloud downsampling (default: 5.0 cm)"
+        help="Initial size of voxel (grid cell) in centimeters for point cloud downsampling (default: 5.0 cm)"
+    )
+    
+    parser.add_argument(
+        "--max-points",
+        type=int,
+        nargs="+",
+        default=[20000, 30000, 40000],
+        help="Maximum point thresholds for downsampling (default: 5000 10000 20000)"
     )
     
     args = parser.parse_args()
@@ -1820,5 +2492,6 @@ if __name__ == "__main__":
         verbose=args.verbose,
         uavsar_stac_source=args.uavsar_stac_source,
         naip_stac_source=args.naip_stac_source,
-        voxel_size_cm=args.voxel_size_cm  # Pass the voxel_size_cm parameter
+        initial_voxel_size_cm=args.initial_voxel_size_cm,
+        max_points_list=args.max_points
     )
