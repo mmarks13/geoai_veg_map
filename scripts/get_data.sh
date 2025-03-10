@@ -45,20 +45,36 @@ export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
 # python src/data_prep/process_uav_lidar.py
 # python src/data_prep/create_training_tile_bboxes.py 
 
-python src/data_prep/generate_training_data.py\
- --tiles_geojson data/processed/tiles.geojson \
- --lidar_stac_source data/stac/uavlidar/catalog.json \
- --outdir data/processed/training_data_chunks/ \
- --chunk_size 200 \
- --max-api-retries 20\
- --uavsar_stac_source data/stac/uavsar/catalog.json \
- --naip_stac_source data/stac/naip/catalog.json\
- --threads 12 \
- --initial-voxel-size-cm 4 \
- --max-points 20000
+# python src/data_prep/generate_training_data.py\
+#  --tiles_geojson data/processed/tiles.geojson \
+#  --lidar_stac_source data/stac/uavlidar/catalog.json \
+#  --outdir data/processed/training_data_chunks/ \
+#  --chunk_size 200 \
+#  --max-api-retries 20\
+#  --uavsar_stac_source data/stac/uavsar/catalog.json \
+#  --naip_stac_source data/stac/naip/catalog.json\
+#  --threads 12 \
+#  --initial-voxel-size-cm 4 \
+#  --max-points 20000
 
 
-python src/data_prep/h5_loader.py \
- --input_dir data/processed/training_data_chunks/sample_test \
- --output_path data/processed/model_data/combined_training_data.pt
- --verbose
+# python src/data_prep/h5_loader.py \
+#  --input_dir data/processed/training_data_chunks/sample_test \
+#  --output_path data/processed/model_data/combined_training_data.pt
+#  --verbose
+
+
+# the the geojson file with the footprints of the point clouds
+# python src/data_prep/pointcloud_footprints_to_geojson.py
+#
+# the resuling geojson file is used to create the training and test regions
+# this was done manually in qgis
+
+python src/data_prep/split_train_test_val_tiles.py \
+    --pt-file data/processed/model_data/combined_training_data.pt \
+    --geojson-file /home/jovyan/geoai_veg_map/data/processed/test_val_polygons.geojson \
+    --output-dir data/processed/model_data \
+    --min-uav-points 5000 \
+    --min-dep-points 400 \
+    --test-val-ratio 0.6 \
+    --random-seed 123
