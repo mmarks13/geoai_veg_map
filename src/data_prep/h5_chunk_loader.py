@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-H5 Dataset Loader Script
+H5 Dataset Loader Script - Flattened Data Structure Version
 
 This script combines multiple H5 files containing tile data into a single PyTorch dataset.
+Optimized for the new flattened data structure where all data is at the top level.
+Includes improved handling for object arrays and non-numeric data.
 
 Usage:
     python h5_loader.py --input_dir /path/to/h5/files --output_path /path/to/output.pt [options]
@@ -26,6 +28,7 @@ from tqdm import tqdm
 def combine_h5_files(input_dir, max_files=None, max_tiles_per_file=None, convert_float32=True, verbose=False):
     """
     Combines multiple H5 files into a single dataset.
+    Optimized for flattened data structure where all data is at the top level.
     
     Parameters:
     -----------
@@ -88,140 +91,102 @@ def combine_h5_files(input_dir, max_files=None, max_tiles_per_file=None, convert
                     
                     # Add top-level datasets directly
                     for key in tile_group.keys():
-                        if isinstance(tile_group[key], h5py.Dataset):
-                            data = tile_group[key][...]
+                        if key == 'point_clouds':
+                            # Process point cloud data - extract directly to top level
+                            pc_group = tile_group['point_clouds']
+                            for pc_key in pc_group.keys():
+                                data = pc_group[pc_key][()]
+                                if convert_float32 and data.dtype == np.float64:
+                                    data = data.astype(np.float32)
+                                tile_dict[pc_key] = torch.from_numpy(data)
+                        elif key == 'downsample_masks':
+                            # Process downsample masks
+                            masks_group = tile_group['downsample_masks']
+                            masks = []
+                            for mask_key in sorted(masks_group.keys()):
+                                data = masks_group[mask_key][()]
+                                if convert_float32 and data.dtype == np.float64:
+                                    data = data.astype(np.float32)
+                                masks.append(torch.from_numpy(data))
+                            
+                            tile_dict['uav_downsample_masks'] = masks
+                            # Set first mask as default if available
+                            if masks:
+                                tile_dict['uav_downsample_mask'] = masks[0]
+                        elif key == 'metadata':
+                            # Metadata is handled separately (if needed)
+                            meta_group = tile_group['metadata']
+                            
+                            # Process UAV metadata
+                            if 'uav_meta' in meta_group:
+                                uav_meta = {}
+                                uav_meta_group = meta_group['uav_meta']
+                                
+                                # Extract all attributes
+                                for meta_key, meta_value in uav_meta_group.attrs.items():
+                                    uav_meta[meta_key] = meta_value
+                                
+                                # Extract all datasets
+                                for meta_key in uav_meta_group.keys():
+                                    uav_meta[meta_key] = uav_meta_group[meta_key][()]
+                                
+                                tile_dict['uav_meta'] = uav_meta
+                            
+                            # Process DEP metadata
+                            if 'dep_meta' in meta_group:
+                                dep_meta = {}
+                                dep_meta_group = meta_group['dep_meta']
+                                
+                                # Extract all attributes
+                                for meta_key, meta_value in dep_meta_group.attrs.items():
+                                    dep_meta[meta_key] = meta_value
+                                
+                                # Extract all datasets
+                                for meta_key in dep_meta_group.keys():
+                                    dep_meta[meta_key] = dep_meta_group[meta_key][()]
+                                
+                                tile_dict['dep_meta'] = dep_meta
+                        elif isinstance(tile_group[key], h5py.Dataset):
+                            # Handle standard datasets
+                            data = tile_group[key][()]
+                            
+                            # Convert if needed and check data type
                             if isinstance(data, np.ndarray):
-                                if convert_float32 and data.dtype == np.float64:
-                                    data = data.astype(np.float32)
-                                tile_dict[key] = torch.from_numpy(data)
+                                # Special handling for object arrays (strings, lists, etc.)
+                                if data.dtype.kind == 'O':  # Object arrays
+                                    # Try to convert lists of strings
+                                    if data.size > 0 and all(isinstance(x, (bytes, str)) for x in data.flat):
+                                        # Convert bytes to strings if needed
+                                        if isinstance(data.flat[0], bytes):
+                                            string_list = [s.decode('utf-8') if isinstance(s, bytes) else s for s in data.flat]
+                                        else:
+                                            string_list = list(data.flat)
+                                        tile_dict[key] = string_list
+                                    else:
+                                        # For other object arrays, just store as-is
+                                        tile_dict[key] = data.tolist() if hasattr(data, 'tolist') else list(data)
+                                # Handle string arrays
+                                elif data.dtype.kind == 'S' or data.dtype.kind == 'U':
+                                    # Convert bytes to strings
+                                    if data.ndim == 0:
+                                        tile_dict[key] = data.item().decode('utf-8') if data.dtype.kind == 'S' else data.item()
+                                    else:
+                                        tile_dict[key] = [s.decode('utf-8') if isinstance(s, bytes) else s for s in data]
+                                # Handle numeric arrays
+                                else:
+                                    if convert_float32 and data.dtype == np.float64:
+                                        data = data.astype(np.float32)
+                                    # Convert to PyTorch tensor only for numeric data
+                                    try:
+                                        tile_dict[key] = torch.from_numpy(data)
+                                    except TypeError:
+                                        # Fallback if torch conversion fails
+                                        if verbose:
+                                            print(f"Warning: Could not convert {key} to tensor, storing as NumPy array")
+                                        tile_dict[key] = data
                             else:
+                                # For scalar values
                                 tile_dict[key] = data
-                    
-                    # Process point cloud data - extract directly to top level
-                    if 'point_clouds' in tile_group:
-                        pc_group = tile_group['point_clouds']
-                        for key in pc_group.keys():
-                            data = pc_group[key][...]
-                            if convert_float32 and data.dtype == np.float64:
-                                data = data.astype(np.float32)
-                            tile_dict[key] = torch.from_numpy(data)
-                    
-                    # Process downsample masks
-                    if 'downsample_masks' in tile_group:
-                        masks_group = tile_group['downsample_masks']
-                        masks = []
-                        for mask_key in sorted(masks_group.keys()):
-                            data = masks_group[mask_key][...]
-                            if convert_float32 and data.dtype == np.float64:
-                                data = data.astype(np.float32)
-                            masks.append(torch.from_numpy(data))
-                        
-                        tile_dict['downsample_masks'] = masks
-                        # Set first mask as default if available
-                        if masks:
-                            tile_dict['uav_downsample_mask'] = masks[0]
-                    
-                    # Process NAIP imagery if present
-                    if 'naip' in tile_group:
-                        naip_group = tile_group['naip']
-                        
-                        # Add attributes
-                        for key, value in naip_group.attrs.items():
-                            tile_dict[f'naip_{key}'] = value
-                        
-                        # Process images
-                        if 'images' in naip_group:
-                            naip_imgs = []
-                            naip_imgs_meta = []
-                            
-                            imgs_group = naip_group['images']
-                            meta_group = naip_group['metadata'] if 'metadata' in naip_group else None
-                            
-                            for img_key in sorted(imgs_group.keys()):
-                                # Load image
-                                data = imgs_group[img_key][...]
-                                naip_imgs.append(torch.from_numpy(data))
-                                
-                                # Load metadata if available
-                                if meta_group and img_key in meta_group:
-                                    img_meta = {}
-                                    img_meta_group = meta_group[img_key]
-                                    
-                                    # Add attributes
-                                    for k, v in img_meta_group.attrs.items():
-                                        img_meta[k] = v
-                                    
-                                    # Add datasets
-                                    for k in img_meta_group.keys():
-                                        img_meta[k] = img_meta_group[k][...]
-                                    
-                                    naip_imgs_meta.append(img_meta)
-                            
-                            tile_dict['naip_imgs'] = naip_imgs
-                            if naip_imgs_meta:
-                                tile_dict['naip_imgs_meta'] = naip_imgs_meta
-                        
-                        # Process stacked images
-                        if 'stacked_imgs' in naip_group:
-                            data = naip_group['stacked_imgs'][...]
-                            tile_dict['naip_imgs_array'] = torch.from_numpy(data)
-                            
-                            # Update flags
-                            tile_dict['has_naip'] = True
-                            tile_dict['has_imagery'] = True
-                    
-                    # Process UAVSAR imagery if present (similar approach as NAIP)
-                    if 'uavsar' in tile_group:
-                        uavsar_group = tile_group['uavsar']
-                        
-                        # Add attributes
-                        for key, value in uavsar_group.attrs.items():
-                            tile_dict[f'uavsar_{key}'] = value
-                        
-                        # Process images
-                        if 'images' in uavsar_group:
-                            uavsar_imgs = []
-                            uavsar_imgs_meta = []
-                            
-                            imgs_group = uavsar_group['images']
-                            meta_group = uavsar_group['metadata'] if 'metadata' in uavsar_group else None
-                            
-                            for img_key in sorted(imgs_group.keys()):
-                                # Load image
-                                data = imgs_group[img_key][...]
-                                if convert_float32 and data.dtype == np.float64:
-                                    data = data.astype(np.float32)
-                                uavsar_imgs.append(torch.from_numpy(data))
-                                
-                                # Load metadata if available
-                                if meta_group and img_key in meta_group:
-                                    img_meta = {}
-                                    img_meta_group = meta_group[img_key]
-                                    
-                                    # Add attributes
-                                    for k, v in img_meta_group.attrs.items():
-                                        img_meta[k] = v
-                                    
-                                    # Add datasets
-                                    for k in img_meta_group.keys():
-                                        img_meta[k] = img_meta_group[k][...]
-                                    
-                                    uavsar_imgs_meta.append(img_meta)
-                            
-                            tile_dict['uavsar_imgs'] = uavsar_imgs
-                            if uavsar_imgs_meta:
-                                tile_dict['uavsar_imgs_meta'] = uavsar_imgs_meta
-                        
-                        # Process stacked images
-                        if 'stacked_imgs' in uavsar_group:
-                            data = uavsar_group['stacked_imgs'][...]
-                            if convert_float32 and data.dtype == np.float64:
-                                data = data.astype(np.float32)
-                            tile_dict['uavsar_imgs_array'] = torch.from_numpy(data)
-                            
-                            # Update flags
-                            tile_dict['has_uavsar'] = True
-                            tile_dict['has_imagery'] = True
                     
                     # Add to combined data
                     combined_data.append(tile_dict)
@@ -231,6 +196,8 @@ def combine_h5_files(input_dir, max_files=None, max_tiles_per_file=None, convert
             
         except Exception as e:
             print(f"Error processing file {filename}: {e}")
+            import traceback
+            traceback.print_exc()
     
     print(f"Total tiles processed: {len(combined_data)}")
     return combined_data
@@ -254,6 +221,15 @@ def estimate_size(data_list):
         for key, value in tile.items():
             if isinstance(value, torch.Tensor):
                 total_bytes += value.element_size() * value.nelement()
+            elif isinstance(value, np.ndarray):
+                total_bytes += value.nbytes
+            elif isinstance(value, dict):
+                # Handle nested dictionaries for metadata
+                for subkey, subvalue in value.items():
+                    if isinstance(subvalue, torch.Tensor):
+                        total_bytes += subvalue.element_size() * subvalue.nelement()
+                    elif isinstance(subvalue, np.ndarray):
+                        total_bytes += subvalue.nbytes
     
     # Convert to human-readable format
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:

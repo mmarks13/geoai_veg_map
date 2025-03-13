@@ -446,69 +446,55 @@ def _process_multiband_stack(items, item_metadata, reproj_bounds, target_crs, as
 
 def convert_stack_to_tensors(data_stack, metadata_list, bbox, resolution):
     """
-    Convert xarray DataArray from create_stac_stack() to a dictionary with NumPy arrays and metadata.
+    Convert an xarray DataArray (from create_stac_stack()) into a simplified dictionary 
+    containing a numpy array for the images and associated metadata, along with the original
+    xarray DataArray.
+    The resulting dictionary will have:
+        'imgs': numpy array of shape (time, channels, height, width)
+        'dates': list of date strings, one per time slice
+        'ids': list of item ids (from metadata_list or defaulted)
+        'bbox': the provided bounding box
+        'resolution': the provided resolution
+        'img_bbox': same as bbox (explicit alias)
+        'bands': list of bands (from data_stack if available)
+        'shape': shape of the imgs array
+        'data_stack': the original xarray DataArray
     """
     if data_stack is None:
         return None
-        
-    # Get the date and id attributes from the xarray
+    # Convert the entire stack to a numpy array.
+    imgs = data_stack.values
+    # Extract time values and bands (if available).
     times = data_stack.time.values
-    
-    # Create a dictionary to hold the arrays and metadata
-    result = {
-        'imgs': [],
-        'imgs_meta': [],
-        'bbox': bbox,  # This is the image bbox, which differs from the point cloud bbox
-        'resolution': resolution,
-        'img_bbox': bbox  # Add this explicit field to distinguish from point cloud bbox
-    }
-    
-    # Convert each time slice to a numpy array and capture metadata
+    bands = list(data_stack.band.values) if 'band' in data_stack.dims else [1]
+    # Build lists of dates and ids based on the time dimension and metadata_list.
+    dates = []
+    ids = []
     for i, time in enumerate(times):
-        # Extract data for this time
-        img_data = data_stack.sel(time=time).values
-        
-        # Add to imgs list
-        result['imgs'].append(img_data)
-        
-        # Parse datetime
+        # Convert time to a date string.
         if isinstance(time, np.datetime64):
             date_str = pd.Timestamp(time).strftime('%Y-%m-%d')
         else:
-            date_str = time
-        
-        # Get corresponding metadata from the metadata_list if available
-        item_meta = {}
+            date_str = str(time)
+        dates.append(date_str)
+        # Use the metadata id if available; otherwise, generate a default id.
         if i < len(metadata_list):
-            item_meta = metadata_list[i]
-        
-        # Create metadata entry
-        bands = data_stack.band.values if 'band' in data_stack.dims else np.array([1])
-        
-        img_metadata = {
-            'id': item_meta.get('id', f'item_{i}'),
-            'date': date_str,
-            'datetime': pd.Timestamp(time).isoformat(),
-            'bbox': bbox,  # Explicitly include the bbox for this image
-            'img_bbox': bbox,  # Add this alias for clarity
-            'resolution': resolution,
-            'bands': list(bands),
-            'shape': img_data.shape,
-            'index': i
-        }
-        
-        # Add all the additional metadata from item_meta
-        for key, value in item_meta.items():
-            if key not in img_metadata:  # Don't overwrite existing keys
-                img_metadata[key] = value
-                
-        # Add to imgs_meta list
-        result['imgs_meta'].append(img_metadata)
-    
-    # Create a stacked array if all images have the same shape
-    if all(arr.shape == result['imgs'][0].shape for arr in result['imgs']):
-        result['imgs_array'] = np.stack(result['imgs'])
-    
+            id_val = metadata_list[i].get('id', f'item_{i}')
+        else:
+            id_val = f'item_{i}'
+        ids.append(id_val)
+    # Build and return the result dictionary with the original xarray included.
+    result = {
+        'imgs': imgs,
+        'dates': dates,
+        'ids': ids,
+        'bbox': bbox,
+        'resolution': resolution,
+        'img_bbox': bbox,
+        'bands': bands,
+        'shape': imgs.shape,
+        'data_stack': data_stack
+    }
     return result
 
 
@@ -548,43 +534,6 @@ def process_imagery_data(bbox, start_date, end_date, stac_source, assets=None, o
     return convert_stack_to_tensors(data_stack, metadata_list, bbox, out_resolution)
 
 
-# def combine_imagery_pointcloud(imagery_data, pointcloud_data):
-#     """
-#     Combine imagery tensor dictionary with point cloud tensor dictionary.
-    
-#     Parameters:
-#     -----------
-#     imagery_data : dict
-#         Dictionary containing imagery tensors and metadata from convert_stack_to_tensors()
-#     pointcloud_data : dict
-#         Dictionary containing point cloud tensors and metadata from process_bbox()
-        
-#     Returns:
-#     --------
-#     dict
-#         A combined dictionary with both imagery and point cloud data
-#     """
-#     if imagery_data is None or pointcloud_data is None:
-#         print("Error: Either imagery data or point cloud data is None.")
-#         return None
-    
-#     # Create a deep copy to avoid modifying the originals
-#     combined_data = copy.deepcopy(pointcloud_data)
-    
-#     # Add imagery data
-#     combined_data['imgs'] = imagery_data['imgs']
-#     combined_data['imgs_meta'] = imagery_data['imgs_meta']
-#     combined_data['img_resolution'] = imagery_data['resolution']
-    
-#     # If we have a stacked tensor, add it
-#     if 'imgs_tensor' in imagery_data:
-#         combined_data['imgs_tensor'] = imagery_data['imgs_tensor']
-    
-#     # Add validation flag - True if both point cloud and imagery data are present
-#     combined_data['has_imagery'] = True
-#     combined_data['has_pointcloud'] = True
-    
-#     return combined_data
 
 
 def bounding_box_to_geojson(bbox):
@@ -980,6 +929,8 @@ def create_3dep_stack(bbox, start_date, end_date, threads=8, target_crs=None):
             
         gc.collect()
 
+
+
 def voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list):
     """
     Creates boolean masks for voxel grid downsampling for each value in max_points_list.
@@ -1125,6 +1076,8 @@ def voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list):
 
 
 import numpy as np
+
+
 
 def anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list, vertical_ratio=0.3):
     """
@@ -1305,114 +1258,10 @@ def anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points
     return masks, voxel_sizes
 
 
-
-def remove_duplicate_images(images_data, tolerance=1e-6, verbose=False):
-    """
-    Removes duplicate images from imagery data dictionary and logs information
-    about identified duplicates.
-    
-    Parameters:
-    -----------
-    images_data : dict
-        Dictionary containing imagery data from process_imagery_data()
-    tolerance : float, optional
-        Tolerance for considering timestamps as duplicate (in seconds)
-    verbose : bool, optional
-        Whether to print additional debug information
-        
-    Returns:
-    --------
-    dict
-        The same dictionary with duplicates removed
-    """
-    if not images_data or 'imgs' not in images_data or not images_data['imgs']:
-        return images_data
-    
-    # Create a deep copy to avoid modifying the original
-    result = copy.deepcopy(images_data)
-    
-    # Track unique identifiers for images
-    unique_ids = set()
-    
-    # Track indices to keep and which ones are duplicates
-    indices_to_keep = []
-    duplicate_info = []
-    
-    # Check each image
-    for i, meta in enumerate(result['imgs_meta']):
-        # print(meta)
-        # Try multiple ways to identify duplicates
-        img_id = meta.get('id', 'unknown_id')
-        img_datetime = meta.get('datetime', 'unknown_datetime')
-        img_date = meta.get('date', 'unknown_date')
-        
-        # Convert to hash for easier comparison 
-        identifier = f"{img_id}_{img_datetime}"
-        # print(identifier)
-        # If we haven't seen this image before, keep it
-        if identifier not in unique_ids:
-            unique_ids.add(identifier)
-            indices_to_keep.append(i)
-        else:
-            # Log information about the duplicate
-            duplicate_info.append({
-                'index': i,
-                'id': img_id,
-                'datetime': img_datetime,
-                'date': img_date,
-                'shape': result['imgs'][i].shape if i < len(result['imgs']) else None
-            })
-    
-    # If we found duplicates, filter the data and log details
-    if len(duplicate_info) > 0:
-        # Determine the data type (UAVSAR or NAIP) for more informative logging
-        data_type = "imagery"
-        if 'imgs_meta' in result and result['imgs_meta']:
-            # Try to determine the type from metadata
-            first_meta = result['imgs_meta'][0]
-            if 'collection' in first_meta:
-                if 'uavsar' in first_meta['collection'].lower():
-                    data_type = "UAVSAR"
-                elif 'naip' in first_meta['collection'].lower():
-                    data_type = "NAIP"
-        
-        print(f"Found {len(duplicate_info)} duplicate {data_type} images out of {len(result['imgs'])} total images")
-        
-        # Log each duplicate with detailed information
-        if verbose or len(duplicate_info) <= 10:  # Show all if <= 10 duplicates or verbose mode
-            for dup in duplicate_info:
-                print(f"  Duplicate {data_type} image at index {dup['index']}: ID={dup['id']}, " 
-                      f"Date={dup['date']}, Datetime={dup['datetime']}")
-        else:  # Only show first 5 and last 5 if more than 10 duplicates
-            for dup in duplicate_info[:5]:
-                print(f"  Duplicate {data_type} image at index {dup['index']}: ID={dup['id']}, " 
-                      f"Date={dup['date']}, Datetime={dup['datetime']}")
-            print(f"  ... and {len(duplicate_info) - 10} more duplicates ...")
-            for dup in duplicate_info[-5:]:
-                print(f"  Duplicate {data_type} image at index {dup['index']}: ID={dup['id']}, " 
-                      f"Date={dup['date']}, Datetime={dup['datetime']}")
-        
-        # Filter imgs and imgs_meta
-        result['imgs'] = [result['imgs'][i] for i in indices_to_keep]
-        result['imgs_meta'] = [result['imgs_meta'][i] for i in indices_to_keep]
-        
-        # Recreate stacked array if it exists
-        if 'imgs_array' in result:
-            if indices_to_keep:
-                result['imgs_array'] = np.stack([result['imgs'][i] for i in indices_to_keep])
-            else:
-                del result['imgs_array']
-        
-        print(f"After removing duplicates: {len(result['imgs'])} {data_type} images remaining")
-    
-    return result
-
-
-
 def process_bbox(args):
     """
     Process a single bounding box to retrieve and format LiDAR data and imagery data.
-    Returns data as NumPy arrays instead of PyTorch tensors.
+    This version uses a flattened dictionary structure with all data at the top level.
     """
     # Extract arguments
     i, tile_id, bbox, start_date, end_date, lidar_stac_source, bbox_crs = args[:7]
@@ -1554,6 +1403,27 @@ def process_bbox(args):
             centroid_y + new_height / 2
         ]
 
+        # Create result dictionary with NumPy arrays - using flattened structure
+        result = {
+            'dep_points': xyz_dep,
+            'dep_pnt_attr': dep_pnt_attr,
+            'dep_meta': dep_meta,
+            'uav_points': xyz_uav,
+            'uav_pnt_attr': uav_pnt_attr,
+            'uav_meta': uav_meta,
+            'uav_downsample_masks': downsample_masks,
+            'voxel_sizes_cm': voxel_sizes,
+            'max_points_list': max_points_list,
+            'initial_voxel_size_cm': initial_voxel_size_cm,
+            'bbox': bbox,             # Original bounding box for point clouds
+            'img_bbox': img_bbox,     # Expanded bounding box for imagery
+            'tile_id': tile_id,
+            'has_imagery': False,
+            'has_pointcloud': True,
+            'has_uavsar': False,
+            'has_naip': False
+        }
+
         # Process UAVSAR imagery if catalog path is provided
         if uavsar_stac_source:
             if verbose:
@@ -1572,20 +1442,15 @@ def process_bbox(args):
                 is_multiband=False,
                 verbose=verbose
             )
-            # print(uavsar_data['imgs_meta'])
-            # Explicitly store the image bbox in UAVSAR data
-            if uavsar_data:
-                uavsar_data = remove_duplicate_images(uavsar_data, verbose=verbose)
-
-                uavsar_data['img_bbox'] = img_bbox
-                
-                # Update each image metadata to include proper bbox
-                if 'imgs_meta' in uavsar_data:
-                    for meta in uavsar_data['imgs_meta']:
-                        meta['img_bbox'] = img_bbox
             
-            if not uavsar_data and verbose:
-                print(f"No UAVSAR imagery data found for tile {tile_id}")
+            # Add UAVSAR data to the result dict with flattened structure
+            if uavsar_data:
+                result['has_uavsar'] = True
+                result['has_imagery'] = True
+                
+                # Add each key from uavsar_data with 'uavsar_' prefix
+                for key, value in uavsar_data.items():
+                    result[f'uavsar_{key}'] = value
         
         # Process NAIP imagery if catalog path is provided
         if naip_stac_source:
@@ -1604,74 +1469,23 @@ def process_bbox(args):
                 is_multiband=True,
                 verbose=verbose
             )
-            # print(naip_data['imgs_meta'])
-            # Explicitly store the image bbox in NAIP data
+            
+            # Add NAIP data to the result dict with flattened structure
             if naip_data:
-                naip_data = remove_duplicate_images(naip_data, verbose=verbose)
-
-                naip_data['img_bbox'] = img_bbox
+                result['has_naip'] = True
+                result['has_imagery'] = True
                 
-                # Update each image metadata to include proper bbox
-                if 'imgs_meta' in naip_data:
-                    for meta in naip_data['imgs_meta']:
-                        meta['img_bbox'] = img_bbox
-            
-            if not naip_data and verbose:
-                print(f"No NAIP imagery data found for tile {tile_id}")
-        
-        # Create result dictionary with NumPy arrays
-        result = {
-            'dep_points': xyz_dep,
-            'dep_pnt_attr': dep_pnt_attr,
-            'dep_meta': dep_meta,
-            'uav_points': xyz_uav,
-            'uav_pnt_attr': uav_pnt_attr,
-            'uav_meta': uav_meta,
-            'uav_downsample_masks': downsample_masks,
-            'voxel_sizes_cm': voxel_sizes,
-            'max_points_list': max_points_list,
-            'initial_voxel_size_cm': initial_voxel_size_cm,
-            'bbox': bbox,  # Original bounding box for point clouds
-            'img_bbox': img_bbox,  # Expanded bounding box for imagery
-            'tile_id': tile_id,
-            'has_imagery': False,
-            'has_pointcloud': True
-        }
-        
-        # Add UAVSAR data if available
-        if uavsar_data:
-            result['uavsar_imgs'] = uavsar_data['imgs']
-            result['uavsar_imgs_meta'] = uavsar_data['imgs_meta']
-            result['uavsar_resolution'] = uavsar_data['resolution']
-            result['uavsar_img_bbox'] = img_bbox  # Store expanded bbox explicitly
-            if 'imgs_array' in uavsar_data:
-                result['uavsar_imgs_array'] = uavsar_data['imgs_array']
-            result['has_uavsar'] = True
-        else:
-            result['has_uavsar'] = False
-            
-        # Add NAIP data if available
-        if naip_data:
-            result['naip_imgs'] = naip_data['imgs']
-            result['naip_imgs_meta'] = naip_data['imgs_meta']
-            result['naip_resolution'] = naip_data['resolution']
-            result['naip_img_bbox'] = img_bbox  # Store expanded bbox explicitly
-            if 'imgs_array' in naip_data:
-                result['naip_imgs_array'] = naip_data['imgs_array']
-            result['has_naip'] = True
-        else:
-            result['has_naip'] = False
-            
-        # Set the overall imagery flag
-        result['has_imagery'] = result['has_uavsar'] or result['has_naip']
+                # Add each key from naip_data with 'naip_' prefix
+                for key, value in naip_data.items():
+                    result[f'naip_{key}'] = value
         
         # Print progress with overall count if total_tiles is provided
         if total_tiles > 0:
             imagery_status = []
-            if 'has_uavsar' in result and result['has_uavsar']:
-                imagery_status.append(f"UAVSAR: {len(result['uavsar_imgs'])} images")
-            if 'has_naip' in result and result['has_naip']:
-                imagery_status.append(f"NAIP: {len(result['naip_imgs'])} images")
+            if result['has_uavsar']:
+                imagery_status.append(f"UAVSAR: {result['uavsar_shape'][0]} images")
+            if result['has_naip']:
+                imagery_status.append(f"NAIP: {result['naip_shape'][0]} images")
                 
             imagery_info = ", ".join(imagery_status) if imagery_status else "No imagery"
             
@@ -1733,11 +1547,11 @@ def process_bbox(args):
         gc.collect()
 
 
+
 def chunk_data(data, chunk_size):
     """Split data into smaller chunks of size `chunk_size`."""
     for i in range(0, len(data), chunk_size):
         yield data[i:i + chunk_size]
-
 
 def process_chunk(
     chunk, 
@@ -1762,6 +1576,7 @@ def process_chunk(
 ):
     """
     Process a single chunk of tiles and save results as HDF5 files.
+    This version is updated to handle a flattened dictionary structure.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] Processing chunk {chunk_index}/{total_chunks}...")
@@ -1831,37 +1646,40 @@ def process_chunk(
                         # Create a group for this tile
                         tile_group = f.create_group(f"tile_{tile_id}")
                         
-                        # Save tile metadata
-                        tile_group.attrs['tile_id'] = tile_id
-                        tile_group.attrs['bbox'] = result['bbox']  # Original bbox (for point clouds)
+                        # Save all data - using a simplified approach with the flattened structure
+                        for key, value in result.items():
+                            if key in ['uav_downsample_masks']:
+                                # Special handling for lists of masks
+                                masks_group = tile_group.create_group('downsample_masks')
+                                for j, mask in enumerate(value):
+                                    masks_group.create_dataset(f'mask_{j}', data=mask, compression='gzip')
+                            elif key in ['uav_meta', 'dep_meta']:
+                                # Skip complex metadata - will be handled separately
+                                continue
+                            elif isinstance(value, (str, int, float, bool, np.number, np.ndarray)):
+                                # Direct saving for simple types and arrays
+                                if isinstance(value, (str, int, float, bool, np.number)):
+                                    # Store as attribute for small values
+                                    tile_group.attrs[key] = value
+                                elif isinstance(value, np.ndarray):
+                                    # Store as dataset for arrays
+                                    tile_group.create_dataset(key, data=value, compression='gzip')
+                            elif isinstance(value, list) and len(value) > 0:
+                                if isinstance(value[0], str):
+                                    # Handle string lists (like dates or ids)
+                                    dataset = tile_group.create_dataset(key, (len(value),), dtype=h5py.string_dtype())
+                                    for j, s in enumerate(value):
+                                        dataset[j] = s
+                                elif isinstance(value[0], (int, float, np.number)):
+                                    # Handle numeric lists
+                                    tile_group.create_dataset(key, data=np.array(value), compression='gzip')
+                                # Other types of lists are skipped
                         
-                        # Save expanded bbox if available
-                        if 'img_bbox' in result:
-                            tile_group.attrs['img_bbox'] = result['img_bbox']  # Expanded bbox (for imagery)
-                        
-                        tile_group.attrs['has_imagery'] = result['has_imagery']
-                        tile_group.attrs['has_pointcloud'] = result['has_pointcloud']
-                        tile_group.attrs['initial_voxel_size_cm'] = result['initial_voxel_size_cm']
-                        
-                        # Store max_points_list
-                        if 'max_points_list' in result:
-                            tile_group.create_dataset('max_points_list', data=np.array(result['max_points_list']))
-                        
-                        # Store voxel sizes
-                        if 'voxel_sizes_cm' in result:
-                            tile_group.create_dataset('voxel_sizes_cm', data=np.array(result['voxel_sizes_cm']))
-                            
-                        # Save point cloud data
+                        # Handle special case for point cloud data - create a dedicated group
                         pc_group = tile_group.create_group('point_clouds')
-                        pc_group.create_dataset('uav_points', data=result['uav_points'], compression='gzip')
-                        pc_group.create_dataset('uav_pnt_attr', data=result['uav_pnt_attr'], compression='gzip')
-                        pc_group.create_dataset('dep_points', data=result['dep_points'], compression='gzip')
-                        pc_group.create_dataset('dep_pnt_attr', data=result['dep_pnt_attr'], compression='gzip')
-                        
-                        # Save downsample masks
-                        masks_group = tile_group.create_group('downsample_masks')
-                        for j, mask in enumerate(result['uav_downsample_masks']):
-                            masks_group.create_dataset(f'mask_{j}', data=mask, compression='gzip')
+                        for key in ['uav_points', 'uav_pnt_attr', 'dep_points', 'dep_pnt_attr']:
+                            if key in result:
+                                pc_group.create_dataset(key, data=result[key], compression='gzip')
                         
                         # Save metadata as attributes or datasets
                         meta_group = tile_group.create_group('metadata')
@@ -1902,119 +1720,7 @@ def process_chunk(
                         if 'dep_meta' in result and result['dep_meta']:
                             dep_meta_group = meta_group.create_group('dep_meta')
                             store_metadata(dep_meta_group, result['dep_meta'])
-                        
-                        # Save UAVSAR imagery if available
-                        if 'has_uavsar' in result and result['has_uavsar']:
-                            uavsar_group = tile_group.create_group('uavsar')
-                            uavsar_group.attrs['resolution'] = result['uavsar_resolution']
-                            
-                            # Save expanded bbox explicitly at UAVSAR group level
-                            if 'uavsar_img_bbox' in result:
-                                uavsar_group.attrs['img_bbox'] = result['uavsar_img_bbox']
-                            elif 'img_bbox' in result:
-                                uavsar_group.attrs['img_bbox'] = result['img_bbox']
-                            
-                            # Save UAVSAR images
-                            imgs_group = uavsar_group.create_group('images')
-                            for j, img in enumerate(result['uavsar_imgs']):
-                                imgs_group.create_dataset(f'img_{j}', data=img, compression='gzip')
-                            
-                            # Save metadata for each image with bbox as direct attribute
-                            if 'uavsar_imgs_meta' in result:
-                                meta_group = uavsar_group.create_group('metadata')
-                                for j, meta in enumerate(result['uavsar_imgs_meta']):
-                                    img_meta_group = meta_group.create_group(f'img_{j}')
-                                    
-                                    # Store bbox directly in each image metadata
-                                    if 'bbox' in meta:
-                                        img_meta_group.attrs['bbox'] = meta['bbox']
-                                    elif 'img_bbox' in meta:
-                                        img_meta_group.attrs['bbox'] = meta['img_bbox']
-                                    elif 'uavsar_img_bbox' in result:
-                                        img_meta_group.attrs['bbox'] = result['uavsar_img_bbox']
-                                    elif 'img_bbox' in result:
-                                        img_meta_group.attrs['bbox'] = result['img_bbox']
-                                    
-                                    # Store resolution directly
-                                    if 'resolution' in meta:
-                                        img_meta_group.attrs['resolution'] = meta['resolution']
-                                    elif 'uavsar_resolution' in result:
-                                        img_meta_group.attrs['resolution'] = result['uavsar_resolution']
-                                    
-                                    # Store other metadata
-                                    for key, value in meta.items():
-                                        if key not in ['bbox', 'img_bbox', 'resolution']:  # Already handled
-                                            if isinstance(value, (str, int, float, bool, np.number)):
-                                                img_meta_group.attrs[key] = value
-                                            elif isinstance(value, (list, tuple)):
-                                                try:
-                                                    arr = np.array(value)
-                                                    img_meta_group.create_dataset(key, data=arr)
-                                                except:
-                                                    img_meta_group.attrs[key] = str(value)
-                            
-                            # Save stacked array if available
-                            if 'uavsar_imgs_array' in result:
-                                uavsar_group.create_dataset('stacked_imgs', 
-                                                          data=result['uavsar_imgs_array'], 
-                                                          compression='gzip')
-                        
-                        # Save NAIP imagery if available
-                        if 'has_naip' in result and result['has_naip']:
-                            naip_group = tile_group.create_group('naip')
-                            naip_group.attrs['resolution'] = result['naip_resolution']
-                            
-                            # Save expanded bbox explicitly at NAIP group level
-                            if 'naip_img_bbox' in result:
-                                naip_group.attrs['img_bbox'] = result['naip_img_bbox']
-                            elif 'img_bbox' in result:
-                                naip_group.attrs['img_bbox'] = result['img_bbox']
-                            
-                            # Save NAIP images
-                            imgs_group = naip_group.create_group('images')
-                            for j, img in enumerate(result['naip_imgs']):
-                                imgs_group.create_dataset(f'img_{j}', data=img, compression='gzip')
-                            
-                            # Save metadata for each image with bbox as direct attribute
-                            if 'naip_imgs_meta' in result:
-                                meta_group = naip_group.create_group('metadata')
-                                for j, meta in enumerate(result['naip_imgs_meta']):
-                                    img_meta_group = meta_group.create_group(f'img_{j}')
-                                    
-                                    # Store bbox directly in each image metadata
-                                    if 'bbox' in meta:
-                                        img_meta_group.attrs['bbox'] = meta['bbox']
-                                    elif 'img_bbox' in meta:
-                                        img_meta_group.attrs['bbox'] = meta['img_bbox']
-                                    elif 'naip_img_bbox' in result:
-                                        img_meta_group.attrs['bbox'] = result['naip_img_bbox']
-                                    elif 'img_bbox' in result:
-                                        img_meta_group.attrs['bbox'] = result['img_bbox']
-                                    
-                                    # Store resolution directly
-                                    if 'resolution' in meta:
-                                        img_meta_group.attrs['resolution'] = meta['resolution']
-                                    elif 'naip_resolution' in result:
-                                        img_meta_group.attrs['resolution'] = result['naip_resolution']
-                                    
-                                    # Store other metadata
-                                    for key, value in meta.items():
-                                        if key not in ['bbox', 'img_bbox', 'resolution']:  # Already handled
-                                            if isinstance(value, (str, int, float, bool, np.number)):
-                                                img_meta_group.attrs[key] = value
-                                            elif isinstance(value, (list, tuple)):
-                                                try:
-                                                    arr = np.array(value)
-                                                    img_meta_group.create_dataset(key, data=arr)
-                                                except:
-                                                    img_meta_group.attrs[key] = str(value)
-                            
-                            # Save stacked array if available
-                            if 'naip_imgs_array' in result:
-                                naip_group.create_dataset('stacked_imgs', 
-                                                        data=result['naip_imgs_array'], 
-                                                        compression='gzip')
-                        
+                    
                     # Clean up batch memory
                     for result in batch:
                         del result
@@ -2073,6 +1779,12 @@ def process_chunk(
     del chunk_results
     del future_to_tile
     gc.collect()
+
+
+
+
+
+    
 
 
 def print_summary_report(results_tracker, total_tiles):
@@ -2474,7 +2186,7 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
-    
+
     # Call processing function with the given tiles and other parameters
     process_tiles_from_geojson(
         tiles_geojson=args.tiles_geojson, 

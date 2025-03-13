@@ -4,6 +4,8 @@
 A tool to split PyTorch geospatial data tiles into training, validation, and test sets
 based on spatial intersection with reference polygons, while enforcing data quality constraints.
 
+This version supports the new flattened data structure where all data is at the top level.
+
 ## Example Usage
 
 Basic usage with default parameters:
@@ -17,8 +19,9 @@ python split_train_test_val_tiles.py \
     --pt-file data/my_tiles.pt \
     --geojson-file data/test_regions.geojson \
     --output-dir data/split_output \
-    --min-uav-points 15000 \
-    --min-dep-points 1000 \
+    --min-uav-points 6000 \
+    --min-dep-points 300 \
+    --min-uav-to-dep-ratio 1.5 \
     --test-val-ratio 0.6 \
     --random-seed 123
 ```
@@ -126,11 +129,12 @@ def check_point_cloud_coverage(points, grid_size=1.0, min_points_per_cell=1, min
     }
     
     return is_complete, stats
-
 def validate_tile(tile, min_uav_points=10000, min_dep_points=500, 
-                 min_uav_coverage_pct=80, min_points_per_cell=1):
+                 min_uav_coverage_pct=80, min_points_per_cell=1,
+                 min_uav_to_dep_ratio=None):
     """
     Validate that a tile meets the minimum criteria.
+    This function supports both the original nested structure and the new flattened structure.
     
     Parameters:
     -----------
@@ -144,6 +148,9 @@ def validate_tile(tile, min_uav_points=10000, min_dep_points=500,
         Minimum percentage of grid cells that must be covered in UAV point cloud.
     min_points_per_cell : int
         Minimum number of points required in a grid cell to consider it "covered".
+    min_uav_to_dep_ratio : float or None
+        If provided, validates that the number of UAV points is at least this many times 
+        greater than the number of DEP points. If None, this check is skipped.
         
     Returns:
     --------
@@ -151,19 +158,28 @@ def validate_tile(tile, min_uav_points=10000, min_dep_points=500,
         A tuple of (is_valid, reason). If the tile is valid, is_valid is True and reason is None.
         If the tile is invalid, is_valid is False and reason is a string explaining why.
     """
-    # Check UAV points
-    if 'point_clouds' not in tile or tile['point_clouds'] is None:
-        return False, "Missing point clouds data"
-        
-    if 'uav_points' not in tile['point_clouds'] or tile['point_clouds']['uav_points'] is None:
+    # Access UAV points based on whether the structure is flattened or nested
+    uav_points = None
+    
+    # Try to access using the flattened structure first
+    if 'uav_points' in tile and tile['uav_points'] is not None:
+        uav_points = tile['uav_points']
+    # Fall back to the original nested structure if needed
+    elif 'point_clouds' in tile and tile['point_clouds'] is not None:
+        if 'uav_points' in tile['point_clouds'] and tile['point_clouds']['uav_points'] is not None:
+            uav_points = tile['point_clouds']['uav_points']
+    
+    # Check if we have UAV points
+    if uav_points is None:
         return False, "Missing UAV points"
     
-    if tile['point_clouds']['uav_points'].shape[0] < min_uav_points:
-        return False, f"Insufficient UAV points: {tile['point_clouds']['uav_points'].shape[0]} < {min_uav_points}"
+    # Check number of UAV points
+    if uav_points.shape[0] < min_uav_points:
+        return False, f"Insufficient UAV points: {uav_points.shape[0]} < {min_uav_points}"
     
     # Check UAV point cloud coverage
     is_complete, coverage_stats = check_point_cloud_coverage(
-        tile['point_clouds']['uav_points'], 
+        uav_points, 
         grid_size=1.0,
         min_points_per_cell=min_points_per_cell,
         min_coverage_pct=min_uav_coverage_pct
@@ -172,12 +188,30 @@ def validate_tile(tile, min_uav_points=10000, min_dep_points=500,
     if not is_complete:
         return False, f"Insufficient UAV point cloud coverage: {coverage_stats['coverage_pct']:.1f}% < {min_uav_coverage_pct}%"
     
-    # Check DEP points
-    if 'dep_points' not in tile['point_clouds'] or tile['point_clouds']['dep_points'] is None:
+    # Access DEP points based on whether the structure is flattened or nested
+    dep_points = None
+    
+    # Try to access using the flattened structure first
+    if 'dep_points' in tile and tile['dep_points'] is not None:
+        dep_points = tile['dep_points']
+    # Fall back to the original nested structure if needed
+    elif 'point_clouds' in tile and tile['point_clouds'] is not None:
+        if 'dep_points' in tile['point_clouds'] and tile['point_clouds']['dep_points'] is not None:
+            dep_points = tile['point_clouds']['dep_points']
+    
+    # Check if we have DEP points
+    if dep_points is None:
         return False, "Missing DEP points"
     
-    if tile['point_clouds']['dep_points'].shape[0] < min_dep_points:
-        return False, f"Insufficient DEP points: {tile['point_clouds']['dep_points'].shape[0]} < {min_dep_points}"
+    # Check number of DEP points
+    if dep_points.shape[0] < min_dep_points:
+        return False, f"Insufficient DEP points: {dep_points.shape[0]} < {min_dep_points}"
+    
+    # Check the ratio of UAV points to DEP points, if a minimum ratio is specified
+    if min_uav_to_dep_ratio is not None:
+        uav_to_dep_ratio = uav_points.shape[0] / dep_points.shape[0]
+        if uav_to_dep_ratio < min_uav_to_dep_ratio:
+            return False, f"Insufficient UAV to DEP point ratio: {uav_to_dep_ratio:.2f} < {min_uav_to_dep_ratio}"
     
     return True, None
 
@@ -191,6 +225,7 @@ def split_dataset(
     min_dep_points=500,
     min_uav_coverage_pct=80,
     min_points_per_cell=1,
+    min_uav_to_dep_ratio=None,
     random_seed=42
 ):
     """
@@ -209,6 +244,17 @@ def split_dataset(
         Whether to create a validation set from the test set.
     test_val_split_ratio : float
         Ratio for splitting the test set into test and validation sets (0.5 means 50% test, 50% validation).
+    min_uav_points : int
+        Minimum number of UAV points required for a valid tile.
+    min_dep_points : int
+        Minimum number of DEP points required for a valid tile.
+    min_uav_coverage_pct : float
+        Minimum percentage of grid cells that must be covered in UAV point cloud.
+    min_points_per_cell : int
+        Minimum points per grid cell to consider it covered.
+    min_uav_to_dep_ratio : float or None
+        If provided, validates that the number of UAV points is at least this many times 
+        greater than the number of DEP points.
     random_seed : int
         Random seed for reproducibility.
     """
@@ -261,7 +307,8 @@ def split_dataset(
             min_uav_points=min_uav_points, 
             min_dep_points=min_dep_points,
             min_uav_coverage_pct=min_uav_coverage_pct,
-            min_points_per_cell=min_points_per_cell
+            min_points_per_cell=min_points_per_cell,
+            min_uav_to_dep_ratio=min_uav_to_dep_ratio
         )
         if is_valid:
             valid_tiles.append((i, tile))
@@ -397,6 +444,8 @@ if __name__ == "__main__":
                         help='Minimum percentage of grid cells that must be covered in UAV point cloud.')
     parser.add_argument('--min-points-per-cell', type=int, default=1,
                         help='Minimum points per grid cell to consider it covered.')
+    parser.add_argument('--min-uav-to-dep-ratio', type=float, default=None,
+                        help='If provided, validates that the number of UAV points is at least this many times greater than the number of DEP points.')
     
     # Parse arguments
     args = parser.parse_args()
@@ -412,5 +461,6 @@ if __name__ == "__main__":
         min_dep_points=args.min_dep_points,
         min_uav_coverage_pct=args.min_coverage,
         min_points_per_cell=args.min_points_per_cell,
+        min_uav_to_dep_ratio=args.min_uav_to_dep_ratio,
         random_seed=args.random_seed
     )
