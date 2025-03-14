@@ -27,40 +27,45 @@ from torch_geometric.nn import TransformerConv  # Using TransformerConv instead 
 from torch_geometric.nn import PointTransformerConv
 
 ###############################################
-# 1. FeatureExtractor (as before)
+# 1. FeatureExtractor
 ###############################################
 
 class FeatureExtractor(nn.Module):
     """
-    Takes positions and a precomputed edge_index and returns features.
+    Takes positions, attributes, and a precomputed edge_index and returns features.
     Uses PointTransformerConv layers to capture local geometric detail.
     """
-    def __init__(self, feature_dim=64):
+    def __init__(self, feature_dim=64, attr_dim=3):
         super().__init__()
-        # First PointTransformerConv layer: input dimension is 3 (point coordinates)
-        self.pt_conv1 = PointTransformerConv(in_channels=3, out_channels=64)
-        # Second layer: input dimension 64, output dimension is feature_dim.
+        # First PointTransformerConv layer: input dimension is 3+attr_dim (position + attributes)
+        self.pt_conv1 = PointTransformerConv(in_channels=3+attr_dim, out_channels=64)
+        # Second layer
         self.pt_conv2 = PointTransformerConv(in_channels=64, out_channels=feature_dim)
 
-    def forward(self, pos, edge_index):
+    def forward(self, pos, attr, edge_index):
         """
         Args:
             pos: Tensor of shape [N, 3] containing point coordinates.
+            attr: Tensor of shape [N, attr_dim] containing point attributes.
             edge_index: Tensor of shape [2, E] containing the edge indices.
         Returns:
             x_feat: Tensor of shape [N, feature_dim] representing per-point features.
         """
-        # Use the positions as the initial feature vector.
-        x_feat = self.pt_conv1(pos, pos, edge_index)
+        # Concatenate position and attributes
+        x_combined = torch.cat([pos, attr], dim=1)  # shape: [N, 3 + attr_dim]
+        
+        # Use PointTransformerConv with the combined features
+        # Note: we still use pos for positional encoding within the transformer
+        x_feat = self.pt_conv1(x_combined, pos, edge_index)
         x_feat = self.pt_conv2(x_feat, pos, edge_index)
         return x_feat
-
+        
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import TransformerConv
 
-class NodeShuffleFeatureExpansion_Relative_Attn(nn.Module):
+class Feature_Expansion(nn.Module):
     def __init__(self, feat_dim=64, up_ratio=2, pos_mlp_hidden=32, 
                  up_attn_hds=2, up_concat=False, up_beta=False, up_dropout=0, 
                  fnl_attn_hds=2):
@@ -215,7 +220,7 @@ class NodeShuffleFeatureExpansion_Relative_Attn(nn.Module):
 
 
 ###############################################
-# 3. NodeShufflePointUpsampler_Relative_Attn
+# 3. PointUpsampler
 ###############################################
 
 import torch
@@ -223,7 +228,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import TransformerConv
 
-class NodeShufflePointUpsampler_Relative_Attn(nn.Module):
+class PointUpsampler(nn.Module):
     def __init__(self, 
                  feat_dim=64, 
                  up_ratio=2, 
@@ -232,11 +237,12 @@ class NodeShufflePointUpsampler_Relative_Attn(nn.Module):
                  up_concat=False, 
                  up_beta=False, 
                  up_dropout=0, 
-                 fnl_attn_hds=2):
+                 fnl_attn_hds=2,
+                 attr_dim=3):  # Add attr_dim parameter
         """
         Point cloud upsampler using:
           (a) FeatureExtractor -> normalized output
-          (b) NodeShuffleFeatureExpansion_Relative_Attn -> normalized output
+          (b) Feature_Expansion -> normalized output
           (c) MLP decoder -> final 3D coordinates.
         """
         super().__init__()
@@ -244,7 +250,7 @@ class NodeShufflePointUpsampler_Relative_Attn(nn.Module):
         # ------------------------
         # 1) Feature Extractor
         # ------------------------
-        self.feature_extractor = FeatureExtractor(feature_dim=feat_dim)
+        self.feature_extractor = FeatureExtractor(feature_dim=feat_dim, attr_dim=attr_dim)
         
         # Add LayerNorm right after the feature extractor output
         self.norm_after_extractor = nn.LayerNorm(feat_dim)
@@ -252,7 +258,7 @@ class NodeShufflePointUpsampler_Relative_Attn(nn.Module):
         # ------------------------
         # 2) Node Shuffle
         # ------------------------
-        self.node_shuffle = NodeShuffleFeatureExpansion_Relative_Attn(
+        self.node_shuffle = Feature_Expansion(
             feat_dim=feat_dim,
             up_ratio=up_ratio,
             pos_mlp_hidden=pos_mlp_hidden,
@@ -279,9 +285,13 @@ class NodeShufflePointUpsampler_Relative_Attn(nn.Module):
             nn.Linear(64, 3)
         )
 
-    def forward(self, dep_points, edge_index):
+    def forward(self, dep_points, edge_index, dep_attr=None):
+        # Default to zero attributes if None is provided
+        if dep_attr is None:
+            dep_attr = torch.zeros(dep_points.size(0), 3, device=dep_points.device)
+            
         # ====== 1) Feature Extraction ======
-        x_feat = self.feature_extractor(dep_points, edge_index)  # [N_dep, feat_dim]
+        x_feat = self.feature_extractor(dep_points, dep_attr, edge_index)  # [N_dep, feat_dim]
         # check_tensor(x_feat, "FeatureExtractor output (x_feat)")
         
         # # Normalize + optional activation
@@ -306,261 +316,3 @@ class NodeShufflePointUpsampler_Relative_Attn(nn.Module):
 
 
 
-
-
-# def chamfer_distance(pc1, pc2):
-#     """
-#     Computes the Chamfer distance between two point clouds.
-#     pc1: [N1, 3]
-#     pc2: [N2, 3]
-#     """
-#     dist = torch.cdist(pc1, pc2)  # [N1, N2]
-#     min_dist_pc1, _ = dist.min(dim=1)  # [N1]
-#     min_dist_pc2, _ = dist.min(dim=0)  # [N2]
-#     return min_dist_pc1.mean() + min_dist_pc2.mean()
-
-# import torch
-
-
-
-
-# from pytorch3d.loss import chamfer_distance as cdist
-
-# def chamfer_distance_pytorch3d(pc1, pc2):
-#     """
-#     Computes the Chamfer distance using PyTorch3D, converting inputs to float32 
-#     temporarily for loss computation.
-#     """
-#     # Save the current device.
-#     device = pc1.device
-    
-#     # Convert to float32 without detaching (so gradients are preserved).
-#     pc1_f32 = pc1.to(torch.float32)
-#     pc2_f32 = pc2.to(torch.float32)
-    
-#     # Check for NaNs or INF in the inputs to chamfer_distance
-#     # check_tensor(pc1_f32, "Chamfer input pc1_f32")
-#     # check_tensor(pc2_f32, "Chamfer input pc2_f32")
-#     # Add batch dimension.
-#     pc1_f32 = pc1_f32.unsqueeze(0)
-#     pc2_f32 = pc2_f32.unsqueeze(0)
-    
-#     loss, _ = cdist(pc1_f32, pc2_f32)
-#     return loss.to(device)
-
-
-
-import torch
-import torch.nn.functional as F
-
-def sliced_wasserstein_distance(pc1, pc2, num_projections=50, p=2):
-    """
-    Approximates the Wasserstein distance using Sliced Wasserstein Distance (SWD).
-    
-    Args:
-        pc1 (torch.Tensor): [N, d] point cloud.
-        pc2 (torch.Tensor): [M, d] point cloud.
-        num_projections (int): Number of random directions (projections) to use.
-        p (int): The exponent in the L^p norm (typically 1 or 2).
-        
-    Returns:
-        torch.Tensor: A scalar tensor representing the SWD.
-    """
-    # Ensure point clouds are of shape [N, d] and [M, d]
-    d = pc1.shape[1]
-    device = pc1.device
-
-    # Generate random projection directions on the unit sphere.
-    projections = torch.randn(num_projections, d, device=device)
-    projections = F.normalize(projections, p=2, dim=1)  # shape: [num_projections, d]
-
-    # Project both point clouds onto these directions.
-    proj_pc1 = pc1 @ projections.t()  # shape: [N, num_projections]
-    proj_pc2 = pc2 @ projections.t()  # shape: [M, num_projections]
-
-    # Sort the projections along the point dimension.
-    proj_pc1_sorted, _ = torch.sort(proj_pc1, dim=0)  # shape: [N, num_projections]
-    proj_pc2_sorted, _ = torch.sort(proj_pc2, dim=0)  # shape: [M, num_projections]
-
-    # To handle different numbers of points, interpolate both sorted projections to a common grid.
-    # Here, we choose a fixed number of bins (e.g., max(N, M)).
-    num_bins = max(pc1.shape[0], pc2.shape[0])
-    
-    # A helper: interpolate a sorted projection to num_bins
-    def interpolate_sorted(sorted_proj, original_length, num_bins):
-        # sorted_proj: [original_length, num_projections]
-        # Unsqueeze and permute to shape [1, num_projections, original_length]
-        sorted_proj = sorted_proj.unsqueeze(0).permute(0, 2, 1)
-        sorted_proj_interp = F.interpolate(sorted_proj, size=num_bins, mode='linear', align_corners=True)
-        # Permute back to shape [num_bins, num_projections]
-        return sorted_proj_interp.squeeze(0).permute(1, 0)
-    
-    proj_pc1_interp = interpolate_sorted(proj_pc1_sorted, pc1.shape[0], num_bins)  # [num_bins, num_projections]
-    proj_pc2_interp = interpolate_sorted(proj_pc2_sorted, pc2.shape[0], num_bins)  # [num_bins, num_projections]
-
-    # Compute the p-th power of the difference, average over bins and then over projections.
-    swd = torch.abs(proj_pc1_interp - proj_pc2_interp).pow(p).mean(dim=0).pow(1.0/p)
-    return swd.mean()
-
-# Example usage:
-# pc1 and pc2 are torch tensors on the GPU.
-# distance = sliced_wasserstein_distance(pc1, pc2, num_projections=50, p=2)
-
-
-# Update the run_inference_and_visualize_2plots function to use the new data structure
-def run_inference_and_visualize_2plots(
-    trained_model, 
-    model_data, 
-    index1=0, 
-    index2=1, 
-    device='cuda', 
-    width=14, 
-    height=3,
-    hide_labels=False
-):
-    """
-    Runs inference on two different samples (index1 & index2),
-    visualizes both in a single row of six plots with an empty separator,
-    and displays Chamfer Distance (CD) and Hausdorff Distance (HD).
-    """
-
-    def process_sample(index):
-        """Extracts data, runs inference, and computes distance metrics."""
-        sample = model_data[index]
-        
-        # Extract normalized points and edge index from the precomputed data
-        dep_points_norm = sample['dep_points_norm']  # [N_dep, 3]
-        uav_points_norm = sample['uav_points_norm']  # [N_uav, 3]
-        
-        # Use the precomputed edge index from dep_edge_index (set by precompute_knn_inplace)
-        # or fall back to a specific k value from knn_edge_indices
-        if 'dep_edge_index' in sample:
-            edge_index = sample['dep_edge_index']
-        elif 'knn_edge_indices' in sample and 30 in sample['knn_edge_indices']:  # Default to k=30
-            edge_index = sample['knn_edge_indices'][30]
-        else:
-            # Last resort fallback
-            print(f"Warning: No precomputed edges found for sample {index}, computing KNN")
-            edge_index = knn_graph(dep_points_norm, k=30, loop=False)
-            edge_index = to_undirected(edge_index, num_nodes=dep_points_norm.size(0))
-
-        # Move to device
-        dep_points_norm = dep_points_norm.to(device)
-        uav_points_norm = uav_points_norm.to(device)
-        edge_index = edge_index.to(device)
-
-        # Run inference with normalized points
-        trained_model.eval()
-        with torch.no_grad():
-            pred_points_norm = trained_model(dep_points_norm, edge_index)
-
-        # Compute distances
-        orig_chamfer_dist = chamfer_distance(dep_points_norm, uav_points_norm)
-        upsmpl_chamfer_dist = chamfer_distance(pred_points_norm, uav_points_norm)
-
-        orig_hausdorff_dist = hausdorff_distance(dep_points_norm, uav_points_norm)
-        upsmpl_hausdorff_dist = hausdorff_distance(pred_points_norm, uav_points_norm)
-        
-        # Return CPU data for plotting
-        return (
-            dep_points_norm.cpu(),
-            uav_points_norm.cpu(),
-            pred_points_norm.cpu(),
-            orig_chamfer_dist,
-            upsmpl_chamfer_dist,
-            orig_hausdorff_dist,
-            upsmpl_hausdorff_dist
-        )
-
-    # Process both samples
-    dep1, uav1, pred1, chamfer1_orig, chamfer1_upsmpl, hausdorff1_orig, hausdorff1_upsmpl = process_sample(index1)
-    dep2, uav2, pred2, chamfer2_orig, chamfer2_upsmpl, hausdorff2_orig, hausdorff2_upsmpl = process_sample(index2)
-    
-    # The rest of the function remains unchanged...
-    # Create a single row of subplots with an empty separator
-    fig, axes = plt.subplots(1, 7, figsize=(width, height), subplot_kw={'projection': '3d'})
-
-    def configure_axes(ax, title):
-        """Helper function to configure axis formatting."""
-        if hide_labels:
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.set_zticks([])
-            ax.set_title('')  # Remove title
-        else:
-            ax.set_title(title, fontsize=8)
-            ax.tick_params(labelsize=6, pad=0)
-            ax.ticklabel_format(style='plain', axis='both')
-            ax.xaxis.get_offset_text().set_visible(False)
-            ax.yaxis.get_offset_text().set_visible(False)
-            ax.zaxis.get_offset_text().set_visible(False)
-
-    def add_distance_labels(ax, chamfer_dist, hausdorff_dist):
-        """Add Chamfer Distance (CD) and Hausdorff Distance (HD) labels to the plot."""
-        ax.text2D(0, 0.1, f"CD: {chamfer_dist:.4f}", transform=ax.transAxes, fontsize=7, color='black')
-        ax.text2D(0, 0, f"HD: {hausdorff_dist:.4f}", transform=ax.transAxes, fontsize=7, color='black')
-
-    # First three plots => Sample index1
-    axes[0].scatter(dep1[:, 0], dep1[:, 1], dep1[:, 2], c='blue', s=0.1, alpha=0.2)
-    configure_axes(axes[0], f"3DEP ({index1})")
-    add_distance_labels(axes[0], chamfer1_orig, hausdorff1_orig)
-
-    axes[1].scatter(uav1[:, 0], uav1[:, 1], uav1[:, 2], c='green', s=0.1, alpha=0.2)
-    configure_axes(axes[1], f"UAV ({index1})")
-
-    axes[2].scatter(pred1[:, 0], pred1[:, 1], pred1[:, 2], c='red', s=0.1, alpha=0.2)
-    configure_axes(axes[2], f"Upsampled ({index1})")
-    add_distance_labels(axes[2], chamfer1_upsmpl, hausdorff1_upsmpl)
-
-    # Empty plot for separation
-    axes[3].axis("off")
-
-    # Next three plots => Sample index2
-    axes[4].scatter(dep2[:, 0], dep2[:, 1], dep2[:, 2], c='blue', s=0.1, alpha=0.2)
-    configure_axes(axes[4], f"3DEP ({index2})")
-    add_distance_labels(axes[4], chamfer2_orig, hausdorff2_orig)
-
-    axes[5].scatter(uav2[:, 0], uav2[:, 1], uav2[:, 2], c='green', s=0.1, alpha=0.2)
-    configure_axes(axes[5], f"UAV ({index2})")
-
-    axes[6].scatter(pred2[:, 0], pred2[:, 1], pred2[:, 2], c='red', s=0.1, alpha=0.2)
-    configure_axes(axes[6], f"Upsampled ({index2})")
-    add_distance_labels(axes[6], chamfer2_upsmpl, hausdorff2_upsmpl)
-
-    # Adjust layout to remove excess whitespace
-    plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0)
-
-    plt.show()
-    
-
-
-###############################################
-# 4. Example Usage
-###############################################
-
-if __name__ == '__main__':
-    # Dummy input data for testing:
-    N_dep = 1024       # Number of input points
-    feat_dim = 64
-    up_ratio = 2
-    pos_mlp_hidden = 32
-    attn_heads = 4
-
-    # Create dummy point cloud and edge_index (for example, from a kNN graph)
-    dep_points = torch.rand(N_dep, 3).cuda()  # random points on GPU
-
-    # For demonstration, create a dummy edge_index connecting sequential points.
-    # In practice, use a proper kNN or radius graph.
-    edge_index = torch.tensor([list(range(N_dep-1)), list(range(1, N_dep))], dtype=torch.long).cuda()
-
-    # Instantiate the upsampler model.
-    model = NodeShufflePointUpsampler_Relative_Attn(
-        feat_dim=feat_dim,
-        up_ratio=up_ratio,
-        pos_mlp_hidden=pos_mlp_hidden,
-        attn_heads=attn_heads
-    ).cuda()
-
-    # Forward pass.
-    pred_points = model(dep_points, edge_index)
-    print(f"Output shape: {pred_points.shape}")  # Expected shape: [up_ratio * N_dep, 3]

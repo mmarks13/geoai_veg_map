@@ -12,6 +12,8 @@ from dataclasses import dataclass, asdict
 import optuna
 import os
 import sys
+import pytz
+from datetime import datetime
 
 # Add the project root to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -19,7 +21,7 @@ sys.path.insert(0, project_root)
 
 # Project-specific imports.
 from src.evaluation.inference_eval import run_inference_and_visualize_2plots
-from src.models.model import NodeShufflePointUpsampler_Relative_Attn
+from src.models.model import PointUpsampler
 from src.utils.chamfer_distance import chamfer_distance
 
 
@@ -35,23 +37,37 @@ class PointCloudUpsampleDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.data_list[idx]
-        # Use precomputed normalized points instead of raw points
-        dep_points_norm = sample['dep_points_norm']       # [N_dep, 3] - already normalized
-        uav_points_norm = sample['uav_points_norm']       # [N_uav, 3] - already normalized
-        edge_index = sample['dep_edge_index']   # [2, E] - precomputed in precompute_knn_inplace
+        # Get normalized points
+        dep_points_norm = sample['dep_points_norm'] 
+        uav_points_norm = sample['uav_points_norm']
+        edge_index = sample['dep_edge_index']
+        # Get point attributes
+        dep_points_attr = sample.get('dep_points_attr', None)
         
-        # No need to call normalize_pair since points are already normalized
-        return (dep_points_norm, uav_points_norm, edge_index)
-
+        if dep_points_attr is not None:
+            # Compute min and max for all dimensions at once
+            min_vals = dep_points_attr.min(dim=0)[0]
+            max_vals = dep_points_attr.max(dim=0)[0]
+            
+            # Create a mask for dimensions with valid ranges
+            ranges = max_vals - min_vals
+            valid_dims = ranges > 0
+            
+            # Only normalize dimensions with non-zero range
+            if valid_dims.any():
+                # Reshape for broadcasting
+                min_vals = min_vals.view(1, -1)
+                ranges = ranges.view(1, -1)
+                
+                # Only apply normalization where range is non-zero
+                dep_points_attr[:, valid_dims] = (dep_points_attr[:, valid_dims] - min_vals[:, valid_dims]) / ranges[:, valid_dims]
+        
+        return (dep_points_norm, uav_points_norm, edge_index, dep_points_attr)
 
 # Update precompute_knn_inplace to use the precomputed KNN edge indices
-def precompute_knn_inplace(model_data, k=30):
+def precompute_features(model_data, k=30):
     """
-    Extracts the precomputed KNN graph for each sample and places it in 'dep_edge_index'
-    for compatibility with existing code.
-    
-    model_data: list of dicts with precomputed data
-    k: Number of neighbors for KNN graph.
+    Extracts the precomputed KNN graph and normalizes attributes.
     """
     for sample in model_data:
         # Extract the edge index for the specified k from precomputed data
@@ -64,13 +80,31 @@ def precompute_knn_inplace(model_data, k=30):
             edge_index = knn_graph(dep_points, k=k, loop=False)
             edge_index = to_undirected(edge_index, num_nodes=dep_points.size(0))
             sample['dep_edge_index'] = edge_index
-
+            
+        # # Normalize attributes once and store result
+        # if 'dep_points_attr' in sample and sample['dep_points_attr'] is not None:
+        #     attrs = sample['dep_points_attr']
+            
+        #     # Vectorized min-max normalization
+        #     min_vals = attrs.min(dim=0)[0]
+        #     max_vals = attrs.max(dim=0)[0] 
+        #     ranges = max_vals - min_vals
+        #     valid_dims = ranges > 0
+            
+        #     if valid_dims.any():
+        #         # Only normalize dimensions with valid ranges
+        #         attrs_normalized = attrs.clone()
+        #         for d in range(attrs.shape[1]):
+        #             if ranges[d] > 0:
+        #                 attrs_normalized[:, d] = (attrs[:, d] - min_vals[d]) / ranges[d]
+                
+        #         sample['dep_points_attr'] = attrs_normalized
 
 # Update create_dataloaders function (log message changed)
 def create_dataloaders(train_dataset, val_dataset, k, batch_size):
     print(f"Extracting precomputed k-NN with k={k} ...")
-    precompute_knn_inplace(train_dataset, k=k)
-    precompute_knn_inplace(val_dataset, k=k)
+    precompute_features(train_dataset, k=k)
+    precompute_features(val_dataset, k=k)
     print("Extraction complete.")
     
     torch_train_data = PointCloudUpsampleDataset(train_dataset)
@@ -86,13 +120,15 @@ def create_dataloaders(train_dataset, val_dataset, k, batch_size):
 
 
 def variable_size_collate(batch):
-    dep_list, uav_list, edge_list = [], [], []
-    for (dep_pts, uav_pts, e_idx) in batch:
+    dep_list, uav_list, edge_list, attr_list = [], [], [], []
+    for item in batch:
+        dep_pts, uav_pts, e_idx, dep_attr = item
         dep_list.append(dep_pts)
         uav_list.append(uav_pts)
         edge_list.append(e_idx)
+        attr_list.append(dep_attr)
         
-    return dep_list, uav_list, edge_list
+    return dep_list, uav_list, edge_list, attr_list
 
 
 
@@ -123,31 +159,31 @@ class ModelConfig:
     fnl_attn_hds: int = 2
 
 
+
+
 def process_batch(model, batch, device):
     """
     Process a single batch through the model and compute the average loss per sample.
     """
-    dep_list, uav_list, edge_list = batch
+    dep_list, uav_list, edge_list, attr_list = batch
     total_loss = 0.0
     sample_count = 0
-    for dep_points, uav_points, e_idx in zip(dep_list, uav_list, edge_list):
-        dep_points = dep_points.to(device)
-        uav_points = uav_points.to(device)
-        e_idx = e_idx.to(device)
+    for i in range(len(dep_list)):
+        dep_points = dep_list[i].to(device)
+        uav_points = uav_list[i].to(device)
+        e_idx = edge_list[i].to(device)
+        dep_attr = attr_list[i].to(device) if attr_list[i] is not None else None
         
-        # Run the model to get predicted points
-        pred_points = model(dep_points, e_idx)
+        # Run the model with attributes
+        pred_points = model(dep_points, e_idx, dep_attr)
         
-        # Add batch dimension required by chamfer_distance function
-        pred_points_batch = pred_points.unsqueeze(0)  # [N, 3] -> [1, N, 3]
-        uav_points_batch = uav_points.unsqueeze(0)    # [N, 3] -> [1, N, 3]
+        # Rest of processing remains the same
+        pred_points_batch = pred_points.unsqueeze(0)
+        uav_points_batch = uav_points.unsqueeze(0)
         
-        # Get point counts if needed
         pred_length = torch.tensor([pred_points.shape[0]], device=device)
         uav_length = torch.tensor([uav_points.shape[0]], device=device)
         
-        # Compute chamfer distance - function returns (distance, normals)
-        # We only need the distance part
         chamfer_loss, _ = chamfer_distance(
             pred_points_batch, 
             uav_points_batch,
@@ -160,8 +196,9 @@ def process_batch(model, batch, device):
         total_loss += chamfer_loss
         sample_count += 1
     
-    # Return the average loss for the batch
     return total_loss / sample_count if sample_count > 0 else total_loss
+
+
 
 
 def train_one_epoch(model, train_loader, optimizer, device, scaler):
@@ -180,7 +217,18 @@ def train_one_epoch(model, train_loader, optimizer, device, scaler):
     train_loss_total = 0.0
     batch_times = []
     batch_mem = []
-    
+    # Add this check at the beginning of your train_one_epoch function
+    for batch_idx, batch in enumerate(train_loader):
+        _, _, _, attr_list = batch
+        for i, attr in enumerate(attr_list):
+            if attr is not None:
+                if torch.isnan(attr).any():
+                    print(f"Batch {batch_idx}, sample {i} has NaN attribute values")
+                if torch.isinf(attr).any():
+                    print(f"Batch {batch_idx}, sample {i} has Infinite attribute values")
+                # Check for extreme values
+                if attr.abs().max() > 1000:
+                    print(f"Batch {batch_idx}, sample {i} has extreme attribute values: {attr.abs().max().item()}")
     for batch in train_loader:
         # Reset the peak memory counter for this batch.
         torch.cuda.reset_peak_memory_stats(device)
@@ -240,12 +288,12 @@ class ModelConfig:
     up_beta: bool = False
     up_dropout: float = 0.0
     fnl_attn_hds: int = 2
-
+    attr_dim: int = 3  # Add attribute dimension
 # ---------------------------
 # create_model() Function
 # ---------------------------
 def create_model(device, config: ModelConfig):
-    model = NodeShufflePointUpsampler_Relative_Attn(
+    model = PointUpsampler(
         feat_dim=config.feature_dim,
         up_ratio=config.up_ratio,
         pos_mlp_hidden=config.pos_mlp_hdn,
@@ -253,8 +301,14 @@ def create_model(device, config: ModelConfig):
         up_concat=config.up_concat,
         up_beta=config.up_beta,
         up_dropout=config.up_dropout,
-        fnl_attn_hds=config.fnl_attn_hds
-    ).to(device)
+        fnl_attn_hds=config.fnl_attn_hds,
+        attr_dim=config.attr_dim  # Pass attribute dimension
+    )
+    # Wrap with DataParallel if multiple GPUs are available
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
+    model.to(device)
     return model
 
 
@@ -300,7 +354,7 @@ def format_size(size_bytes):
     return f"{size_bytes / (1024**2):.2f} MB"
 
 # Example usage:
-model = NodeShufflePointUpsampler_Relative_Attn(feat_dim=118, up_ratio=2, up_attn_hds=2, fnl_attn_hds=3, up_concat=True).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+model = PointUpsampler(feat_dim=118, up_ratio=2, up_attn_hds=2, fnl_attn_hds=3, up_concat=True).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 
 def train_pointcloud_upsampler(
     train_dataset,
@@ -346,7 +400,14 @@ def train_pointcloud_upsampler(
     
     for epoch in range(num_epochs):
         epoch_start_time = time.time()
+
+
+        # Define the Pacific time zone (adjusts for DST if necessary)
+        pacific_tz = pytz.timezone('America/Los_Angeles')
         
+        # At the beginning of your epoch loop:
+        current_time = datetime.now(pacific_tz)
+        print(f"Epoch {epoch+1} start time (PST): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
         # Modified train_one_epoch now returns additional stats:
         (avg_train_loss,
          avg_batch_time, 
@@ -364,7 +425,7 @@ def train_pointcloud_upsampler(
         log_message = (f"Epoch {epoch+1}/{num_epochs} | "
                        f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | "
                        f"LR: {optimizer.param_groups[0]['lr']:.4e} | "
-                       f"Time: {epoch_time:.1f}s | "
+                       f"Time: {epoch_time/60:.2f}min | "
                        f"Batch Time: Avg {avg_batch_time:.3f}s, Max {max_batch_time:.3f}s | "
                        f"Memory: Avg {avg_batch_mem:.1f}GB, Max {max_batch_mem:.1f}GB")
         
@@ -381,7 +442,8 @@ def train_pointcloud_upsampler(
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             epochs_without_improvement = 0
-            best_model_state = model.state_dict()
+            # If model is wrapped in DataParallel, unwrap it.
+            best_model_state = model.module.state_dict() if hasattr(model, "module") else model.state_dict()
             logger.info(f"New best validation loss: {best_val_loss:.6f}")
         else:
             epochs_without_improvement += 1
@@ -409,7 +471,8 @@ def train_pointcloud_upsampler(
             checkpoint_path = f"{checkpoint_dir}/{checkpoint_name}"
             torch.save(model.state_dict(), checkpoint_path)
             logger.info(f"Checkpoint saved: {checkpoint_path}")
-    
+
+            
     if best_model_state is not None:
         final_checkpoint_name = f"{model_name}_final_best.pth"
         final_checkpoint_path = f"{checkpoint_dir}/final_best/{final_checkpoint_name}"

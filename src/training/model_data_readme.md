@@ -17,8 +17,8 @@ Each tile dictionary contains the following top-level keys:
 
 | Key | Data Type | Shape | Description |
 |-----|-----------|-------|-------------|
-| `dep_points_norm` | Tensor | [N_dep, 3] | Normalized 3DEP (3D Elevation Program) points. Point densities vary. Typically 1000-5000 points, sometimes as high as 10000 |
-| `uav_points_norm` | Tensor | [N_uav, 3] | Normalized UAV (Unmanned Aerial Vehicle) points (downsampled). Point densities vary, but each one is downsampled to 20000 points or fewer.  |
+| `dep_points_norm` | Tensor | [N_dep, 3] | Normalized 3DEP (3D Elevation Program) points (x,y,z). Point densities vary. Typically 1000-5000 points, sometimes as high as 10000 |
+| `uav_points_norm` | Tensor | [N_uav, 3] | Normalized UAV (Unmanned Aerial Vehicle) points (downsampled) (x,y,z). Point densities vary, but each one is downsampled to 20000 points or fewer.  |
 | `dep_points_attr` | Tensor | [N_dep, 3] | Attributes associated with 3DEP points. ['Intensity', 'ReturnNumber', 'NumberOfReturns'] |
 | `uav_points_attr` | Tensor or None | [N_uav, 3] | Attributes associated with UAV points. ['Intensity', 'ReturnNumber', 'NumberOfReturns']  |
 | `center` | Tensor | [1, 3] | Normalization center used for point cloud normalization |
@@ -40,11 +40,11 @@ The `knn_edge_indices` dictionary maps k-values to edge indices:
 |-----|-----------|-------|-------------|
 | k (integer) | Tensor | [2, E] | Edge indices for KNN graph with k neighbors |
 
-Where k is one of: 10, 15, 20, 30, 40, 50, 60 and E is the number of edges.
+Where k is one of: 10, 15, 20 and E is the number of edges.
 
 ### NAIP Dictionary
 
-The `naip` dicionary contains the available NAIP imagery for a given tile between the 3DEP and UAV Lidar acquisition dates. It could contain anywhere from 2 to 6 images. The `naip` dictionary contains:
+The `naip` dicionary contains the available NAIP imagery for a given tile between the 3DEP and UAV Lidar acquisition dates. It could contain anywhere from 2 to 6 images. The dates of these images DO NOT align with the dates of the UAVSAR imagery. The `naip` dictionary contains:
 
 | Key | Data Type | Shape | Description |
 |-----|-----------|-------|-------------|
@@ -58,7 +58,7 @@ The `naip` dicionary contains the available NAIP imagery for a given tile betwee
 
 ### UAVSAR Dictionary
 
-The `uavsar` dicionary contains the available UAVSAR imagery for a given tile between the 3DEP and UAV Lidar acquisition dates. It could contain anywhere from 4 to 30 images. The `uavsar` dictionary contains:
+The `uavsar` dicionary contains the available UAVSAR imagery for a given tile between the 3DEP and UAV Lidar acquisition dates. It could contain anywhere from 4 to 30 images. The dates of these images DO NOT align with the dates of the NAIP imagery. The `uavsar` dictionary contains:
 
 | Key | Data Type | Shape | Description |
 |-----|-----------|-------|-------------|
