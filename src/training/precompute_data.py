@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Dict, Any, List
 from torch_geometric.nn import knn_graph
 from torch_geometric.utils import to_undirected
+import numpy as np
 
 ##########################################
 # Utility Functions for Date Parsing
@@ -252,7 +253,7 @@ def precompute_dataset(data_list, normalization_type: str = 'bbox', grid_size: i
     precomputed_data_list = []
     # Define list of k values for KNN computation.
     # k_values = [10, 15]
-    k_values = [10, 15, 20, 30, 40, 50, 60]
+    k_values = [15]
     
     for sample in data_list:
         # --- Point Cloud Preprocessing ---
@@ -317,7 +318,7 @@ def precompute_dataset(data_list, normalization_type: str = 'bbox', grid_size: i
             'dep_points_norm': dep_points_norm,        # [N_dep, 3]
             'uav_points_norm': uav_points_norm,        # [N_uav_down, 3]
             'dep_points_attr': dep_pnt_attr,           # [N_dep, 3]
-            'uav_points_attr': uav_pnt_attr if 'uav_pnt_attr' in sample else None,  # [N_uav_down, 3]
+            # 'uav_points_attr': uav_pnt_attr if 'uav_pnt_attr' in sample else None,  # [N_uav_down, 3]
             'center': center,                          # [1, 3]
             'scale': scale,                            # Scalar
             'dep_grid_indices': dep_grid_indices,      # [N_dep]
@@ -341,27 +342,26 @@ import warnings
 
 def main():
     # File paths for the input datasets.
-    training_file = 'data/processed/model_data/test/training_tiles.pt'
-    validation_file = 'data/processed/model_data/test/validation_tiles.pt'
-    test_file = 'data/processed/model_data/test/test_tiles.pt'
+    training_file = 'data/processed/model_data/training_tiles.pt'
+    validation_file = 'data/processed/model_data/validation_tiles.pt'
+    test_file = 'data/processed/model_data/test_tiles.pt'
     
     # Load the PyTorch file containing the tiles
     print("Loading the PyTorch file...")
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=FutureWarning, 
-                                message="You are using `torch.load` with `weights_only=False`")
-        # Load datasets (each is expected to be a list of tile dictionaries).
-        training_tiles = torch.load(training_file)
-        validation_tiles = torch.load(validation_file)
-        test_tiles = torch.load(test_file)
-    
-    print("Precomputing training dataset...")
-    precomputed_training = precompute_dataset(training_tiles, normalization_type='bbox', grid_size=20)
+    with torch.serialization.safe_globals([np.core.multiarray.scalar]):
+        # Explicitly set weights_only=False to fully load the file.
+        training_tiles = torch.load(training_file, weights_only=False)
+        validation_tiles = torch.load(validation_file, weights_only=False)
+        test_tiles = torch.load(test_file, weights_only=False)
+
+
     print("Precomputing validation dataset...")
     precomputed_validation = precompute_dataset(validation_tiles, normalization_type='bbox', grid_size=20)
     print("Precomputing test dataset...")
     precomputed_test = precompute_dataset(test_tiles, normalization_type='bbox', grid_size=20)
-    
+    print("Precomputing training dataset...")
+    precomputed_training = precompute_dataset(training_tiles, normalization_type='bbox', grid_size=20)  
+
     # Save the precomputed datasets.
     torch.save(precomputed_training, 'data/processed/model_data/precomputed_training_tiles.pt')
     torch.save(precomputed_validation, 'data/processed/model_data/precomputed_validation_tiles.pt')

@@ -9,11 +9,18 @@ from torch.utils.data import Dataset, DataLoader
 from torch_geometric.nn import knn_graph, PointTransformerConv
 from torch_geometric.nn.pool import global_mean_pool
 from torch_geometric.utils import to_undirected
-from torch_geometric.data import Data  # <-- Add this line
+from torch_geometric.data import Data  
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-from preprocess import check_tensor
+import os
+import sys
+from src.utils.chamfer_distance import chamfer_distance
 
+# from preprocess import check_tensor
+
+# Add the project root to the Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.insert(0, project_root)
 
 
 from torch_geometric.nn import TransformerConv  # Using TransformerConv instead of GCNConv
@@ -158,7 +165,7 @@ class NodeShuffleFeatureExpansion_Relative_Attn(nn.Module):
         x_expanded = self.norm_after_transformer(x_expanded)
         x_expanded = F.relu(x_expanded)
         
-        check_tensor(x_expanded, "TransformerConv output (x_expanded)")
+        # check_tensor(x_expanded, "TransformerConv output (x_expanded)")
         
         # 2) If using concatenated heads, apply the learned projection.
         if self.transformer_conv.concat:
@@ -170,28 +177,28 @@ class NodeShuffleFeatureExpansion_Relative_Attn(nn.Module):
         else:
             # When concat=False, output is already [N, r * feat_dim]
             x_projected = x_expanded.view(N, r, C)
-        check_tensor(x_projected, "Projected features (x_projected)")
+        # check_tensor(x_projected, "Projected features (x_projected)")
         
         # 3) Periodic shuffle: reshape from [N, r, feat_dim] to [r*N, feat_dim]
         x_shuffled = x_projected.permute(1, 0, 2).reshape(r * N, C)
-        check_tensor(x_shuffled, "Shuffled features (x_shuffled)")
+        # check_tensor(x_shuffled, "Shuffled features (x_shuffled)")
 
         # 4) Compute relative positions: subtract the global centroid from original positions.
         global_centroid = original_pos.mean(dim=0, keepdim=True)  # [1, 3]
         rel_pos = original_pos - global_centroid  # [N, 3]
         # Tile these relative positions r times: [r*N, 3]
         rel_pos_tiled = rel_pos.unsqueeze(0).expand(r, N, 3).reshape(r * N, 3)
-        check_tensor(rel_pos, "Relative positions (rel_pos)")
-        check_tensor(rel_pos_tiled, "Tiled relative positions (rel_pos_tiled)")
+        # check_tensor(rel_pos, "Relative positions (rel_pos)")
+        # check_tensor(rel_pos_tiled, "Tiled relative positions (rel_pos_tiled)")
 
 
         # 5) Process relative positions via MLP to obtain positional features.
         rel_pos_features = self.pos_mlp(rel_pos_tiled)  # [r*N, pos_mlp_hidden]
-        check_tensor(rel_pos_features, "Processed relative positional features (rel_pos_features)")
+        # check_tensor(rel_pos_features, "Processed relative positional features (rel_pos_features)")
 
         # 6) Concatenate the processed relative positional features with the upsampled features.
         x_concat = torch.cat([x_shuffled, rel_pos_features], dim=1)  # [r*N, feat_dim + pos_mlp_hidden]
-        check_tensor(x_concat, "Concatenated features (x_concat)")
+        # check_tensor(x_concat, "Concatenated features (x_concat)")
         
         
         # 7) Apply a simple self-attention mechanism.
@@ -301,45 +308,45 @@ class NodeShufflePointUpsampler_Relative_Attn(nn.Module):
 
 
 
-def chamfer_distance(pc1, pc2):
-    """
-    Computes the Chamfer distance between two point clouds.
-    pc1: [N1, 3]
-    pc2: [N2, 3]
-    """
-    dist = torch.cdist(pc1, pc2)  # [N1, N2]
-    min_dist_pc1, _ = dist.min(dim=1)  # [N1]
-    min_dist_pc2, _ = dist.min(dim=0)  # [N2]
-    return min_dist_pc1.mean() + min_dist_pc2.mean()
+# def chamfer_distance(pc1, pc2):
+#     """
+#     Computes the Chamfer distance between two point clouds.
+#     pc1: [N1, 3]
+#     pc2: [N2, 3]
+#     """
+#     dist = torch.cdist(pc1, pc2)  # [N1, N2]
+#     min_dist_pc1, _ = dist.min(dim=1)  # [N1]
+#     min_dist_pc2, _ = dist.min(dim=0)  # [N2]
+#     return min_dist_pc1.mean() + min_dist_pc2.mean()
 
-import torch
-
-
+# import torch
 
 
-from pytorch3d.loss import chamfer_distance as cdist
 
-def chamfer_distance_pytorch3d(pc1, pc2):
-    """
-    Computes the Chamfer distance using PyTorch3D, converting inputs to float32 
-    temporarily for loss computation.
-    """
-    # Save the current device.
-    device = pc1.device
+
+# from pytorch3d.loss import chamfer_distance as cdist
+
+# def chamfer_distance_pytorch3d(pc1, pc2):
+#     """
+#     Computes the Chamfer distance using PyTorch3D, converting inputs to float32 
+#     temporarily for loss computation.
+#     """
+#     # Save the current device.
+#     device = pc1.device
     
-    # Convert to float32 without detaching (so gradients are preserved).
-    pc1_f32 = pc1.to(torch.float32)
-    pc2_f32 = pc2.to(torch.float32)
+#     # Convert to float32 without detaching (so gradients are preserved).
+#     pc1_f32 = pc1.to(torch.float32)
+#     pc2_f32 = pc2.to(torch.float32)
     
-    # Check for NaNs or INF in the inputs to chamfer_distance
-    check_tensor(pc1_f32, "Chamfer input pc1_f32")
-    check_tensor(pc2_f32, "Chamfer input pc2_f32")
-    # Add batch dimension.
-    pc1_f32 = pc1_f32.unsqueeze(0)
-    pc2_f32 = pc2_f32.unsqueeze(0)
+#     # Check for NaNs or INF in the inputs to chamfer_distance
+#     # check_tensor(pc1_f32, "Chamfer input pc1_f32")
+#     # check_tensor(pc2_f32, "Chamfer input pc2_f32")
+#     # Add batch dimension.
+#     pc1_f32 = pc1_f32.unsqueeze(0)
+#     pc2_f32 = pc2_f32.unsqueeze(0)
     
-    loss, _ = cdist(pc1_f32, pc2_f32)
-    return loss.to(device)
+#     loss, _ = cdist(pc1_f32, pc2_f32)
+#     return loss.to(device)
 
 
 
@@ -400,6 +407,7 @@ def sliced_wasserstein_distance(pc1, pc2, num_projections=50, p=2):
 # distance = sliced_wasserstein_distance(pc1, pc2, num_projections=50, p=2)
 
 
+# Update the run_inference_and_visualize_2plots function to use the new data structure
 def run_inference_and_visualize_2plots(
     trained_model, 
     model_data, 
@@ -417,38 +425,43 @@ def run_inference_and_visualize_2plots(
     """
 
     def process_sample(index):
-        """Extracts, normalizes, runs inference, and computes distance metrics."""
+        """Extracts data, runs inference, and computes distance metrics."""
         sample = model_data[index]
-        dep_points_raw = sample['dep_points']  # [N_dep, 3]
-        uav_points_raw = sample['uav_points']  # [N_uav, 3]
-        edge_index = sample['dep_edge_index']
+        
+        # Extract normalized points and edge index from the precomputed data
+        dep_points_norm = sample['dep_points_norm']  # [N_dep, 3]
+        uav_points_norm = sample['uav_points_norm']  # [N_uav, 3]
+        
+        # Use the precomputed edge index from dep_edge_index (set by precompute_knn_inplace)
+        # or fall back to a specific k value from knn_edge_indices
+        if 'dep_edge_index' in sample:
+            edge_index = sample['dep_edge_index']
+        elif 'knn_edge_indices' in sample and 30 in sample['knn_edge_indices']:  # Default to k=30
+            edge_index = sample['knn_edge_indices'][30]
+        else:
+            # Last resort fallback
+            print(f"Warning: No precomputed edges found for sample {index}, computing KNN")
+            edge_index = knn_graph(dep_points_norm, k=30, loop=False)
+            edge_index = to_undirected(edge_index, num_nodes=dep_points_norm.size(0))
 
-        # 1) Normalize
-        dep_points_norm, uav_points_norm, center, scale = normalize_pair(dep_points_raw, uav_points_raw)
-
-        # 2) Move to device
+        # Move to device
         dep_points_norm = dep_points_norm.to(device)
         uav_points_norm = uav_points_norm.to(device)
-        edge_index      = edge_index.to(device)
+        edge_index = edge_index.to(device)
 
-        # 3) Build a PyG Data object for inference.
-        data = Data(pos=dep_points_norm, edge_index=edge_index)
-
-
-        # 4) Run inference in normalized space.
+        # Run inference with normalized points
         trained_model.eval()
         with torch.no_grad():
-            # Now pass the single Data object.
-            pred_points_norm = trained_model(data.pos, data.edge_index)
+            pred_points_norm = trained_model(dep_points_norm, edge_index)
 
-
-        # 5) Compute distances (using your existing chamfer_distance and hausdorff_distance functions).
+        # Compute distances
         orig_chamfer_dist = chamfer_distance(dep_points_norm, uav_points_norm)
         upsmpl_chamfer_dist = chamfer_distance(pred_points_norm, uav_points_norm)
 
         orig_hausdorff_dist = hausdorff_distance(dep_points_norm, uav_points_norm)
         upsmpl_hausdorff_dist = hausdorff_distance(pred_points_norm, uav_points_norm)
-        # 5) Return CPU data for plotting
+        
+        # Return CPU data for plotting
         return (
             dep_points_norm.cpu(),
             uav_points_norm.cpu(),
@@ -463,11 +476,7 @@ def run_inference_and_visualize_2plots(
     dep1, uav1, pred1, chamfer1_orig, chamfer1_upsmpl, hausdorff1_orig, hausdorff1_upsmpl = process_sample(index1)
     dep2, uav2, pred2, chamfer2_orig, chamfer2_upsmpl, hausdorff2_orig, hausdorff2_upsmpl = process_sample(index2)
     
-    # # Remove batch dimension from predicted points if it exists:
-    # if pred1.ndim == 3 and pred1.shape[0] == 1:
-    #     pred1 = pred1.squeeze(0)
-    # if pred2.ndim == 3 and pred2.shape[0] == 1:
-    #     pred2 = pred2.squeeze(0)
+    # The rest of the function remains unchanged...
     # Create a single row of subplots with an empty separator
     fig, axes = plt.subplots(1, 7, figsize=(width, height), subplot_kw={'projection': '3d'})
 
