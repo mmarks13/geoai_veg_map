@@ -15,7 +15,9 @@ os.environ["NCCL_DEBUG"] = "WARN"
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-
+from torch.utils.tensorboard import SummaryWriter
+import pynvml  # For GPU monitoring
+import threading
 import time
 import torch
 import torch.optim as optim
@@ -38,6 +40,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from dataclasses import dataclass, asdict
 import gc
+from torch.utils.tensorboard import SummaryWriter
+import pynvml
+
+import threading
+import socket
+
 
 # Add the project root to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -46,6 +54,52 @@ sys.path.insert(0, project_root)
 # Project-specific imports
 from src.models.model import PointUpsampler
 from src.utils.chamfer_distance import chamfer_distance
+
+
+
+# Add this function to monitor GPU stats
+def monitor_gpu_stats(writer, rank, stop_event, interval=2.0):
+    """
+    Monitor GPU statistics and log to TensorBoard
+    
+    Args:
+        writer: TensorBoard SummaryWriter
+        rank: GPU rank to monitor
+        stop_event: Threading event to signal when to stop monitoring
+        interval: How often to sample GPU stats in seconds
+    """
+    try:
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(rank)
+        
+        step = 0
+        while not stop_event.is_set():
+            # Get GPU utilization
+            utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            gpu_util = utilization.gpu
+            
+            # Get memory info
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            mem_used = mem_info.used / (1024**2)  # Convert to MB
+            mem_total = mem_info.total / (1024**2)
+            
+            # Log to TensorBoard
+            writer.add_scalar(f'GPU{rank}/Utilization', gpu_util, step)
+            writer.add_scalar(f'GPU{rank}/Memory_Used_MB', mem_used, step)
+            writer.add_scalar(f'GPU{rank}/Memory_Percent', 100.0 * mem_used / mem_total, step)
+            
+            step += 1
+            time.sleep(interval)
+    
+    except Exception as e:
+        print(f"GPU monitoring error on rank {rank}: {e}")
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except:
+            pass
+
+
 
 
 def find_free_port():
@@ -298,17 +352,42 @@ def cleanup():
         dist.destroy_process_group()
 
 
-def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler):
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Modify the train_one_epoch_ddp function to log metrics
+def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=None, epoch=0):
     """
-    Train the model for one epoch using DDP.
+    Train the model for one epoch using DDP with TensorBoard logging.
     """
     model.train()
     train_loss_total = 0.0
+    batch_count = 0
     
-    for batch in train_loader:
+    for batch_idx, batch in enumerate(train_loader):
         optimizer.zero_grad()
         with autocast(device_type='cuda', dtype=torch.float16):
             batch_loss = process_batch(model, batch, device)
+        
+        # Log batch loss to TensorBoard (but only occasionally to reduce overhead)
+        if writer is not None and dist.get_rank() == 0 and batch_idx % 5 == 0:
+            global_step = epoch * len(train_loader) + batch_idx
+            writer.add_scalar('Loss/train_batch', batch_loss.item(), global_step)
         
         scaler.scale(batch_loss).backward()
         scaler.unscale_(optimizer)
@@ -317,57 +396,93 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler):
         scaler.update()
         
         train_loss_total += batch_loss.item()
+        batch_count += 1
     
     # Gather losses from all processes
     world_size = dist.get_world_size()
     train_loss_tensor = torch.tensor(train_loss_total, device=device)
     dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
-    avg_train_loss = train_loss_tensor.item() / len(train_loader) / world_size
+    avg_train_loss = train_loss_tensor.item() / batch_count / world_size
     
     return avg_train_loss
 
-
-def validate_one_epoch_ddp(model, val_loader, device):
+# Modify the validate_one_epoch_ddp function to log metrics
+def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0):
     """
-    Validate the model for one epoch using DDP.
+    Validate the model for one epoch using DDP with TensorBoard logging.
     """
     model.eval()
     val_loss_total = 0.0
+    batch_count = 0
     
     with torch.no_grad():
-        for batch in val_loader:
+        for batch_idx, batch in enumerate(val_loader):
             with autocast(device_type='cuda', dtype=torch.float16):
                 batch_loss = process_batch(model, batch, device)
+            
+            # Log batch validation loss to TensorBoard (but only occasionally)
+            if writer is not None and dist.get_rank() == 0 and batch_idx % 5 == 0:
+                global_step = epoch * len(val_loader) + batch_idx
+                writer.add_scalar('Loss/val_batch', batch_loss.item(), global_step)
+            
             val_loss_total += batch_loss.item()
+            batch_count += 1
     
     # Gather losses from all processes
     world_size = dist.get_world_size()
     val_loss_tensor = torch.tensor(val_loss_total, device=device)
     dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
-    avg_val_loss = val_loss_tensor.item() / len(val_loader) / world_size
+    avg_val_loss = val_loss_tensor.item() / batch_count / world_size
     
     return avg_val_loss
 
-
-
-
-
+# Add TensorBoard support to _train_worker function
 def _train_worker(rank, world_size, train_shard_path, val_shard_path,
                   model_name, batch_size, checkpoint_dir, model_config,
-                  port, num_epochs, log_file, early_stopping_patience):
-    # Setup DDP environment (works even when world_size == 1)
+                  port, num_epochs, log_file, early_stopping_patience,
+                  tensorboard_log_dir=None):
+    # Setup DDP environment
     setup_successful = setup_ddp(rank, world_size, port)
     if not setup_successful:
         print(f"Rank {rank}: Failed to set up DDP")
         return None
 
+    # Create TensorBoard writer for this process
+    writer = None
+    gpu_monitor_thread = None
+    stop_monitoring = threading.Event()
+    
     try:
+        # Setup TensorBoard SummaryWriter for rank 0 only
+        if tensorboard_log_dir is not None and rank == 0:
+            tb_dir = os.path.join(tensorboard_log_dir, f"{model_name}_{time.strftime('%Y%m%d-%H%M%S')}")
+            os.makedirs(tb_dir, exist_ok=True)
+            writer = SummaryWriter(log_dir=tb_dir)
+            print(f"TensorBoard logs will be saved to: {tb_dir}")
+            
+            # Log model config as text instead of hparams
+            config_str = "\n".join([f"{k}: {v}" for k, v in asdict(model_config).items()])
+            writer.add_text('Config/model_parameters', config_str, 0)
+            writer.add_text('Config/training_parameters', 
+                          f"batch_size: {batch_size}\nnum_epochs: {num_epochs}\n" +
+                          f"early_stopping_patience: {early_stopping_patience}", 0)
+            
+            # Start GPU monitoring in a separate thread
+            gpu_monitor_thread = threading.Thread(
+                target=monitor_gpu_stats,
+                args=(writer, rank, stop_monitoring, 2.0)
+            )
+            gpu_monitor_thread.daemon = True
+            gpu_monitor_thread.start()
+        
         logger = None
         if rank == 0:
             logger = setup_logging(model_name, log_file)
             logger.info(f"Starting training with model_config: {asdict(model_config)}")
             logger.info(f"Training parameters: batch_size: {batch_size}, "
                         f"num_epochs: {num_epochs}, early_stopping_patience: {early_stopping_patience}")
+            if tensorboard_log_dir:
+                logger.info(f"TensorBoard logging enabled at: {tensorboard_log_dir}")
 
         device = torch.device(f'cuda:{rank}')
         # Load the shard datasets
@@ -408,6 +523,13 @@ def _train_worker(rank, world_size, train_shard_path, val_shard_path,
             logger.info(f"Total parameters: {total_params:,}")
             logger.info(f"Trainable parameters: {trainable_params:,}")
             logger.info(f"Model size: {format_size(model_size)}")
+            
+            # Log model info to TensorBoard
+            if writer is not None:
+                writer.add_text('Model/parameters', 
+                              f"Total parameters: {total_params:,}\n" +
+                              f"Trainable parameters: {trainable_params:,}\n" +
+                              f"Model size: {format_size(model_size)}", 0)
 
         optimizer = optim.Adam(model.parameters(), lr=3e-4)
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, verbose=(rank==0))
@@ -427,10 +549,24 @@ def _train_worker(rank, world_size, train_shard_path, val_shard_path,
                 current_time = datetime.now(pacific_tz)
                 print(f"Epoch {epoch+1} start time (PST): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            avg_train_loss = train_one_epoch_ddp(model, train_loader, optimizer, device, scaler)
-            avg_val_loss = validate_one_epoch_ddp(model, val_loader, device)
+            # Pass writer and epoch to training and validation functions
+            avg_train_loss = train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer, epoch)
+            avg_val_loss = validate_one_epoch_ddp(model, val_loader, device, writer, epoch)
             scheduler.step(avg_val_loss)
             epoch_time = time.time() - epoch_start_time
+
+            # Log epoch metrics to TensorBoard
+            if rank == 0 and writer is not None:
+                writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
+                writer.add_scalar('Loss/val_epoch', avg_val_loss, epoch)
+                writer.add_scalar('Metrics/epoch_time_minutes', epoch_time/60, epoch)
+                writer.add_scalar('Metrics/learning_rate', optimizer.param_groups[0]['lr'], epoch)
+                
+                # Track GPU memory at epoch boundaries
+                allocated = torch.cuda.memory_allocated(device=device) / (1024**2)  # MB
+                reserved = torch.cuda.memory_reserved(device=device) / (1024**2)    # MB
+                writer.add_scalar('Memory/allocated_MB', allocated, epoch)
+                writer.add_scalar('Memory/reserved_MB', reserved, epoch)
 
             if rank == 0:
                 log_message = (f"Epoch {epoch+1}/{num_epochs} | "
@@ -445,12 +581,20 @@ def _train_worker(rank, world_size, train_shard_path, val_shard_path,
                     epochs_without_improvement = 0
                     best_model_state = model.module.state_dict() if world_size > 1 else model.state_dict()
                     logger.info(f"New best validation loss: {best_val_loss:.6f}")
+                    
+                    # Log the best model so far
+                    if writer is not None:
+                        writer.add_scalar('Metrics/best_val_loss', best_val_loss, epoch)
                 else:
                     epochs_without_improvement += 1
                     logger.info(f"No improvement in validation loss for {epochs_without_improvement} epoch(s).")
 
                 if epochs_without_improvement >= early_stopping_patience:
                     logger.info("Early stopping triggered.")
+                    if writer is not None:
+                        writer.add_text('Training/early_stopping', 
+                                      f"Training stopped at epoch {epoch+1} due to no improvement for {early_stopping_patience} epochs",
+                                      epoch)
                     break
 
                 if (epoch + 1) % 10 == 0:
@@ -460,6 +604,7 @@ def _train_worker(rank, world_size, train_shard_path, val_shard_path,
                     torch.save(best_model_state, checkpoint_path)
                     logger.info(f"Checkpoint saved: {checkpoint_path}")
                     
+            # Clear unused GPU memory before the next epoch
             torch.cuda.empty_cache()
 
         if rank == 0 and best_model_state is not None:
@@ -472,6 +617,13 @@ def _train_worker(rank, world_size, train_shard_path, val_shard_path,
             with open(best_loss_file, 'w') as f:
                 json.dump({'best_val_loss': best_val_loss}, f)
             logger.info("Training completed.")
+            
+            # Add final summary to TensorBoard
+            if writer is not None:
+                writer.add_text('Training/summary', 
+                              f"Training completed with best validation loss: {best_val_loss:.6f}",
+                              0)
+            
             result = best_val_loss
         else:
             result = None
@@ -479,10 +631,19 @@ def _train_worker(rank, world_size, train_shard_path, val_shard_path,
         print(f"Rank {rank}: Exception during training: {e}")
         result = None
     finally:
+        # Clean up TensorBoard writer
+        if writer is not None:
+            writer.close()
+        
+        # Stop GPU monitoring thread
+        if gpu_monitor_thread is not None:
+            stop_monitoring.set()
+            gpu_monitor_thread.join(timeout=1.0)
+            
         cleanup()
     return result
 
-
+# Update the train_model function to include TensorBoard logging
 def train_model(train_dataset,
                 val_dataset,
                 model_name,
@@ -492,7 +653,8 @@ def train_model(train_dataset,
                 num_epochs=40,
                 log_file="logs/training_log.txt",
                 early_stopping_patience=10,
-                temp_dir_root="data/output/tmp_shards"):
+                temp_dir_root="data/output/tmp_shards",
+                tensorboard_log_dir="data/output/tensorboard_logs"):
     """
     Unified training entry point that works for both single-GPU and multi-GPU (DDP) cases.
     
@@ -506,14 +668,21 @@ def train_model(train_dataset,
       - log_file: Path for logging.
       - early_stopping_patience: Number of epochs without improvement before early stopping.
       - temp_dir_root: Base directory to use for temporary shards.
+      - tensorboard_log_dir: Directory to store TensorBoard logs
       
     Returns:
       The best validation loss (as reported by the rank-0 process), or None if training failed.
     """
+      
     # Create required directories if they don't exist
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     os.makedirs(temp_dir_root, exist_ok=True)
+    
+    if tensorboard_log_dir:
+        os.makedirs(tensorboard_log_dir, exist_ok=True)
+        print(f"TensorBoard logs will be saved to: {tensorboard_log_dir}")
+        print(f"To view TensorBoard, run: tensorboard --logdir={tensorboard_log_dir}")
 
     # Create a unique temporary directory within the specified root directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -555,7 +724,8 @@ def train_model(train_dataset,
                       port,
                       num_epochs,
                       log_file,
-                      early_stopping_patience)
+                      early_stopping_patience,
+                      tensorboard_log_dir)  # Add TensorBoard log directory
             )
             p.start()
             processes.append(p)
@@ -570,6 +740,7 @@ def train_model(train_dataset,
                 data = json.load(f)
                 best_val_loss = data.get('best_val_loss')
             print(f"Training completed. Best validation loss: {best_val_loss:.6f}")
+            print(f"To view training metrics, run: tensorboard --logdir={tensorboard_log_dir}")
         else:
             print("Training did not complete successfully.")
     else:
@@ -584,7 +755,8 @@ def train_model(train_dataset,
                                       port,
                                       num_epochs,
                                       log_file,
-                                      early_stopping_patience)
+                                      early_stopping_patience,
+                                      tensorboard_log_dir)  # Add TensorBoard log directory
     # Clean up temporary shards directory
     print(f"Cleaning up temporary directory: {temp_dir}")
     shutil.rmtree(temp_dir, ignore_errors=True)
