@@ -235,7 +235,7 @@ def setup_logging(model_name, log_file):
 
 @dataclass
 class ModelConfig:
-    k: int = 30
+    k: int = 15
     feature_dim: int = 64
     up_ratio: int = 2
     pos_mlp_hdn: int = 32
@@ -368,9 +368,6 @@ def cleanup():
 
 
 
-
-
-# Modify the train_one_epoch_ddp function to log metrics
 def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=None, epoch=0):
     """
     Train the model for one epoch using DDP with TensorBoard logging.
@@ -406,7 +403,9 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
     
     return avg_train_loss
 
-# Modify the validate_one_epoch_ddp function to log metrics
+
+
+
 def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0):
     """
     Validate the model for one epoch using DDP with TensorBoard logging.
@@ -436,7 +435,8 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0):
     
     return avg_val_loss
 
-# Add TensorBoard support to _train_worker function
+
+
 def _train_worker(rank, world_size, train_shard_path, val_shard_path,
                   model_name, batch_size, checkpoint_dir, model_config,
                   port, num_epochs, log_file, early_stopping_patience,
@@ -643,7 +643,9 @@ def _train_worker(rank, world_size, train_shard_path, val_shard_path,
         cleanup()
     return result
 
-# Update the train_model function to include TensorBoard logging
+
+
+
 def train_model(train_dataset,
                 val_dataset,
                 model_name,

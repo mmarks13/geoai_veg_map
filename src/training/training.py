@@ -25,7 +25,13 @@ from src.models.model import PointUpsampler
 from src.utils.chamfer_distance import chamfer_distance
 
 
-
+import os
+import time
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+import torch.multiprocessing as mp
 
 # Changes to PointCloudUpsampleDataset class to use the precomputed normalized points
 class PointCloudUpsampleDataset(Dataset):
@@ -81,24 +87,6 @@ def precompute_features(model_data, k=30):
             edge_index = to_undirected(edge_index, num_nodes=dep_points.size(0))
             sample['dep_edge_index'] = edge_index
             
-        # # Normalize attributes once and store result
-        # if 'dep_points_attr' in sample and sample['dep_points_attr'] is not None:
-        #     attrs = sample['dep_points_attr']
-            
-        #     # Vectorized min-max normalization
-        #     min_vals = attrs.min(dim=0)[0]
-        #     max_vals = attrs.max(dim=0)[0] 
-        #     ranges = max_vals - min_vals
-        #     valid_dims = ranges > 0
-            
-        #     if valid_dims.any():
-        #         # Only normalize dimensions with valid ranges
-        #         attrs_normalized = attrs.clone()
-        #         for d in range(attrs.shape[1]):
-        #             if ranges[d] > 0:
-        #                 attrs_normalized[:, d] = (attrs[:, d] - min_vals[d]) / ranges[d]
-                
-        #         sample['dep_points_attr'] = attrs_normalized
 
 # Update create_dataloaders function (log message changed)
 def create_dataloaders(train_dataset, val_dataset, k, batch_size):
@@ -110,11 +98,23 @@ def create_dataloaders(train_dataset, val_dataset, k, batch_size):
     torch_train_data = PointCloudUpsampleDataset(train_dataset)
     torch_val_data = PointCloudUpsampleDataset(val_dataset)
     
+    from torch.utils.data.distributed import DistributedSampler
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+         train_sampler = DistributedSampler(torch_train_data)
+         val_sampler = DistributedSampler(torch_val_data, shuffle=False)
+         shuffle_flag = False  # sampler shuffles already
+    else:
+         train_sampler = None
+         val_sampler = None
+         shuffle_flag = True
+    
     train_loader = DataLoader(
-        torch_train_data, batch_size=batch_size, shuffle=True, collate_fn=variable_size_collate
+        torch_train_data, batch_size=batch_size, shuffle=shuffle_flag,
+        sampler=train_sampler, collate_fn=variable_size_collate
     )
     val_loader = DataLoader(
-        torch_val_data, batch_size=batch_size, shuffle=False, collate_fn=variable_size_collate
+        torch_val_data, batch_size=batch_size, shuffle=False,
+        sampler=val_sampler, collate_fn=variable_size_collate
     )
     return train_loader, val_loader
 
@@ -164,6 +164,7 @@ class ModelConfig:
 def process_batch(model, batch, device):
     """
     Process a single batch through the model and compute the average loss per sample.
+    Adapted to work with DistributedDataParallel.
     """
     dep_list, uav_list, edge_list, attr_list = batch
     total_loss = 0.0
@@ -192,7 +193,10 @@ def process_batch(model, batch, device):
         )
         
         if torch.isnan(chamfer_loss):
-            print(f"WARNING: Loss for a sample is NaN!")
+            # Only log warnings from rank 0 to avoid duplicate messages
+            if not hasattr(torch.distributed, 'is_initialized') or not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                print(f"WARNING: Loss for a sample is NaN!")
+        
         total_loss += chamfer_loss
         sample_count += 1
     
@@ -304,11 +308,13 @@ def create_model(device, config: ModelConfig):
         fnl_attn_hds=config.fnl_attn_hds,
         attr_dim=config.attr_dim  # Pass attribute dimension
     )
-    # Wrap with DataParallel if multiple GPUs are available
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = torch.nn.DataParallel(model)
     model.to(device)
+    # If a distributed process group has been initialized, wrap the model with DDP.
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        print(f"Using DistributedDataParallel on GPU {device}")
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[device.index] if device.type == 'cuda' else None
+        )
     return model
 
 
@@ -399,8 +405,12 @@ def train_pointcloud_upsampler(
     best_model_state = None
     
     for epoch in range(num_epochs):
+        
+        # If using DistributedSampler, set the epoch for shuffling.
+        if hasattr(train_loader, 'sampler') and hasattr(train_loader.sampler, 'set_epoch'):
+            train_loader.sampler.set_epoch(epoch)
+    
         epoch_start_time = time.time()
-
 
         # Define the Pacific time zone (adjusts for DST if necessary)
         pacific_tz = pytz.timezone('America/Los_Angeles')
@@ -505,3 +515,358 @@ def train_pointcloud_upsampler(
     summary_logger.info("Model architecture:\n%s", model)
     
     return best_val_loss
+
+
+
+
+import os
+import time
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+import torch.multiprocessing as mp
+from dataclasses import asdict
+
+# Add these functions to your training.py file
+
+def setup_distributed(rank, world_size):
+    """
+    Initialize the distributed environment.
+    """
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    
+    # Initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    print(f"Rank {rank}: Initialized process group")
+
+def cleanup_distributed():
+    """
+    Clean up the distributed environment.
+    """
+    dist.destroy_process_group()
+
+# Modified precompute_features to properly handle precomputed KNN
+def precompute_features_ddp(model_data, k=30, rank=0):
+    """
+    Extracts the precomputed KNN graph and normalizes attributes.
+    Modified to better handle precomputed KNN and debug issues.
+    """
+    for idx, sample in enumerate(model_data):
+        # Check if the precomputed KNN exists
+        if 'knn_edge_indices' in sample:
+            if k in sample['knn_edge_indices']:
+                sample['dep_edge_index'] = sample['knn_edge_indices'][k]
+                if rank == 0 and idx < 5:  # Only log from rank 0 for a few samples
+                    print(f"Rank {rank}: Using precomputed KNN for k={k} in sample {idx}")
+            else:
+                # If k not in precomputed indices, look for closest k values
+                available_k = list(sample['knn_edge_indices'].keys())
+                if available_k:
+                    if rank == 0 and idx < 5:
+                        print(f"Rank {rank}: Sample {idx} - k={k} not found. Available k values: {available_k}")
+                    
+                    # Find the closest k value
+                    closest_k = min(available_k, key=lambda x: abs(x - k))
+                    sample['dep_edge_index'] = sample['knn_edge_indices'][closest_k]
+                    if rank == 0 and idx < 5:
+                        print(f"Rank {rank}: Using closest precomputed KNN with k={closest_k} for sample {idx}")
+                else:
+                    # Fallback to computing KNN
+                    if rank == 0 and idx < 5:
+                        print(f"Rank {rank}: No precomputed KNN values found for sample {idx}. Using fallback computation.")
+                    
+                    dep_points = sample['dep_points_norm'].contiguous()
+                    edge_index = knn_graph(dep_points, k=k, loop=False)
+                    edge_index = to_undirected(edge_index, num_nodes=dep_points.size(0))
+                    sample['dep_edge_index'] = edge_index
+        else:
+            # No precomputed indices at all
+            if rank == 0 and idx < 5:
+                print(f"Rank {rank}: Sample {idx} has no 'knn_edge_indices' field. Using fallback computation.")
+            
+            dep_points = sample['dep_points_norm'].contiguous()
+            edge_index = knn_graph(dep_points, k=k, loop=False)
+            edge_index = to_undirected(edge_index, num_nodes=dep_points.size(0))
+            sample['dep_edge_index'] = edge_index
+
+def create_distributed_dataloaders(train_dataset, val_dataset, k, batch_size, rank, world_size):
+    """
+    Create dataloaders for distributed training.
+    """
+    print(f"Rank {rank}: Extracting precomputed k-NN with k={k} ...")
+    precompute_features_ddp(train_dataset, k=k, rank=rank)
+    precompute_features_ddp(val_dataset, k=k, rank=rank)
+    print(f"Rank {rank}: Extraction complete.")
+    
+    torch_train_data = PointCloudUpsampleDataset(train_dataset)
+    torch_val_data = PointCloudUpsampleDataset(val_dataset)
+    
+    # Create distributed samplers
+    train_sampler = DistributedSampler(
+        torch_train_data, 
+        num_replicas=world_size, 
+        rank=rank, 
+        shuffle=True
+    )
+    
+    val_sampler = DistributedSampler(
+        torch_val_data, 
+        num_replicas=world_size, 
+        rank=rank, 
+        shuffle=False
+    )
+    
+    train_loader = DataLoader(
+        torch_train_data, 
+        batch_size=batch_size, 
+        shuffle=False,  # Sampler handles shuffling
+        collate_fn=variable_size_collate,
+        sampler=train_sampler
+    )
+    
+    val_loader = DataLoader(
+        torch_val_data, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        collate_fn=variable_size_collate,
+        sampler=val_sampler
+    )
+    
+    return train_loader, val_loader, train_sampler, val_sampler
+
+
+
+def create_distributed_model(config, rank):
+    """
+    Create a model for distributed training.
+    """
+    model = PointUpsampler(
+        feat_dim=config.feature_dim,
+        up_ratio=config.up_ratio,
+        pos_mlp_hidden=config.pos_mlp_hdn,
+        up_attn_hds=config.up_attn_hds,
+        up_concat=config.up_concat,
+        up_beta=config.up_beta,
+        up_dropout=config.up_dropout,
+        fnl_attn_hds=config.fnl_attn_hds,
+        attr_dim=config.attr_dim if hasattr(config, 'attr_dim') else 3
+    )
+    
+    # Move model to the appropriate device
+    model.to(rank)
+    
+    # Wrap with DistributedDataParallel
+    # Add find_unused_parameters=True to handle parameters not used in forward pass
+    model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+    
+    return model
+
+def train_pointcloud_upsampler_ddp(
+    rank,
+    world_size,
+    train_dataset,
+    val_dataset,
+    model_name,
+    batch_size,
+    checkpoint_dir,
+    model_config,
+    num_epochs=40,
+    log_file="logs/training_log.txt",
+    early_stopping_patience=10,
+    print_plots_during_training=True,
+    train_plots_ixs=(40,46),
+    val_plots_ixs=(0,1),
+    optuna_trial=None
+):
+    # Improved error handling to ensure cleanup
+    try:
+        # Setup the distributed environment
+        setup_distributed(rank, world_size)
+        
+        # Only the primary process should log
+        is_primary = rank == 0
+        
+        if is_primary:
+            logger = setup_logging(model_name, log_file)
+            start_message = f"Starting distributed training with model_config: {asdict(model_config)}"
+            logger.info(start_message)
+            print(start_message)
+            logger.info(f"Training parameters: batch_size: {batch_size}, num_epochs: {num_epochs}, early_stopping_patience: {early_stopping_patience}")
+        
+        # Create DataLoaders using k from model_config
+        train_loader, val_loader, train_sampler, val_sampler = create_distributed_dataloaders(
+            train_dataset, val_dataset, model_config.k, batch_size, rank, world_size
+        )
+        
+        # Create model with DDP
+        model = create_distributed_model(model_config, rank)
+        
+        if is_primary:
+            logger.info(f"Model architecture:\n{model}")
+            total_params, trainable_params = count_model_parameters(model)
+            model_size = get_model_size_bytes(model)
+            print(f"Total parameters: {total_params:,}")
+            print(f"Trainable parameters: {trainable_params:,}")
+            print(f"Model size: {format_size(model_size)}")
+        
+        # Rest of training function...
+        # (Optimizer and scheduler setup, training loop, etc.)
+        
+        # Optimizer and scheduler setup
+        optimizer = optim.Adam(model.parameters(), lr=3e-4)
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, verbose=is_primary)
+        scaler = GradScaler()
+        
+        best_val_loss = float('inf')
+        epochs_without_improvement = 0
+        best_model_state = None
+        
+        for epoch in range(num_epochs):
+            # Set the epoch for the samplers
+            train_sampler.set_epoch(epoch)
+            val_sampler.set_epoch(epoch)
+            
+            epoch_start_time = time.time()
+            
+            if is_primary:
+                pacific_tz = pytz.timezone('America/Los_Angeles')
+                current_time = datetime.now(pacific_tz)
+                print(f"Epoch {epoch+1} start time (PST): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Training loop
+            model.train()
+            train_loss_total = 0.0
+            batch_times = []
+            batch_mem = []
+            
+            for batch_idx, batch in enumerate(train_loader):
+                # Check for NaN or infinity in inputs
+                _, _, _, attr_list = batch
+                has_problem = False
+                for i, attr in enumerate(attr_list):
+                    if attr is not None:
+                        if torch.isnan(attr).any():
+                            print(f"Rank {rank}, Batch {batch_idx}, sample {i} has NaN attribute values")
+                            has_problem = True
+                        if torch.isinf(attr).any():
+                            print(f"Rank {rank}, Batch {batch_idx}, sample {i} has Infinite attribute values")
+                            has_problem = True
+                
+                if has_problem:
+                    continue  # Skip this batch if it has problematic values
+                
+                torch.cuda.reset_peak_memory_stats(rank)
+                batch_start_time = time.time()
+                
+                optimizer.zero_grad()
+                
+                try:
+                    with torch.cuda.amp.autocast():
+                        batch_loss = process_batch(model, batch, rank)
+                    
+                    scaler.scale(batch_loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    
+                    batch_end_time = time.time()
+                    
+                    train_loss_total += batch_loss.item()
+                    elapsed = batch_end_time - batch_start_time
+                    batch_times.append(elapsed)
+                    peak_mem = torch.cuda.max_memory_allocated(rank) / (1024 * 1024 * 1024)
+                    batch_mem.append(peak_mem)
+                except Exception as e:
+                    print(f"Rank {rank}: Error processing batch {batch_idx}: {str(e)}")
+                    if rank == 0:
+                        import traceback
+                        traceback.print_exc()
+            
+            # Synchronize losses across processes (with error handling)
+            try:
+                train_loss_tensor = torch.tensor([train_loss_total], device=rank)
+                dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+                train_loss_total = train_loss_tensor.item()
+                
+                batch_count_tensor = torch.tensor([len(train_loader)], device=rank)
+                dist.all_reduce(batch_count_tensor, op=dist.ReduceOp.SUM)
+                total_batches = batch_count_tensor.item()
+                
+                avg_train_loss = train_loss_total / total_batches if total_batches > 0 else float('inf')
+            except Exception as e:
+                print(f"Rank {rank}: Error synchronizing training losses: {str(e)}")
+                avg_train_loss = float('inf')
+            
+            # Rest of the function (validation, checkpointing, etc.)
+            # ...
+            
+        # Only the primary process saves the final model
+        if is_primary and best_model_state is not None:
+            try:
+                final_checkpoint_name = f"{model_name}_final_best.pth"
+                final_checkpoint_path = f"{checkpoint_dir}/final_best/{final_checkpoint_name}"
+                torch.save(best_model_state, final_checkpoint_path)
+                logger.info(f"Final checkpoint saved: {final_checkpoint_path}")
+            except Exception as e:
+                print(f"Error saving final checkpoint: {str(e)}")
+    
+    except Exception as e:
+        print(f"Rank {rank}: Exception occurred during training: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Always clean up the distributed environment, even if exceptions occur
+        if dist.is_initialized():
+            try:
+                cleanup_distributed()
+                print(f"Rank {rank}: Distributed environment cleaned up")
+            except Exception as e:
+                print(f"Rank {rank}: Error during cleanup: {str(e)}")
+    
+    return best_val_loss if rank == 0 else None
+
+def run_ddp(fn, world_size, train_dataset, val_dataset, model_name, batch_size, checkpoint_dir, 
+           model_config, num_epochs=40, log_file="logs/training_log.txt", early_stopping_patience=10,
+           print_plots_during_training=True, train_plots_ixs=(40,46), val_plots_ixs=(0,1), 
+           optuna_trial=None):
+    """
+    Launches processes for distributed training.
+    
+    This function explicitly captures all arguments and passes them to the worker processes.
+    """
+    # Create the checkpoint directory if it doesn't exist
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(os.path.join(checkpoint_dir, 'final_best'), exist_ok=True)
+    
+    # Print arguments for debugging
+    print(f"Running distributed training with:")
+    print(f"  model_name: {model_name}")
+    print(f"  batch_size: {batch_size}")
+    print(f"  model_config.k: {model_config.k}")
+    print(f"  model_config.feature_dim: {model_config.feature_dim}")
+    
+    # Launch processes with all arguments explicitly passed
+    mp.spawn(
+        fn, 
+        args=(
+            world_size, 
+            train_dataset, 
+            val_dataset, 
+            model_name, 
+            batch_size, 
+            checkpoint_dir, 
+            model_config,
+            num_epochs, 
+            log_file, 
+            early_stopping_patience, 
+            print_plots_during_training, 
+            train_plots_ixs, 
+            val_plots_ixs, 
+            optuna_trial
+        ),
+        nprocs=world_size, 
+        join=True
+    )
