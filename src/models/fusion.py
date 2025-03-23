@@ -54,23 +54,17 @@ class SpatialFusion(nn.Module):
         if use_uavsar:
             concat_dim += patch_dim
         
-        # Intermediate dimension reduction before PointTransformerConv (optional)
-        self.pre_projection = nn.Linear(concat_dim, concat_dim)
+
+        # Use PointTransformerConv for spatially-aware feature extraction with concatenated features
+        self.pt_transformer_block = PointTransformerConv(
+            in_channels=concat_dim, 
+            out_channels=concat_dim
+        )
         
         # Use PointTransformerConv for spatially-aware projection
         self.pt_conv_projection = PointTransformerConv(
             in_channels=concat_dim, 
-            out_channels=point_dim,
-            pos_nn=nn.Sequential(
-                nn.Linear(3, 64),
-                nn.ReLU(),
-                nn.Linear(64, point_dim)
-            ),
-            attn_nn=nn.Sequential(
-                nn.Linear(point_dim, 64),
-                nn.ReLU(),
-                nn.Linear(64, point_dim)
-            )
+            out_channels=point_dim
         )
     
     def get_patch_positions(self, img_bbox, patches_per_side, center, scale):
@@ -122,6 +116,7 @@ class SpatialFusion(nn.Module):
         normalized_positions = (positions - center_xy) / scale  # [num_patches, 2]
         
         return normalized_positions
+
     
     def process_patch_embeddings(self, point_positions, patch_embeddings, patch_bbox, center, scale):
         """
@@ -178,6 +173,8 @@ class SpatialFusion(nn.Module):
         patch_contribution = patch_contribution * valid_points  # [N, D_patch]
         
         return patch_contribution
+
+
     
     def forward(self, point_features, edge_index, point_positions, naip_embeddings=None, uavsar_embeddings=None,
                 main_bbox=None, naip_bbox=None, uavsar_bbox=None, center=None, scale=None):
@@ -240,10 +237,14 @@ class SpatialFusion(nn.Module):
         # Concatenate features
         concatenated = torch.cat(to_concat, dim=1)  # [N, D_p + D_patch] or [N, D_p + 2*D_patch] if both modalities
         
-        # Apply optional preprocessing before PointTransformerConv
-        concatenated = self.pre_projection(concatenated)  # [N, concat_dim]
+        # Apply point transformer block for feature extraction
+        concatenated = self.pt_transformer_block(
+            x=concatenated,           # [N, concat_dim]
+            pos=point_positions,      # [N, 3]
+            edge_index=edge_index     # [2, E]
+        )    # [N, D_p + D_patch] or [N, D_p + 2*D_patch] if both modalities
         
-        # Apply PointTransformerConv with spatial awareness
+        # Apply PointTransformerConv  to project down to embed_dim
         fused_features = self.pt_conv_projection(
             x=concatenated,           # [N, concat_dim]
             pos=point_positions,      # [N, 3]

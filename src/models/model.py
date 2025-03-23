@@ -73,7 +73,7 @@ class Feature_Expansion(nn.Module):
         Relative positional encoding with a self-attention refinement.
     
         This module:
-          (a) Uses a TransformerConv (instead of GCNConv) to expand features.
+          (a) Uses a TransformerConv to expand features.
           (b) Performs periodic shuffle to upsample features.
           (c) Computes relative positional features based on original coordinates.
           (d) Concatenates the relative positional features to the upsampled features.
@@ -165,7 +165,7 @@ class Feature_Expansion(nn.Module):
         r = self.up_ratio
 
         # 1) Feature Expansion using TransformerConv (replacing GCNConv)
-        x_expanded = self.transformer_conv(x_feat, edge_index)  # shape: [N, ?]
+        x_expanded = self.transformer_conv(x_feat, edge_index)  # shape: [N, feat_dim]
         # Apply LayerNorm to stabilize activations
         x_expanded = self.norm_after_transformer(x_expanded)
         x_expanded = F.relu(x_expanded)

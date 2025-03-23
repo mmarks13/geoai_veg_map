@@ -51,6 +51,38 @@ from src.training.ddp_training import (
 from src.models.multimodal_model import MultimodalModelConfig, MultimodalPointUpsampler
 
 
+import math
+from torch.optim.lr_scheduler import _LRScheduler
+
+class OneCycleLR(_LRScheduler):
+    """
+    One Cycle Learning Rate policy.
+    """
+    def __init__(self, optimizer, max_lr, total_steps, pct_start=0.3, 
+                 div_factor=25.0, final_div_factor=1e4, last_epoch=-1):
+        self.max_lr = max_lr
+        self.total_steps = total_steps
+        self.pct_start = pct_start
+        self.div_factor = div_factor
+        self.final_div_factor = final_div_factor
+        self.initial_lr = max_lr / div_factor
+        self.min_lr = self.initial_lr / final_div_factor
+        self.warmup_steps = int(total_steps * pct_start)
+        super(OneCycleLR, self).__init__(optimizer, last_epoch)
+        
+    def get_lr(self):
+        if self.last_epoch < self.warmup_steps:
+            # Warmup phase: linear increase from initial_lr to max_lr
+            alpha = self.last_epoch / self.warmup_steps
+            return [self.initial_lr + alpha * (self.max_lr - self.initial_lr) for _ in self.base_lrs]
+        else:
+            # Cooldown phase: cosine annealing from max_lr to min_lr
+            progress = (self.last_epoch - self.warmup_steps) / (self.total_steps - self.warmup_steps)
+            alpha = 0.5 * (1 + math.cos(math.pi * progress))
+            return [self.min_lr + alpha * (self.max_lr - self.min_lr) for _ in self.base_lrs]
+
+
+
 class ShardedMultimodalPointCloudDataset(Dataset):
     """Dataset that loads a specific shard file with support for imagery data."""
     def __init__(self, shard_path, k, use_naip=False, use_uavsar=False):
@@ -258,9 +290,12 @@ def create_multimodal_shards(dataset, world_size, temp_dir, prefix,
     return shard_paths
 
 
-def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=None, epoch=0, process_batch_fn=None, accumulation_steps=4):
+def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=None, epoch=0, 
+                    process_batch_fn=None, accumulation_steps=4, debug_level=2, 
+                    debug_interval=10, scheduler=None):
     """
-    Train the model for one epoch using DDP with TensorBoard logging and gradient accumulation.
+    Train the model for one epoch using DDP with TensorBoard logging, gradient accumulation,
+    and enhanced debugging.
     
     Args:
         model: The model to train
@@ -272,7 +307,12 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
         epoch: Current epoch number
         process_batch_fn: Function to process a batch (defaults to process_multimodal_batch)
         accumulation_steps: Number of batches to accumulate gradients over (default: 4)
+        debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
+        debug_interval: How often to log debugging information (in batches) (default: 10)
+        scheduler: Optional scheduler to update after each batch (for OneCycleLR)
     """
+    from torch.profiler import profile, record_function, ProfilerActivity
+    
     model.train()
     train_loss_total = 0.0
     batch_count = 0
@@ -283,23 +323,119 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
         from src.training.multimodal_training import process_multimodal_batch
         process_batch_fn = process_multimodal_batch
     
+    # Initialize the TensorBoard debugger if debugging is enabled
+    debugger = None
+    if debug_level > 1 and writer is not None:
+        from .debug_tools import TensorBoardDebugger
+        debugger = TensorBoardDebugger(writer, model, log_level=debug_level)
+        if debug_level >= 3:  # Only set up activation tracking for detailed logging
+            debugger.setup_activation_tracking()
+    
+    # Global step counter for tensorboard logging
+    global_step = epoch * len(train_loader)
+    
     # Zero gradients at the beginning
     optimizer.zero_grad()
     
+    # Determine how often to log based on debug level
+    batch_log_interval = 1 if debug_level >= 3 else (10 if debug_level >= 2 else 999999)
+    # If debug_level is 3, use the provided debug_interval, otherwise just log at epoch boundaries
+    effective_debug_interval = debug_interval if debug_level >= 3 else 30
+    
     for batch_idx, batch in enumerate(train_loader):
-        # Forward pass with mixed precision
-        with autocast(device_type='cuda', dtype=torch.float16):
-            batch_loss = process_batch_fn(model, batch, device)
-            # Scale loss by accumulation steps to maintain correct gradient magnitude
-            scaled_loss = batch_loss / accumulation_steps
+        current_step = global_step + batch_idx
         
-        # Backward pass with gradient scaling
-        scaler.scale(scaled_loss).backward()
+        # Process batch either with or without profiling
+        try:
+            # Forward pass with mixed precision (for all cases)
+            with autocast(device_type='cuda', dtype=torch.float16):
+                batch_loss = process_batch_fn(model, batch, device)
+                # Scale loss by accumulation steps to maintain correct gradient magnitude
+                scaled_loss = batch_loss / accumulation_steps
+            
+            # Backward pass with gradient scaling
+            scaler.scale(scaled_loss).backward()
+            
+            # Profile the first batch of each epoch if detailed debugging is enabled
+            # We do the profiling *after* the actual computation to avoid affecting the training
+            if debug_level >= 3 and batch_idx == 0 and writer is not None and epoch % effective_debug_interval == 0:
+                try:
+                    # Create a copy of the batch for profiling
+                    activities = [ProfilerActivity.CPU]
+                    if torch.cuda.is_available():
+                        activities.append(ProfilerActivity.CUDA)
+                    
+                    # Run a separate forward pass just for profiling (no backward)
+                    with profile(activities=activities, record_shapes=True, profile_memory=True) as prof:
+                        with record_function("model_inference"):
+                            with autocast(device_type='cuda', dtype=torch.float16):
+                                # Just do the forward pass for profiling
+                                _ = process_batch_fn(model, batch, device)
+                    
+                    # Log profiler data (extracted metrics)
+                    # Extract and log key metrics from the profiler
+                    total_cpu_time = 0
+                    total_cuda_time = 0
+                    
+                    for event in prof.key_averages():
+                        # Calculate totals
+                        if hasattr(event, 'cpu_time'):
+                            total_cpu_time += event.cpu_time
+                        if hasattr(event, 'device_time'):
+                            total_cuda_time += event.device_time
+                        elif hasattr(event, 'cuda_time'):
+                            total_cuda_time += event.cuda_time
+                    
+                    # Log totals
+                    writer.add_scalar('Profiler/total_cpu_time_us', total_cpu_time, epoch * len(train_loader))
+                    writer.add_scalar('Profiler/total_cuda_time_us', total_cuda_time, epoch * len(train_loader))
+                    
+                    # Save trace file (optional)
+                    import os
+                    trace_dir = os.path.join(os.path.dirname(writer.log_dir), 'traces')
+                    os.makedirs(trace_dir, exist_ok=True)
+                    trace_path = os.path.join(trace_dir, f'trace_epoch_{epoch}_batch_0.json')
+                    
+                    try:
+                        from torch.profiler import export_chrome_trace
+                        export_chrome_trace(prof, trace_path)
+                    except (ImportError, AttributeError):
+                        # Fallback for older PyTorch
+                        try:
+                            prof.export_chrome_trace(trace_path)
+                        except Exception as e:
+                            print(f"Could not export trace: {e}")
+                except Exception as e:
+                    print(f"Warning: Profiling failed: {e}")
+        except Exception as e:
+            print(f"Error processing batch: {e}")
+            # Ensure batch_loss is defined even if processing fails
+            batch_loss = torch.tensor(float('nan'), device=device)
+            # Skip backward for this batch
+            optimizer.zero_grad()
         
         # Accumulate statistics for reporting
         train_loss_total += batch_loss.item()
         batch_count += 1
         accumulated_batch_count += 1
+
+        # Log LR every batch instead of just at epoch boundaries
+        if writer is not None and debug_level >= 1:
+            writer.add_scalar('Metrics/learning_rate_batch', optimizer.param_groups[0]['lr'], current_step)
+    
+        # Log batch-level metrics if appropriate debug level and interval
+        should_log_batch = (debug_level >= 2 and 
+                          batch_idx % effective_debug_interval == 0 and 
+                          writer is not None)
+                          
+        if should_log_batch:
+            # Log per-batch loss (level 2+)
+            writer.add_scalar('Loss/train_batch', batch_loss.item(), current_step)
+            
+            # Use the debugger to track activations (level 3 only)
+            if debugger and debug_level >= 3:
+                debugger.global_step = current_step
+                debugger.log_activations()
         
         # Only update weights after accumulating gradients for specified number of steps
         # or at the end of the epoch to avoid losing the last few batches
@@ -311,16 +447,40 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
             # Clip gradients to prevent explosion
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5)
             
+            # # Log gradient statistics if appropriate debug level
+            # if should_log_batch and debugger:
+            #     # Track gradients (level 2+)
+            #     debugger.track_gradients()
+                
+                # # Log weight update ratios (level 3 only)
+                # if debug_level >= 3:
+                #     debugger.log_weight_update_ratios(optimizer)
+            
             # Update weights
             scaler.step(optimizer)
-            scaler.update()
+            scaler.update()        
+
             
+
+            # Update learning rate scheduler if provided (for OneCycleLR)
+            if scheduler is not None:
+                scheduler.step()
+                
+                
             # Reset gradients
             optimizer.zero_grad()
             
             # Reset accumulation counter
             accumulated_batch_count = 0
-
+            
+            # # Log parameter statistics if appropriate debug level (at end of epoch always)
+            # if (is_last_batch or should_log_batch) and debugger and debug_level >= 2:
+            #     debugger.track_parameters()
+    
+    # Clean up debugger
+    if debugger and debug_level >= 3:
+        debugger.close_activation_tracking()
+    
     # Gather losses from all processes
     world_size = dist.get_world_size()
     train_loss_tensor = torch.tensor(train_loss_total, device=device)
@@ -330,9 +490,13 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
     return avg_train_loss
 
 
-def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, process_batch_fn=None):
+
+
+
+def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, process_batch_fn=None,
+                          debug_level=2, debug_interval=10, visualize_samples=False):
     """
-    Validate the model for one epoch using DDP with TensorBoard logging.
+    Validate the model for one epoch using DDP with TensorBoard logging and enhanced debugging.
     
     Args:
         model: The model to validate
@@ -341,6 +505,9 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
         writer: TensorBoard SummaryWriter (optional)
         epoch: Current epoch number
         process_batch_fn: Function to process a batch (defaults to process_multimodal_batch)
+        debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
+        debug_interval: How often to log debugging information (in batches) (default: 10)
+        visualize_samples: Whether to visualize sample predictions (default: False)
     """
     model.eval()
     val_loss_total = 0.0
@@ -351,12 +518,31 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
         from src.training.multimodal_training import process_multimodal_batch
         process_batch_fn = process_multimodal_batch
     
+    # Global step counter for tensorboard logging
+    global_step = epoch * len(val_loader)
+    
+    # Determine how often to log based on debug level
+    # If debug_level is 3, use the provided debug_interval, otherwise just log at epoch boundaries
+    effective_debug_interval = debug_interval if debug_level >= 3 else 999999
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
+            current_step = global_step + batch_idx
+            
             with autocast(device_type='cuda', dtype=torch.float16):
                 batch_loss = process_batch_fn(model, batch, device)
             
-            # No batch-level TensorBoard logging as in your current code
+            # Check if we should log for this batch
+            should_log_batch = (debug_level >= 2 and 
+                              batch_idx % effective_debug_interval == 0 and 
+                              writer is not None and 
+                              dist.get_rank() == 0)
+            
+            # Point cloud visualization disabled to prevent crashes
+            
+            # Log batch-level statistics
+            if should_log_batch:
+                writer.add_scalar('Loss/val_batch', batch_loss.item(), current_step)
             
             val_loss_total += batch_loss.item()
             batch_count += 1
@@ -369,15 +555,29 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
     
     return avg_val_loss
 
+
 def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
                            model_name, batch_size, checkpoint_dir, model_config,
                            port, num_epochs, log_file, early_stopping_patience,
-                           tensorboard_log_dir=None):
+                           tensorboard_log_dir=None, debug_level=2, debug_interval=10,
+                             accumulation_steps = 3,
+                           visualize_samples=False, lr_scheduler_type="plateau",
+                           max_lr=5e-4, pct_start=0.3, div_factor=25.0, final_div_factor=1e4):
     """
-    Worker function for training the multimodal model.
+    Worker function for training the multimodal model with enhanced debugging capabilities.
     
     This is similar to the original _train_worker function but uses the multimodal
-    model, dataset, and processing functions.
+    model, dataset, and processing functions, with additional debugging features and support for different learning rate schedulers.
+    
+    
+    Args:
+        debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
+        debug_interval: How often to log debugging information (in batches) (default: 10)
+        lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
+        max_lr: Maximum learning rate for OneCycleLR
+        pct_start: Percentage of total steps for warmup phase in OneCycleLR
+        div_factor: Initial learning rate = max_lr / div_factor
+        final_div_factor: Final learning rate = initial_lr / final_div_factor
     """
     # Setup DDP environment
     setup_successful = setup_ddp(rank, world_size, port)
@@ -403,15 +603,17 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
             writer.add_text('Config/model_parameters', config_str, 0)
             writer.add_text('Config/training_parameters', 
                           f"batch_size: {batch_size}\nnum_epochs: {num_epochs}\n" +
-                          f"early_stopping_patience: {early_stopping_patience}", 0)
+                          f"early_stopping_patience: {early_stopping_patience}\n" +
+                          f"debug_level: {debug_level}", 0)
             
-            # Start GPU monitoring in a separate thread
-            gpu_monitor_thread = threading.Thread(
-                target=monitor_gpu_stats,
-                args=(writer, rank, stop_monitoring, 2.0)
-            )
-            gpu_monitor_thread.daemon = True
-            gpu_monitor_thread.start()
+            # Basic GPU monitoring only - minimized to prevent crashes
+            if debug_level >= 2:
+                gpu_monitor_thread = threading.Thread(
+                    target=monitor_gpu_stats,
+                    args=(writer, rank, stop_monitoring, 10.0)  # Reduced frequency to 10 seconds
+                )
+                gpu_monitor_thread.daemon = True
+                gpu_monitor_thread.start()
         
         logger = None
         if rank == 0:
@@ -421,6 +623,7 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
                         f"num_epochs: {num_epochs}, early_stopping_patience: {early_stopping_patience}")
             if tensorboard_log_dir:
                 logger.info(f"TensorBoard logging enabled at: {tensorboard_log_dir}")
+                logger.info(f"Debug level: {debug_level}")
 
         device = torch.device(f'cuda:{rank}')
         
@@ -481,10 +684,55 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
                               f"Total parameters: {total_params:,}\n" +
                               f"Trainable parameters: {trainable_params:,}\n" +
                               f"Model size: {format_size(model_size)}", 0)
+                
+                # Add model structure text (all debug levels)
+                try:
+                    model_structure = str(model.module if isinstance(model, DDP) else model)
+                    writer.add_text('Model/structure', f'```\n{model_structure}\n```', 0)
+                    print("Added model structure as text in TensorBoard -> Text tab")
+                except Exception as e:
+                    logger.warning(f"Failed to add model structure: {e}")
 
-        optimizer = optim.Adam(model.parameters(), lr=5e-4)
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.3, patience=5, verbose=(rank==0))
+        # print(f"accumulation_steps: {accumulation_steps}")
+        # print(f"len(train_loader) : {len(train_loader) }")
+        # print(f"num_epochs: {num_epochs}")
+        # Calculate total steps for OneCycleLR
+        total_steps = (len(train_loader) // accumulation_steps) * num_epochs
+        # print(f"total_steps: {total_steps}")
+        ## Initialize optimizer with appropriate initial learning rate
+        initial_lr = max_lr if lr_scheduler_type == "plateau" else max_lr / div_factor
+        # print(f"initial_lr: {initial_lr}")
+        # print(f"lr_scheduler_type {lr_scheduler_type}")
+        optimizer = optim.Adam(model.parameters(), lr=initial_lr)
+        
+        # Initialize appropriate scheduler based on type
+        if lr_scheduler_type == "onecycle":
+            
+            scheduler = OneCycleLR(
+                optimizer, 
+                max_lr=max_lr,
+                total_steps=total_steps,
+                pct_start=pct_start,
+                div_factor=div_factor,
+                final_div_factor=final_div_factor
+            )
+            scheduler_batch_update = True  # Flag to indicate batch-level updates
+        else:  # "plateau" - default behavior
+            scheduler = ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.3, patience=5, verbose=(rank==0)
+            )
+            scheduler_batch_update = False  # Flag to indicate epoch-level updates
+        print(scheduler)
+        print(scheduler_batch_update)
         scaler = GradScaler()
+    
+        # Log LR scheduler info
+        if rank == 0 and logger is not None:
+            logger.info(f"Using {lr_scheduler_type} learning rate scheduler")
+            if lr_scheduler_type == "onecycle":
+                logger.info(f"OneCycleLR parameters: max_lr={max_lr}, " 
+                          f"pct_start=Ftrain{pct_start}, div_factor={div_factor}, "
+                          f"final_div_factor={final_div_factor}")
 
         best_val_loss = float('inf')
         epochs_without_improvement = 0
@@ -495,38 +743,52 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
             if world_size > 1 and train_sampler is not None:
                 train_sampler.set_epoch(epoch)
 
-            if rank == 0:
-                pacific_tz = pytz.timezone('America/Los_Angeles')
-                current_time = datetime.now(pacific_tz)
-                print(f"Epoch {epoch+1} start time (PST): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            # if rank == 0:
+                # pacific_tz = pytz.timezone('America/Los_Angeles')
+                # current_time = datetime.now(pacific_tz)
+                # print(f"Epoch {epoch+1} start time (PST): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            # Train and validate with multimodal batch processing
             avg_train_loss = train_one_epoch_ddp(
                 model, train_loader, optimizer, device, scaler, writer, epoch,
-                process_batch_fn=process_multimodal_batch,  # Use our multimodal batch processor
-                accumulation_steps=3  # Accumulate gradients over 4 batches
+                process_batch_fn=process_multimodal_batch,
+                accumulation_steps=accumulation_steps,
+                debug_level=debug_level,
+                debug_interval=debug_interval,
+                scheduler=scheduler if scheduler_batch_update else None  # Pass scheduler if batch update
             )
             
+            # Validate
             avg_val_loss = validate_one_epoch_ddp(
                 model, val_loader, device, writer, epoch,
-                process_batch_fn=process_multimodal_batch  # Use our multimodal batch processor
+                process_batch_fn=process_multimodal_batch,
+                debug_level=debug_level,
+                debug_interval=debug_interval,
+                visualize_samples=visualize_samples
             )
             
-            scheduler.step(avg_val_loss)
+            # Update scheduler at epoch level only for ReduceLROnPlateau
+            if not scheduler_batch_update:
+                scheduler.step(avg_val_loss)
+            
             epoch_time = time.time() - epoch_start_time
 
-            # Log epoch metrics to TensorBoard
+            # Log epoch metrics to TensorBoard (all debug levels)
             if rank == 0 and writer is not None:
                 writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
                 writer.add_scalar('Loss/val_epoch', avg_val_loss, epoch)
-                writer.add_scalar('Metrics/epoch_time_minutes', epoch_time/60, epoch)
-                writer.add_scalar('Metrics/learning_rate', optimizer.param_groups[0]['lr'], epoch)
                 
-                # Track GPU memory at epoch boundaries
-                allocated = torch.cuda.memory_allocated(device=device) / (1024**2)  # MB
-                reserved = torch.cuda.memory_reserved(device=device) / (1024**2)    # MB
-                writer.add_scalar('Memory/allocated_MB', allocated, epoch)
-                writer.add_scalar('Memory/reserved_MB', reserved, epoch)
+                # Additional metrics (level 2+)
+                if debug_level >= 2:
+                    writer.add_scalar('Metrics/epoch_time_minutes', epoch_time/60, epoch)
+                    writer.add_scalar('Metrics/learning_rate', optimizer.param_groups[0]['lr'], epoch)
+                    
+                    # Track GPU memory at epoch boundaries
+                    allocated = torch.cuda.memory_allocated(device=device) / (1024**2)  # MB
+                    reserved = torch.cuda.memory_reserved(device=device) / (1024**2)    # MB
+                    writer.add_scalar('Memory/allocated_MB', allocated, epoch)
+                    writer.add_scalar('Memory/reserved_MB', reserved, epoch)
+                
+                # Learning curve visualization removed to prevent crashes
 
             if rank == 0:
                 log_message = (f"Epoch {epoch+1}/{num_epochs} | "
@@ -608,6 +870,8 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
             result = None
     except Exception as e:
         print(f"Rank {rank}: Exception during training: {e}")
+        import traceback
+        traceback.print_exc()
         result = None
     finally:
         # Clean up TensorBoard writer
@@ -623,6 +887,9 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
     return result
 
 
+
+
+# Update the main training function to include the debugging options
 def train_multimodal_model(train_dataset,
                          val_dataset,
                          model_name,
@@ -631,11 +898,21 @@ def train_multimodal_model(train_dataset,
                          model_config=MultimodalModelConfig(),  # Use MultimodalModelConfig
                          num_epochs=60,
                          log_file="logs/training_log.txt",
-                         early_stopping_patience=10,
+                         early_stopping_patience=20,
                          temp_dir_root="data/output/tmp_shards",
-                         tensorboard_log_dir="data/output/tensorboard_logs"):
+                         tensorboard_log_dir="data/output/tensorboard_logs",
+                         debug_level=2,
+                         debug_interval=30,
+                         accumulation_steps = 3,
+                         visualize_samples=False,
+                         lr_scheduler_type="plateau",    # New parameter
+                         max_lr=5e-4,                    # New parameter
+                         pct_start=0.3,                  # New parameter
+                         div_factor=25.0,                # New parameter
+                         final_div_factor=1e4):          # New parameter
     """
-    Unified training entry point for the multimodal model.
+    Unified training entry point for the multimodal model with enhanced debugging
+    and learning rate scheduler options.
     
     Parameters:
       - train_dataset, val_dataset: Precomputed dataset objects.
@@ -648,6 +925,14 @@ def train_multimodal_model(train_dataset,
       - early_stopping_patience: Number of epochs without improvement before early stopping.
       - temp_dir_root: Base directory to use for temporary shards.
       - tensorboard_log_dir: Directory to store TensorBoard logs
+      - debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
+      - debug_interval: How often to log debugging information (in batches)
+      - visualize_samples: Whether to visualize sample predictions
+      - lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
+      - max_lr: Maximum learning rate for OneCycleLR
+      - pct_start: Percentage of total steps for warmup phase in OneCycleLR
+      - div_factor: Initial learning rate = max_lr / div_factor
+      - final_div_factor: Final learning rate = initial_lr / final_div_factor
       
     Returns:
       The best validation loss (as reported by the rank-0 process), or None if training failed.
@@ -661,6 +946,20 @@ def train_multimodal_model(train_dataset,
         os.makedirs(tensorboard_log_dir, exist_ok=True)
         print(f"TensorBoard logs will be saved to: {tensorboard_log_dir}")
         print(f"To view TensorBoard, run: tensorboard --logdir={tensorboard_log_dir}")
+        
+        print(f"Debug level: {debug_level}")
+        if debug_level == 1:
+            print("Using basic logging: epoch-level metrics only")
+        elif debug_level == 2:
+            print("Using medium logging: epoch-level metrics and parameter tracking")
+        elif debug_level == 3:
+            print(f"Using detailed logging with interval of {debug_interval} batches")
+    
+    # Log scheduler information
+    print(f"Using {lr_scheduler_type} learning rate scheduler")
+    if lr_scheduler_type == "onecycle":
+        print(f"OneCycleLR parameters: max_lr={max_lr}, pct_start={pct_start}, "
+              f"div_factor={div_factor}, final_div_factor={final_div_factor}")
 
     # Create a unique temporary directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -724,7 +1023,16 @@ def train_multimodal_model(train_dataset,
                       num_epochs,
                       log_file,
                       early_stopping_patience,
-                      tensorboard_log_dir)
+                      tensorboard_log_dir,
+                      debug_level,
+                      debug_interval,
+                      accumulation_steps,
+                      visualize_samples,
+                      lr_scheduler_type,    # New parameter
+                      max_lr,               # New parameter
+                      pct_start,            # New parameter
+                      div_factor,           # New parameter
+                      final_div_factor)     # New parameter
             )
             p.start()
             processes.append(p)
@@ -743,7 +1051,6 @@ def train_multimodal_model(train_dataset,
         else:
             print("Training did not complete successfully.")
     else:
-        # Single GPU training: call the worker directly.
         best_val_loss = _train_multimodal_worker(
             0, 1,
             train_shard_paths[0],
@@ -756,7 +1063,16 @@ def train_multimodal_model(train_dataset,
             num_epochs,
             log_file,
             early_stopping_patience,
-            tensorboard_log_dir
+            tensorboard_log_dir,
+            debug_level,
+            debug_interval,
+            accumulation_steps,
+            visualize_samples,
+            lr_scheduler_type=lr_scheduler_type,
+            max_lr=max_lr,
+            pct_start=pct_start,
+            div_factor=div_factor,
+            final_div_factor=final_div_factor
         )
     
     # Clean up temporary shards directory
@@ -766,9 +1082,10 @@ def train_multimodal_model(train_dataset,
     return best_val_loss
 
 
-
-# Example of how to run ablation studies with the multimodal model
-def run_ablation_studies(train_dataset, val_dataset, base_config, batch_size=8, epochs=40):
+def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir, 
+                        model_name="pointupsampler", batch_size=8, epochs=40, debug_level=2,
+                        lr_scheduler_type="onecycle", max_lr=5e-4, pct_start=0.3, 
+                        div_factor=25.0, final_div_factor=1e4):
     """
     Run ablation studies with different modality combinations.
     
@@ -776,8 +1093,15 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, batch_size=8, 
         train_dataset: Training dataset
         val_dataset: Validation dataset
         base_config: Base configuration for all models
+        checkpoint_dir: Base directory for checkpoints
         batch_size: Batch size per GPU
         epochs: Number of epochs to train
+        debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
+        lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
+        max_lr: Maximum learning rate for OneCycleLR
+        pct_start: Percentage of total steps for warmup phase in OneCycleLR
+        div_factor: Initial learning rate = max_lr / div_factor
+        final_div_factor: Final learning rate = initial_lr / final_div_factor
     """
     import os
     import time
@@ -791,6 +1115,12 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, batch_size=8, 
     
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     
+    # Log scheduler information
+    print(f"Using {lr_scheduler_type} learning rate scheduler for all runs")
+    if lr_scheduler_type == "onecycle":
+        print(f"OneCycleLR parameters: max_lr={max_lr}, pct_start={pct_start}, "
+              f"div_factor={div_factor}, final_div_factor={final_div_factor}")
+    
     # 4. Both SAR & Optical
     print("\n\n========== Running Combined (SAR & Optical) ==========\n")
     combined_config_dict = {k: v for k, v in asdict(base_config).items()}
@@ -799,17 +1129,25 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, batch_size=8, 
     combined_config = MultimodalModelConfig(**combined_config_dict)
     
     # Make a unique directory for this run
-    combined_dir = os.path.join("checkpoints", f"combined_{timestamp}")
+    combined_dir = os.path.join(checkpoint_dir, f"combined_{timestamp}")
     os.makedirs(combined_dir, exist_ok=True)
     
     train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        model_name="pointupsampler",
+        model_name=model_name,
         batch_size=batch_size,
         checkpoint_dir=combined_dir,
         model_config=combined_config,
-        num_epochs=epochs
+        num_epochs=epochs,
+        debug_level=debug_level,
+        debug_interval=30,
+        visualize_samples=(debug_level >= 2),
+        lr_scheduler_type=lr_scheduler_type,
+        max_lr=max_lr,
+        pct_start=pct_start,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor
     )
     
     # 1. Baseline (3DEP Only)
@@ -820,17 +1158,25 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, batch_size=8, 
     baseline_config = MultimodalModelConfig(**baseline_config_dict)
     
     # Make a unique directory for this run
-    baseline_dir = os.path.join("checkpoints", f"baseline_{timestamp}")
+    baseline_dir = os.path.join(checkpoint_dir, f"baseline_{timestamp}")
     os.makedirs(baseline_dir, exist_ok=True)
     
     train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        model_name="pointupsampler",
+        model_name=model_name,
         batch_size=batch_size,
         checkpoint_dir=baseline_dir,
         model_config=baseline_config,
-        num_epochs=epochs
+        num_epochs=epochs,
+        debug_level=debug_level,
+        debug_interval=30,
+        visualize_samples=(debug_level >= 2),
+        lr_scheduler_type=lr_scheduler_type,
+        max_lr=max_lr,
+        pct_start=pct_start,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor
     )
     
     # 2. SAR-Only
@@ -841,17 +1187,25 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, batch_size=8, 
     sar_config = MultimodalModelConfig(**sar_config_dict)
     
     # Make a unique directory for this run
-    sar_dir = os.path.join("checkpoints", f"sar_only_{timestamp}")
+    sar_dir = os.path.join(checkpoint_dir, f"sar_only_{timestamp}")
     os.makedirs(sar_dir, exist_ok=True)
     
     train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        model_name="pointupsampler",
+        model_name=model_name,
         batch_size=batch_size,
         checkpoint_dir=sar_dir,
         model_config=sar_config,
-        num_epochs=epochs
+        num_epochs=epochs,
+        debug_level=debug_level,
+        debug_interval=30,
+        visualize_samples=(debug_level >= 2),
+        lr_scheduler_type=lr_scheduler_type,
+        max_lr=max_lr,
+        pct_start=pct_start,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor
     )
     
     # 3. Optical-Only
@@ -862,19 +1216,25 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, batch_size=8, 
     optical_config = MultimodalModelConfig(**optical_config_dict)
     
     # Make a unique directory for this run
-    optical_dir = os.path.join("checkpoints", f"optical_only_{timestamp}")
+    optical_dir = os.path.join(checkpoint_dir, f"optical_only_{timestamp}")
     os.makedirs(optical_dir, exist_ok=True)
     
     train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        model_name="pointupsampler",
+        model_name=model_name,
         batch_size=batch_size,
         checkpoint_dir=optical_dir,
         model_config=optical_config,
-        num_epochs=epochs
+        num_epochs=epochs,
+        debug_level=debug_level,
+        debug_interval=30,
+        visualize_samples=(debug_level >= 2),
+        lr_scheduler_type=lr_scheduler_type,
+        max_lr=max_lr,
+        pct_start=pct_start,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor
     )
-    
-
     
     print("\nAll ablation studies completed.")

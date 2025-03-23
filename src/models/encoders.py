@@ -96,8 +96,8 @@ class TransformerEncoderBlock(nn.Module):
         super().__init__()
         # Layer normalization for attention
         self.norm1 = nn.LayerNorm(dim)
-        # Self-attention layer (single-headed)
-        self.attn = nn.MultiheadAttention(dim, num_heads=1, dropout=dropout, batch_first=True)
+        # Self-attention layer 
+        self.attn = nn.MultiheadAttention(dim, num_heads=2, dropout=dropout, batch_first=True)
         # Layer normalization for feed-forward
         self.norm2 = nn.LayerNorm(dim)
         # Feed-forward network
@@ -108,7 +108,8 @@ class TransformerEncoderBlock(nn.Module):
             nn.Linear(dim * 4, dim)
         )
         self.dropout = nn.Dropout(dropout)
-        
+
+    
     def forward(self, x):
         """
         Args:
@@ -325,15 +326,15 @@ class UAVSAREncoder(nn.Module):
             nn.GELU()
         )
         
-        # Layer normalization
-        self.norm = nn.LayerNorm(embed_dim)
-        
         # Positional encoding (applied before transformer)
         self.pos_encoding = PositionalEncoding(
             embed_dim=embed_dim,
             max_h=image_size,
             max_w=image_size
         )
+        
+        # Layer normalization
+        self.norm = nn.LayerNorm(embed_dim)
         
         # Transformer encoder block
         self.transformer_block = TransformerEncoderBlock(
