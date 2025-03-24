@@ -33,6 +33,41 @@ class MultimodalModelConfig:
     img_embed_dim: int = 32
     img_num_patches: int = 16
     
+    # parameters for SpatialFusion
+    temperature: float = 0.1
+    max_dist_ratio: float = 0.5
+    
+    # parameters for encoder dropouts
+    naip_dropout: float = 0.1
+    uavsar_dropout: float = 0.1
+
+    def __reduce__(self):
+        """
+        Custom reduce method to make the class picklable for multiprocessing.
+        """
+        return (
+            self.__class__,
+            (
+                self.k,
+                self.feature_dim,
+                self.up_ratio,
+                self.pos_mlp_hdn,
+                self.up_attn_hds,
+                self.up_concat,
+                self.up_beta,
+                self.up_dropout,
+                self.fnl_attn_hds,
+                self.attr_dim,
+                self.use_naip,
+                self.use_uavsar,
+                self.img_embed_dim,
+                self.img_num_patches,
+                self.temperature,
+                self.max_dist_ratio,
+                self.naip_dropout,
+                self.uavsar_dropout
+            )
+        )
 
 def create_multimodal_model(device, config: MultimodalModelConfig):
     """
@@ -78,7 +113,8 @@ class MultimodalPointUpsampler(nn.Module):
                 image_size=40,  # 40x40 pixels
                 patch_size=10,  # 10x10 pixel patches
                 embed_dim=config.img_embed_dim,
-                num_patches=config.img_num_patches
+                num_patches=config.img_num_patches,
+                dropout=config.naip_dropout  # Use new dropout parameter from config
             )
         
         if self.use_uavsar:
@@ -87,7 +123,8 @@ class MultimodalPointUpsampler(nn.Module):
                 image_size=4,   # 4x4 pixels
                 patch_size=1,   # 1x1 pixel patches
                 embed_dim=config.img_embed_dim,
-                num_patches=config.img_num_patches
+                num_patches=config.img_num_patches,
+                dropout=config.uavsar_dropout  # Use new dropout parameter from config
             )
         
         # ====== 3) Improved Spatial Fusion with PointTransformerConv ======
@@ -97,7 +134,8 @@ class MultimodalPointUpsampler(nn.Module):
             use_naip=self.use_naip,
             use_uavsar=self.use_uavsar,
             num_patches=config.img_num_patches,
-            max_dist_ratio=config.max_dist_ratio if hasattr(config, 'max_dist_ratio') else 0.5
+            temperature=config.temperature,      # Use temperature parameter from config
+            max_dist_ratio=config.max_dist_ratio # Use max_dist_ratio parameter from config
         )
         
         # ====== 4) Node Shuffle (from original model) ======
@@ -125,7 +163,8 @@ class MultimodalPointUpsampler(nn.Module):
             nn.Linear(64, 3)
         )
     
-    def forward(self, dep_points, edge_index, dep_attr=None, naip=None, uavsar=None, center=None, scale=None, bbox=None):
+    def forward(self, dep_points, edge_index, dep_attr=None, naip=None, uavsar=None, center=None, scale=None, bbox=None):      
+        
         """
         Forward pass of the multimodal point cloud upsampler with improved spatial fusion
         
@@ -191,7 +230,7 @@ class MultimodalPointUpsampler(nn.Module):
             naip_bbox=naip.get('img_bbox', None) if naip is not None else None,
             uavsar_bbox=uavsar.get('img_bbox', None) if uavsar is not None else None,
             center=center,                                       # [1, 3]
-            scale=scale                                          # scalar
+            scale=scale                                          # scalar                                        
         )  # [N_dep, feat_dim]
         
         # ====== 4) Feature Expansion ======

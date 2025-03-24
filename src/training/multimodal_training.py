@@ -4,9 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 import os
 import sys
 import pytz
-import random
 import socket
-import numpy as np
 import shutil
 from datetime import datetime
 import torch.distributed as dist
@@ -21,17 +19,12 @@ import time
 import threading
 import logging
 from torch.utils.tensorboard import SummaryWriter
-import pynvml
 
 
 # Make NCCL more robust to communication issues
 os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
 os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
-os.environ["TORCH_DISTRIBUTED_DETAIL"] = "DEBUG"
-os.environ["NCCL_DEBUG"] = "INFO"
-# Increase timeout to 30 minutes
 os.environ["NCCL_SOCKET_TIMEOUT"] = "1800"  # in seconds
-os.environ["TORCH_NCCL_TRACE_BUFFER_SIZE"] = "1000000"  # 1MB buffer
 
 # Import from the original ddp_training.py
 from src.training.ddp_training import (
@@ -291,11 +284,10 @@ def create_multimodal_shards(dataset, world_size, temp_dir, prefix,
 
 
 def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=None, epoch=0, 
-                    process_batch_fn=None, accumulation_steps=4, debug_level=2, 
-                    debug_interval=10, scheduler=None):
+                    process_batch_fn=None, accumulation_steps=4, enable_debug=False, 
+                    scheduler=None):
     """
-    Train the model for one epoch using DDP with TensorBoard logging, gradient accumulation,
-    and enhanced debugging.
+    Train the model for one epoch using DDP with TensorBoard logging and gradient accumulation.
     
     Args:
         model: The model to train
@@ -307,12 +299,9 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
         epoch: Current epoch number
         process_batch_fn: Function to process a batch (defaults to process_multimodal_batch)
         accumulation_steps: Number of batches to accumulate gradients over (default: 4)
-        debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
-        debug_interval: How often to log debugging information (in batches) (default: 10)
+        enable_debug: Whether to enable debugging features (default: False)
         scheduler: Optional scheduler to update after each batch (for OneCycleLR)
     """
-    from torch.profiler import profile, record_function, ProfilerActivity
-    
     model.train()
     train_loss_total = 0.0
     batch_count = 0
@@ -323,119 +312,44 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
         from src.training.multimodal_training import process_multimodal_batch
         process_batch_fn = process_multimodal_batch
     
-    # Initialize the TensorBoard debugger if debugging is enabled
-    debugger = None
-    if debug_level > 1 and writer is not None:
-        from .debug_tools import TensorBoardDebugger
-        debugger = TensorBoardDebugger(writer, model, log_level=debug_level)
-        if debug_level >= 3:  # Only set up activation tracking for detailed logging
-            debugger.setup_activation_tracking()
-    
     # Global step counter for tensorboard logging
     global_step = epoch * len(train_loader)
     
     # Zero gradients at the beginning
     optimizer.zero_grad()
     
-    # Determine how often to log based on debug level
-    batch_log_interval = 1 if debug_level >= 3 else (10 if debug_level >= 2 else 999999)
-    # If debug_level is 3, use the provided debug_interval, otherwise just log at epoch boundaries
-    effective_debug_interval = debug_interval if debug_level >= 3 else 30
+    # Batch logging interval - only log if debugging is enabled
+    batch_log_interval = 10 if enable_debug else 999999
     
     for batch_idx, batch in enumerate(train_loader):
         current_step = global_step + batch_idx
         
-        # Process batch either with or without profiling
-        try:
-            # Forward pass with mixed precision (for all cases)
-            with autocast(device_type='cuda', dtype=torch.float16):
-                batch_loss = process_batch_fn(model, batch, device)
-                # Scale loss by accumulation steps to maintain correct gradient magnitude
-                scaled_loss = batch_loss / accumulation_steps
-            
-            # Backward pass with gradient scaling
-            scaler.scale(scaled_loss).backward()
-            
-            # Profile the first batch of each epoch if detailed debugging is enabled
-            # We do the profiling *after* the actual computation to avoid affecting the training
-            if debug_level >= 3 and batch_idx == 0 and writer is not None and epoch % effective_debug_interval == 0:
-                try:
-                    # Create a copy of the batch for profiling
-                    activities = [ProfilerActivity.CPU]
-                    if torch.cuda.is_available():
-                        activities.append(ProfilerActivity.CUDA)
-                    
-                    # Run a separate forward pass just for profiling (no backward)
-                    with profile(activities=activities, record_shapes=True, profile_memory=True) as prof:
-                        with record_function("model_inference"):
-                            with autocast(device_type='cuda', dtype=torch.float16):
-                                # Just do the forward pass for profiling
-                                _ = process_batch_fn(model, batch, device)
-                    
-                    # Log profiler data (extracted metrics)
-                    # Extract and log key metrics from the profiler
-                    total_cpu_time = 0
-                    total_cuda_time = 0
-                    
-                    for event in prof.key_averages():
-                        # Calculate totals
-                        if hasattr(event, 'cpu_time'):
-                            total_cpu_time += event.cpu_time
-                        if hasattr(event, 'device_time'):
-                            total_cuda_time += event.device_time
-                        elif hasattr(event, 'cuda_time'):
-                            total_cuda_time += event.cuda_time
-                    
-                    # Log totals
-                    writer.add_scalar('Profiler/total_cpu_time_us', total_cpu_time, epoch * len(train_loader))
-                    writer.add_scalar('Profiler/total_cuda_time_us', total_cuda_time, epoch * len(train_loader))
-                    
-                    # Save trace file (optional)
-                    import os
-                    trace_dir = os.path.join(os.path.dirname(writer.log_dir), 'traces')
-                    os.makedirs(trace_dir, exist_ok=True)
-                    trace_path = os.path.join(trace_dir, f'trace_epoch_{epoch}_batch_0.json')
-                    
-                    try:
-                        from torch.profiler import export_chrome_trace
-                        export_chrome_trace(prof, trace_path)
-                    except (ImportError, AttributeError):
-                        # Fallback for older PyTorch
-                        try:
-                            prof.export_chrome_trace(trace_path)
-                        except Exception as e:
-                            print(f"Could not export trace: {e}")
-                except Exception as e:
-                    print(f"Warning: Profiling failed: {e}")
-        except Exception as e:
-            print(f"Error processing batch: {e}")
-            # Ensure batch_loss is defined even if processing fails
-            batch_loss = torch.tensor(float('nan'), device=device)
-            # Skip backward for this batch
-            optimizer.zero_grad()
+        # Forward pass with mixed precision
+        with autocast(device_type='cuda', dtype=torch.float16):
+            batch_loss = process_batch_fn(model, batch, device)
+            # Scale loss by accumulation steps to maintain correct gradient magnitude
+            scaled_loss = batch_loss / accumulation_steps
+        
+        # Backward pass with gradient scaling
+        scaler.scale(scaled_loss).backward()
         
         # Accumulate statistics for reporting
         train_loss_total += batch_loss.item()
         batch_count += 1
         accumulated_batch_count += 1
 
-        # Log LR every batch instead of just at epoch boundaries
-        if writer is not None and debug_level >= 1:
+        # Log LR if debugging is enabled
+        if writer is not None and enable_debug:
             writer.add_scalar('Metrics/learning_rate_batch', optimizer.param_groups[0]['lr'], current_step)
     
-        # Log batch-level metrics if appropriate debug level and interval
-        should_log_batch = (debug_level >= 2 and 
-                          batch_idx % effective_debug_interval == 0 and 
+        # Log batch-level metrics if debugging is enabled
+        should_log_batch = (enable_debug and 
+                          batch_idx % batch_log_interval == 0 and 
                           writer is not None)
                           
         if should_log_batch:
-            # Log per-batch loss (level 2+)
+            # Log per-batch loss
             writer.add_scalar('Loss/train_batch', batch_loss.item(), current_step)
-            
-            # Use the debugger to track activations (level 3 only)
-            if debugger and debug_level >= 3:
-                debugger.global_step = current_step
-                debugger.log_activations()
         
         # Only update weights after accumulating gradients for specified number of steps
         # or at the end of the epoch to avoid losing the last few batches
@@ -447,39 +361,19 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
             # Clip gradients to prevent explosion
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5)
             
-            # # Log gradient statistics if appropriate debug level
-            # if should_log_batch and debugger:
-            #     # Track gradients (level 2+)
-            #     debugger.track_gradients()
-                
-                # # Log weight update ratios (level 3 only)
-                # if debug_level >= 3:
-                #     debugger.log_weight_update_ratios(optimizer)
-            
             # Update weights
             scaler.step(optimizer)
             scaler.update()        
 
-            
-
             # Update learning rate scheduler if provided (for OneCycleLR)
             if scheduler is not None:
                 scheduler.step()
-                
-                
+            
             # Reset gradients
             optimizer.zero_grad()
             
             # Reset accumulation counter
             accumulated_batch_count = 0
-            
-            # # Log parameter statistics if appropriate debug level (at end of epoch always)
-            # if (is_last_batch or should_log_batch) and debugger and debug_level >= 2:
-            #     debugger.track_parameters()
-    
-    # Clean up debugger
-    if debugger and debug_level >= 3:
-        debugger.close_activation_tracking()
     
     # Gather losses from all processes
     world_size = dist.get_world_size()
@@ -490,13 +384,10 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
     return avg_train_loss
 
 
-
-
-
 def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, process_batch_fn=None,
-                          debug_level=2, debug_interval=10, visualize_samples=False):
+                          enable_debug=False, visualize_samples=False):
     """
-    Validate the model for one epoch using DDP with TensorBoard logging and enhanced debugging.
+    Validate the model for one epoch using DDP with TensorBoard logging.
     
     Args:
         model: The model to validate
@@ -505,8 +396,7 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
         writer: TensorBoard SummaryWriter (optional)
         epoch: Current epoch number
         process_batch_fn: Function to process a batch (defaults to process_multimodal_batch)
-        debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
-        debug_interval: How often to log debugging information (in batches) (default: 10)
+        enable_debug: Whether to enable debugging features (default: False)
         visualize_samples: Whether to visualize sample predictions (default: False)
     """
     model.eval()
@@ -521,9 +411,8 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
     # Global step counter for tensorboard logging
     global_step = epoch * len(val_loader)
     
-    # Determine how often to log based on debug level
-    # If debug_level is 3, use the provided debug_interval, otherwise just log at epoch boundaries
-    effective_debug_interval = debug_interval if debug_level >= 3 else 999999
+    # Batch logging interval - only log if debugging is enabled
+    batch_log_interval = 10 if enable_debug else 999999
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
@@ -533,12 +422,10 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
                 batch_loss = process_batch_fn(model, batch, device)
             
             # Check if we should log for this batch
-            should_log_batch = (debug_level >= 2 and 
-                              batch_idx % effective_debug_interval == 0 and 
+            should_log_batch = (enable_debug and 
+                              batch_idx % batch_log_interval == 0 and 
                               writer is not None and 
                               dist.get_rank() == 0)
-            
-            # Point cloud visualization disabled to prevent crashes
             
             # Log batch-level statistics
             if should_log_batch:
@@ -559,20 +446,15 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
 def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
                            model_name, batch_size, checkpoint_dir, model_config,
                            port, num_epochs, log_file, early_stopping_patience,
-                           tensorboard_log_dir=None, debug_level=2, debug_interval=10,
-                             accumulation_steps = 3,
-                           visualize_samples=False, lr_scheduler_type="plateau",
+                           tensorboard_log_dir=None, enable_debug=False,
+                           accumulation_steps=3, visualize_samples=False, 
+                           lr_scheduler_type="plateau",
                            max_lr=5e-4, pct_start=0.3, div_factor=25.0, final_div_factor=1e4):
     """
-    Worker function for training the multimodal model with enhanced debugging capabilities.
-    
-    This is similar to the original _train_worker function but uses the multimodal
-    model, dataset, and processing functions, with additional debugging features and support for different learning rate schedulers.
-    
+    Worker function for training the multimodal model.
     
     Args:
-        debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
-        debug_interval: How often to log debugging information (in batches) (default: 10)
+        enable_debug: Whether to enable debugging features (default: False)
         lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
         max_lr: Maximum learning rate for OneCycleLR
         pct_start: Percentage of total steps for warmup phase in OneCycleLR
@@ -590,306 +472,265 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
     gpu_monitor_thread = None
     stop_monitoring = threading.Event()
     
-    try:
-        # Setup TensorBoard SummaryWriter for rank 0 only
-        if tensorboard_log_dir is not None and rank == 0:
-            tb_dir = os.path.join(tensorboard_log_dir, f"{model_name}_{time.strftime('%Y%m%d-%H%M%S')}")
-            os.makedirs(tb_dir, exist_ok=True)
-            writer = SummaryWriter(log_dir=tb_dir)
-            print(f"TensorBoard logs will be saved to: {tb_dir}")
-            
-            # Log model config as text
-            config_str = "\n".join([f"{k}: {v}" for k, v in asdict(model_config).items()])
-            writer.add_text('Config/model_parameters', config_str, 0)
-            writer.add_text('Config/training_parameters', 
-                          f"batch_size: {batch_size}\nnum_epochs: {num_epochs}\n" +
-                          f"early_stopping_patience: {early_stopping_patience}\n" +
-                          f"debug_level: {debug_level}", 0)
-            
-            # Basic GPU monitoring only - minimized to prevent crashes
-            if debug_level >= 2:
-                gpu_monitor_thread = threading.Thread(
-                    target=monitor_gpu_stats,
-                    args=(writer, rank, stop_monitoring, 10.0)  # Reduced frequency to 10 seconds
-                )
-                gpu_monitor_thread.daemon = True
-                gpu_monitor_thread.start()
+    # Setup TensorBoard SummaryWriter for rank 0 only
+    if tensorboard_log_dir is not None and rank == 0:
+        tb_dir = os.path.join(tensorboard_log_dir, f"{model_name}_{time.strftime('%Y%m%d-%H%M%S')}")
+        os.makedirs(tb_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir=tb_dir)
+        print(f"TensorBoard logs will be saved to: {tb_dir}")
         
-        logger = None
-        if rank == 0:
-            logger = setup_logging(model_name, log_file)
-            logger.info(f"Starting training with model_config: {asdict(model_config)}")
-            logger.info(f"Training parameters: batch_size: {batch_size}, "
-                        f"num_epochs: {num_epochs}, early_stopping_patience: {early_stopping_patience}")
-            if tensorboard_log_dir:
-                logger.info(f"TensorBoard logging enabled at: {tensorboard_log_dir}")
-                logger.info(f"Debug level: {debug_level}")
-
-        device = torch.device(f'cuda:{rank}')
+        # Log model config as text
+        config_str = "\n".join([f"{k}: {v}" for k, v in asdict(model_config).items()])
+        writer.add_text('Config/model_parameters', config_str, 0)
+        writer.add_text('Config/training_parameters', 
+                      f"batch_size: {batch_size}\nnum_epochs: {num_epochs}\n" +
+                      f"early_stopping_patience: {early_stopping_patience}", 0)
         
-        # Load the shard datasets with multimodal support
-        train_dataset_shard = ShardedMultimodalPointCloudDataset(
-            train_shard_path, 
-            model_config.k, 
-            use_naip=model_config.use_naip, 
-            use_uavsar=model_config.use_uavsar
-        )
-        
-        val_dataset_shard = ShardedMultimodalPointCloudDataset(
-            val_shard_path, 
-            model_config.k, 
-            use_naip=model_config.use_naip, 
-            use_uavsar=model_config.use_uavsar
-        )
-
-        # Create samplers (if using distributed training)
-        if world_size > 1:
-            train_sampler = DistributedSampler(train_dataset_shard, num_replicas=world_size, rank=rank, shuffle=True)
-            val_sampler = DistributedSampler(val_dataset_shard, num_replicas=world_size, rank=rank, shuffle=False)
-        else:
-            train_sampler = None
-            val_sampler = None
-
-        # Create data loaders with multimodal collate function
-        train_loader = DataLoader(
-            train_dataset_shard,
-            batch_size=batch_size,
-            sampler=train_sampler,
-            shuffle=(train_sampler is None),
-            collate_fn=multimodal_variable_size_collate
-        )
-        val_loader = DataLoader(
-            val_dataset_shard,
-            batch_size=batch_size,
-            sampler=val_sampler,
-            shuffle=False,
-            collate_fn=multimodal_variable_size_collate
-        )
-
-        # Create the multimodal model and move it to the appropriate GPU
-        model = create_multimodal_model(device, model_config)
-        if world_size > 1:
-            model = DDP(model, device_ids=[rank], find_unused_parameters=False)
-
-        if rank == 0:
-            total_params, trainable_params = count_model_parameters(model)
-            model_size = get_model_size_bytes(model)
-            logger.info(f"Total parameters: {total_params:,}")
-            logger.info(f"Trainable parameters: {trainable_params:,}")
-            logger.info(f"Model size: {format_size(model_size)}")
-            
-            # Log model info to TensorBoard
-            if writer is not None:
-                writer.add_text('Model/parameters', 
-                              f"Total parameters: {total_params:,}\n" +
-                              f"Trainable parameters: {trainable_params:,}\n" +
-                              f"Model size: {format_size(model_size)}", 0)
-                
-                # Add model structure text (all debug levels)
-                try:
-                    model_structure = str(model.module if isinstance(model, DDP) else model)
-                    writer.add_text('Model/structure', f'```\n{model_structure}\n```', 0)
-                    print("Added model structure as text in TensorBoard -> Text tab")
-                except Exception as e:
-                    logger.warning(f"Failed to add model structure: {e}")
-
-        # print(f"accumulation_steps: {accumulation_steps}")
-        # print(f"len(train_loader) : {len(train_loader) }")
-        # print(f"num_epochs: {num_epochs}")
-        # Calculate total steps for OneCycleLR
-        total_steps = (len(train_loader) // accumulation_steps) * num_epochs
-        # print(f"total_steps: {total_steps}")
-        ## Initialize optimizer with appropriate initial learning rate
-        initial_lr = max_lr if lr_scheduler_type == "plateau" else max_lr / div_factor
-        # print(f"initial_lr: {initial_lr}")
-        # print(f"lr_scheduler_type {lr_scheduler_type}")
-        optimizer = optim.Adam(model.parameters(), lr=initial_lr)
-        
-        # Initialize appropriate scheduler based on type
-        if lr_scheduler_type == "onecycle":
-            
-            scheduler = OneCycleLR(
-                optimizer, 
-                max_lr=max_lr,
-                total_steps=total_steps,
-                pct_start=pct_start,
-                div_factor=div_factor,
-                final_div_factor=final_div_factor
+        # Basic GPU monitoring if debugging is enabled
+        if enable_debug:
+            gpu_monitor_thread = threading.Thread(
+                target=monitor_gpu_stats,
+                args=(writer, rank, stop_monitoring, 10.0)  # 10 seconds monitoring interval
             )
-            scheduler_batch_update = True  # Flag to indicate batch-level updates
-        else:  # "plateau" - default behavior
-            scheduler = ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.3, patience=5, verbose=(rank==0)
-            )
-            scheduler_batch_update = False  # Flag to indicate epoch-level updates
-        print(scheduler)
-        print(scheduler_batch_update)
-        scaler = GradScaler()
+            gpu_monitor_thread.daemon = True
+            gpu_monitor_thread.start()
     
-        # Log LR scheduler info
-        if rank == 0 and logger is not None:
-            logger.info(f"Using {lr_scheduler_type} learning rate scheduler")
-            if lr_scheduler_type == "onecycle":
-                logger.info(f"OneCycleLR parameters: max_lr={max_lr}, " 
-                          f"pct_start=Ftrain{pct_start}, div_factor={div_factor}, "
-                          f"final_div_factor={final_div_factor}")
+    logger = None
+    if rank == 0:
+        logger = setup_logging(model_name, log_file)
+        logger.info(f"Starting training with model_config: {asdict(model_config)}")
+        logger.info(f"Training parameters: batch_size: {batch_size}, "
+                    f"num_epochs: {num_epochs}, early_stopping_patience: {early_stopping_patience}")
+        if tensorboard_log_dir:
+            logger.info(f"TensorBoard logging enabled at: {tensorboard_log_dir}")
+            logger.info(f"Debug mode: {enable_debug}")
 
-        best_val_loss = float('inf')
-        epochs_without_improvement = 0
-        best_model_state = None
+    device = torch.device(f'cuda:{rank}')
+    
+    # Load the shard datasets with multimodal support
+    train_dataset_shard = ShardedMultimodalPointCloudDataset(
+        train_shard_path, 
+        model_config.k, 
+        use_naip=model_config.use_naip, 
+        use_uavsar=model_config.use_uavsar
+    )
+    
+    val_dataset_shard = ShardedMultimodalPointCloudDataset(
+        val_shard_path, 
+        model_config.k, 
+        use_naip=model_config.use_naip, 
+        use_uavsar=model_config.use_uavsar
+    )
 
-        for epoch in range(num_epochs):
-            epoch_start_time = time.time()
-            if world_size > 1 and train_sampler is not None:
-                train_sampler.set_epoch(epoch)
+    # Create samplers (if using distributed training)
+    if world_size > 1:
+        train_sampler = DistributedSampler(train_dataset_shard, num_replicas=world_size, rank=rank, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset_shard, num_replicas=world_size, rank=rank, shuffle=False)
+    else:
+        train_sampler = None
+        val_sampler = None
 
-            # if rank == 0:
-                # pacific_tz = pytz.timezone('America/Los_Angeles')
-                # current_time = datetime.now(pacific_tz)
-                # print(f"Epoch {epoch+1} start time (PST): {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    # Create data loaders with multimodal collate function
+    train_loader = DataLoader(
+        train_dataset_shard,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),
+        collate_fn=multimodal_variable_size_collate
+    )
+    val_loader = DataLoader(
+        val_dataset_shard,
+        batch_size=batch_size,
+        sampler=val_sampler,
+        shuffle=False,
+        collate_fn=multimodal_variable_size_collate
+    )
 
-            avg_train_loss = train_one_epoch_ddp(
-                model, train_loader, optimizer, device, scaler, writer, epoch,
-                process_batch_fn=process_multimodal_batch,
-                accumulation_steps=accumulation_steps,
-                debug_level=debug_level,
-                debug_interval=debug_interval,
-                scheduler=scheduler if scheduler_batch_update else None  # Pass scheduler if batch update
-            )
-            
-            # Validate
-            avg_val_loss = validate_one_epoch_ddp(
-                model, val_loader, device, writer, epoch,
-                process_batch_fn=process_multimodal_batch,
-                debug_level=debug_level,
-                debug_interval=debug_interval,
-                visualize_samples=visualize_samples
-            )
-            
-            # Update scheduler at epoch level only for ReduceLROnPlateau
-            if not scheduler_batch_update:
-                scheduler.step(avg_val_loss)
-            
-            epoch_time = time.time() - epoch_start_time
+    # Create the multimodal model and move it to the appropriate GPU
+    model = create_multimodal_model(device, model_config)
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
 
-            # Log epoch metrics to TensorBoard (all debug levels)
-            if rank == 0 and writer is not None:
-                writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
-                writer.add_scalar('Loss/val_epoch', avg_val_loss, epoch)
-                
-                # Additional metrics (level 2+)
-                if debug_level >= 2:
-                    writer.add_scalar('Metrics/epoch_time_minutes', epoch_time/60, epoch)
-                    writer.add_scalar('Metrics/learning_rate', optimizer.param_groups[0]['lr'], epoch)
-                    
-                    # Track GPU memory at epoch boundaries
-                    allocated = torch.cuda.memory_allocated(device=device) / (1024**2)  # MB
-                    reserved = torch.cuda.memory_reserved(device=device) / (1024**2)    # MB
-                    writer.add_scalar('Memory/allocated_MB', allocated, epoch)
-                    writer.add_scalar('Memory/reserved_MB', reserved, epoch)
-                
-                # Learning curve visualization removed to prevent crashes
-
-            if rank == 0:
-                log_message = (f"Epoch {epoch+1}/{num_epochs} | "
-                               f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | "
-                               f"LR: {optimizer.param_groups[0]['lr']:.4e} | "
-                               f"Time: {epoch_time/60:.2f}min")
-                print(log_message)
-                logger.info(log_message)
-
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    epochs_without_improvement = 0
-                    best_model_state = model.module.state_dict() if world_size > 1 else model.state_dict()
-                    logger.info(f"New best validation loss: {best_val_loss:.6f}")
-                    
-                    # Log the best model so far
-                    if writer is not None:
-                        writer.add_scalar('Metrics/best_val_loss', best_val_loss, epoch)
-                else:
-                    epochs_without_improvement += 1
-                    logger.info(f"No improvement in validation loss for {epochs_without_improvement} epoch(s).")
-
-                if epochs_without_improvement >= early_stopping_patience:
-                    logger.info("Early stopping triggered.")
-                    if writer is not None:
-                        writer.add_text('Training/early_stopping', 
-                                      f"Training stopped at epoch {epoch+1} due to no improvement for {early_stopping_patience} epochs",
-                                      epoch)
-                    break
-
-                if (epoch + 1) % 10 == 0:
-                    # Create a descriptive checkpoint name that includes modality info
-                    modality_str = ""
-                    if model_config.use_naip:
-                        modality_str += "_naip"
-                    if model_config.use_uavsar:
-                        modality_str += "_uavsar"
-                    if not (model_config.use_naip or model_config.use_uavsar):
-                        modality_str = "_baseline"
-                        
-                    checkpoint_name = f"{model_name}{modality_str}_k{model_config.k}_f{model_config.feature_dim}_b{batch_size}_e{epoch+1}.pth"
-                    os.makedirs(checkpoint_dir, exist_ok=True)
-                    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
-                    torch.save(best_model_state, checkpoint_path)
-                    logger.info(f"Checkpoint saved: {checkpoint_path}")
-                    
-            # Clear unused GPU memory before the next epoch
-            gc.collect()
-            torch.cuda.empty_cache()
-
-        if rank == 0 and best_model_state is not None:
-            # Create modality string for final checkpoint
-            modality_str = ""
-            if model_config.use_naip:
-                modality_str += "_naip"
-            if model_config.use_uavsar:
-                modality_str += "_uavsar"
-            if not (model_config.use_naip or model_config.use_uavsar):
-                modality_str = "_baseline"
-                
-            final_checkpoint_dir = os.path.join(checkpoint_dir, "final_best")
-            os.makedirs(final_checkpoint_dir, exist_ok=True)
-            final_checkpoint_path = os.path.join(final_checkpoint_dir, f"{model_name}{modality_str}_final_best.pth")
-            torch.save(best_model_state, final_checkpoint_path)
-            logger.info(f"Final checkpoint saved: {final_checkpoint_path}")
-            best_loss_file = os.path.join(final_checkpoint_dir, f"{model_name}{modality_str}_best_loss.json")
-            with open(best_loss_file, 'w') as f:
-                json.dump({'best_val_loss': best_val_loss}, f)
-            logger.info("Training completed.")
-            
-            # Add final summary to TensorBoard
-            if writer is not None:
-                writer.add_text('Training/summary', 
-                              f"Training completed with best validation loss: {best_val_loss:.6f}",
-                              0)
-            
-            result = best_val_loss
-        else:
-            result = None
-    except Exception as e:
-        print(f"Rank {rank}: Exception during training: {e}")
-        import traceback
-        traceback.print_exc()
-        result = None
-    finally:
-        # Clean up TensorBoard writer
-        if writer is not None:
-            writer.close()
+    if rank == 0:
+        total_params, trainable_params = count_model_parameters(model)
+        model_size = get_model_size_bytes(model)
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Trainable parameters: {trainable_params:,}")
+        logger.info(f"Model size: {format_size(model_size)}")
         
-        # Stop GPU monitoring thread
-        if gpu_monitor_thread is not None:
-            stop_monitoring.set()
-            gpu_monitor_thread.join(timeout=1.0)
+        # Log model info to TensorBoard
+        if writer is not None:
+            writer.add_text('Model/parameters', 
+                          f"Total parameters: {total_params:,}\n" +
+                          f"Trainable parameters: {trainable_params:,}\n" +
+                          f"Model size: {format_size(model_size)}", 0)
             
-        cleanup()
+            # Add model structure text
+            model_structure = str(model.module if isinstance(model, DDP) else model)
+            writer.add_text('Model/structure', f'```\n{model_structure}\n```', 0)
+
+    # Calculate total steps for OneCycleLR
+    total_steps = (len(train_loader) // accumulation_steps) * num_epochs
+    
+    # Initialize optimizer with appropriate initial learning rate
+    initial_lr = max_lr if lr_scheduler_type == "plateau" else max_lr / div_factor
+    optimizer = optim.Adam(model.parameters(), lr=initial_lr)
+    
+    # Initialize appropriate scheduler based on type
+    if lr_scheduler_type == "onecycle":
+        scheduler = OneCycleLR(
+            optimizer, 
+            max_lr=max_lr,
+            total_steps=total_steps,
+            pct_start=pct_start,
+            div_factor=div_factor,
+            final_div_factor=final_div_factor
+        )
+        scheduler_batch_update = True  # Flag to indicate batch-level updates
+    else:  # "plateau" - default behavior
+        scheduler = ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.3, patience=5, verbose=(rank==0)
+        )
+        scheduler_batch_update = False  # Flag to indicate epoch-level updates
+
+    scaler = GradScaler()
+
+    # Log LR scheduler info
+    if rank == 0 and logger is not None:
+        logger.info(f"Using {lr_scheduler_type} learning rate scheduler")
+        if lr_scheduler_type == "onecycle":
+            logger.info(f"OneCycleLR parameters: max_lr={max_lr}, " 
+                      f"pct_start=Ftrain{pct_start}, div_factor={div_factor}, "
+                      f"final_div_factor={final_div_factor}")
+
+    best_val_loss = float('inf')
+    epochs_without_improvement = 0
+    best_model_state = None
+
+    for epoch in range(num_epochs):
+        epoch_start_time = time.time()
+        if world_size > 1 and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
+        avg_train_loss = train_one_epoch_ddp(
+            model, train_loader, optimizer, device, scaler, writer, epoch,
+            process_batch_fn=process_multimodal_batch,
+            accumulation_steps=accumulation_steps,
+            enable_debug=enable_debug,
+            scheduler=scheduler if scheduler_batch_update else None  # Pass scheduler if batch update
+        )
+        
+        # Validate
+        avg_val_loss = validate_one_epoch_ddp(
+            model, val_loader, device, writer, epoch,
+            process_batch_fn=process_multimodal_batch,
+            enable_debug=enable_debug,
+            visualize_samples=visualize_samples
+        )
+        
+        # Update scheduler at epoch level only for ReduceLROnPlateau
+        if not scheduler_batch_update:
+            scheduler.step(avg_val_loss)
+        
+        epoch_time = time.time() - epoch_start_time
+
+        # Log epoch metrics to TensorBoard
+        if rank == 0 and writer is not None:
+            writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
+            writer.add_scalar('Loss/val_epoch', avg_val_loss, epoch)
+            
+            # Additional metrics if debugging is enabled
+            if enable_debug:
+                writer.add_scalar('Metrics/epoch_time_minutes', epoch_time/60, epoch)
+                writer.add_scalar('Metrics/learning_rate', optimizer.param_groups[0]['lr'], epoch)
+                
+                # Track GPU memory at epoch boundaries
+                allocated = torch.cuda.memory_allocated(device=device) / (1024**2)  # MB
+                reserved = torch.cuda.memory_reserved(device=device) / (1024**2)    # MB
+                writer.add_scalar('Memory/allocated_MB', allocated, epoch)
+                writer.add_scalar('Memory/reserved_MB', reserved, epoch)
+
+        if rank == 0:
+            log_message = (f"Epoch {epoch+1}/{num_epochs} | "
+                           f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | "
+                           f"LR: {optimizer.param_groups[0]['lr']:.4e} | "
+                           f"Time: {epoch_time/60:.2f}min")
+            print(log_message)
+            logger.info(log_message)
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                epochs_without_improvement = 0
+                best_model_state = model.module.state_dict() if world_size > 1 else model.state_dict()
+                logger.info(f"New best validation loss: {best_val_loss:.6f}")
+                
+                # Log the best model so far
+                if writer is not None:
+                    writer.add_scalar('Metrics/best_val_loss', best_val_loss, epoch)
+            else:
+                epochs_without_improvement += 1
+                logger.info(f"No improvement in validation loss for {epochs_without_improvement} epoch(s).")
+
+            if epochs_without_improvement >= early_stopping_patience:
+                logger.info("Early stopping triggered.")
+                if writer is not None:
+                    writer.add_text('Training/early_stopping', 
+                                  f"Training stopped at epoch {epoch+1} due to no improvement for {early_stopping_patience} epochs",
+                                  epoch)
+                break
+
+            if (epoch + 1) % 10 == 0:
+                # Use model_name directly without adding modality string again
+                checkpoint_name = f"{model_name}_k{model_config.k}_f{model_config.feature_dim}_b{batch_size}_e{epoch+1}.pth"
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                checkpoint_path = os.path.join(checkpoint_dir, checkpoint_name)
+                torch.save(best_model_state, checkpoint_path)
+                logger.info(f"Checkpoint saved: {checkpoint_path}")
+                        
+        # Clear unused GPU memory before the next epoch
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    if rank == 0 and best_model_state is not None:
+       
+        final_checkpoint_dir = os.path.join(checkpoint_dir, "final_best")
+        os.makedirs(final_checkpoint_dir, exist_ok=True)
+        
+        # Use model_name directly without adding modality info again
+        final_checkpoint_path = os.path.join(final_checkpoint_dir, f"{model_name}_final_best.pth")
+        torch.save(best_model_state, final_checkpoint_path)
+        logger.info(f"Final checkpoint saved: {final_checkpoint_path}")
+        
+        # Use model_name directly for the best loss file too
+        best_loss_file = os.path.join(final_checkpoint_dir, f"{model_name}_best_loss.json")
+        with open(best_loss_file, 'w') as f:
+            json.dump({'best_val_loss': best_val_loss}, f)
+        logger.info("Training completed.")
+        
+        # Add final summary to TensorBoard
+        if writer is not None:
+            writer.add_text('Training/summary', 
+                          f"Training completed with best validation loss: {best_val_loss:.6f}",
+                          0)
+        
+        result = best_val_loss
+    else:
+        result = None
+
+
+    # Clean up TensorBoard writer
+    if writer is not None:
+        writer.close()
+    
+    # Stop GPU monitoring thread
+    if gpu_monitor_thread is not None:
+        stop_monitoring.set()
+        gpu_monitor_thread.join(timeout=1.0)
+        
+    cleanup()
     return result
 
 
-
-
-# Update the main training function to include the debugging options
 def train_multimodal_model(train_dataset,
                          val_dataset,
                          model_name,
@@ -901,9 +742,8 @@ def train_multimodal_model(train_dataset,
                          early_stopping_patience=20,
                          temp_dir_root="data/output/tmp_shards",
                          tensorboard_log_dir="data/output/tensorboard_logs",
-                         debug_level=2,
-                         debug_interval=30,
-                         accumulation_steps = 3,
+                         enable_debug=False,
+                         accumulation_steps=3,
                          visualize_samples=False,
                          lr_scheduler_type="plateau",    # New parameter
                          max_lr=5e-4,                    # New parameter
@@ -911,8 +751,7 @@ def train_multimodal_model(train_dataset,
                          div_factor=25.0,                # New parameter
                          final_div_factor=1e4):          # New parameter
     """
-    Unified training entry point for the multimodal model with enhanced debugging
-    and learning rate scheduler options.
+    Unified training entry point for the multimodal model.
     
     Parameters:
       - train_dataset, val_dataset: Precomputed dataset objects.
@@ -925,8 +764,7 @@ def train_multimodal_model(train_dataset,
       - early_stopping_patience: Number of epochs without improvement before early stopping.
       - temp_dir_root: Base directory to use for temporary shards.
       - tensorboard_log_dir: Directory to store TensorBoard logs
-      - debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
-      - debug_interval: How often to log debugging information (in batches)
+      - enable_debug: Whether to enable debugging features
       - visualize_samples: Whether to visualize sample predictions
       - lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
       - max_lr: Maximum learning rate for OneCycleLR
@@ -947,13 +785,7 @@ def train_multimodal_model(train_dataset,
         print(f"TensorBoard logs will be saved to: {tensorboard_log_dir}")
         print(f"To view TensorBoard, run: tensorboard --logdir={tensorboard_log_dir}")
         
-        print(f"Debug level: {debug_level}")
-        if debug_level == 1:
-            print("Using basic logging: epoch-level metrics only")
-        elif debug_level == 2:
-            print("Using medium logging: epoch-level metrics and parameter tracking")
-        elif debug_level == 3:
-            print(f"Using detailed logging with interval of {debug_interval} batches")
+        print(f"Debug mode: {enable_debug}")
     
     # Log scheduler information
     print(f"Using {lr_scheduler_type} learning rate scheduler")
@@ -1024,8 +856,7 @@ def train_multimodal_model(train_dataset,
                       log_file,
                       early_stopping_patience,
                       tensorboard_log_dir,
-                      debug_level,
-                      debug_interval,
+                      enable_debug,
                       accumulation_steps,
                       visualize_samples,
                       lr_scheduler_type,    # New parameter
@@ -1064,8 +895,7 @@ def train_multimodal_model(train_dataset,
             log_file,
             early_stopping_patience,
             tensorboard_log_dir,
-            debug_level,
-            debug_interval,
+            enable_debug,
             accumulation_steps,
             visualize_samples,
             lr_scheduler_type=lr_scheduler_type,
@@ -1083,7 +913,7 @@ def train_multimodal_model(train_dataset,
 
 
 def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir, 
-                        model_name="pointupsampler", batch_size=8, epochs=40, debug_level=2,
+                        model_name="pointupsampler", batch_size=8, epochs=40, enable_debug=False,
                         lr_scheduler_type="onecycle", max_lr=5e-4, pct_start=0.3, 
                         div_factor=25.0, final_div_factor=1e4):
     """
@@ -1096,7 +926,7 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         checkpoint_dir: Base directory for checkpoints
         batch_size: Batch size per GPU
         epochs: Number of epochs to train
-        debug_level: Level of debugging detail (1=basic, 2=medium, 3=detailed)
+        enable_debug: Whether to enable debugging features
         lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
         max_lr: Maximum learning rate for OneCycleLR
         pct_start: Percentage of total steps for warmup phase in OneCycleLR
@@ -1140,9 +970,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         checkpoint_dir=combined_dir,
         model_config=combined_config,
         num_epochs=epochs,
-        debug_level=debug_level,
-        debug_interval=30,
-        visualize_samples=(debug_level >= 2),
+        enable_debug=enable_debug,
+        visualize_samples=enable_debug,
         lr_scheduler_type=lr_scheduler_type,
         max_lr=max_lr,
         pct_start=pct_start,
@@ -1169,9 +998,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         checkpoint_dir=baseline_dir,
         model_config=baseline_config,
         num_epochs=epochs,
-        debug_level=debug_level,
-        debug_interval=30,
-        visualize_samples=(debug_level >= 2),
+        enable_debug=enable_debug,
+        visualize_samples=enable_debug,
         lr_scheduler_type=lr_scheduler_type,
         max_lr=max_lr,
         pct_start=pct_start,
@@ -1198,9 +1026,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         checkpoint_dir=sar_dir,
         model_config=sar_config,
         num_epochs=epochs,
-        debug_level=debug_level,
-        debug_interval=30,
-        visualize_samples=(debug_level >= 2),
+        enable_debug=enable_debug,
+        visualize_samples=enable_debug,
         lr_scheduler_type=lr_scheduler_type,
         max_lr=max_lr,
         pct_start=pct_start,
@@ -1227,9 +1054,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         checkpoint_dir=optical_dir,
         model_config=optical_config,
         num_epochs=epochs,
-        debug_level=debug_level,
-        debug_interval=30,
-        visualize_samples=(debug_level >= 2),
+        enable_debug=enable_debug,
+        visualize_samples=enable_debug,
         lr_scheduler_type=lr_scheduler_type,
         max_lr=max_lr,
         pct_start=pct_start,
