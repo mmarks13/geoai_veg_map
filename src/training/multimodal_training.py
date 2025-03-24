@@ -600,7 +600,7 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
         logger.info(f"Using {lr_scheduler_type} learning rate scheduler")
         if lr_scheduler_type == "onecycle":
             logger.info(f"OneCycleLR parameters: max_lr={max_lr}, " 
-                      f"pct_start=Ftrain{pct_start}, div_factor={div_factor}, "
+                      f"pct_start={pct_start}, div_factor={div_factor}, "
                       f"final_div_factor={final_div_factor}")
 
     best_val_loss = float('inf')
@@ -608,6 +608,13 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
     best_model_state = None
 
     for epoch in range(num_epochs):
+        # Check if rank 0 is still in the training loop
+        is_running = torch.tensor(1, device=device)
+        dist.broadcast(is_running, src=0)
+        if is_running.item() == 0:
+            print(f"Rank {rank}: Rank 0 has stopped, so stopping too.")
+            break
+            
         epoch_start_time = time.time()
         if world_size > 1 and train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -671,8 +678,10 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
                 epochs_without_improvement += 1
                 logger.info(f"No improvement in validation loss for {epochs_without_improvement} epoch(s).")
 
+            # Check for early stopping and inform other ranks if triggered
             if epochs_without_improvement >= early_stopping_patience:
                 logger.info("Early stopping triggered.")
+                is_running = torch.tensor(0, device=device)  # We'll stop after this epoch
                 if writer is not None:
                     writer.add_text('Training/early_stopping', 
                                   f"Training stopped at epoch {epoch+1} due to no improvement for {early_stopping_patience} epochs",
