@@ -9,13 +9,14 @@ from src.models.model import FeatureExtractor, Feature_Expansion
 # Import the new components we just defined
 from .encoders import NAIPEncoder, UAVSAREncoder
 from .fusion import SpatialFusion
+from .cross_attn_fusion import CrossAttentionFusion
 import math
 
 @dataclass
 class MultimodalModelConfig:
-    # Core model parameters (from original ModelConfig)
+    # Core model parameters
     k: int = 15
-    feature_dim: int = 64
+    feature_dim: int = 96
     up_ratio: int = 2
     pos_mlp_hdn: int = 32
     up_attn_hds: int = 2
@@ -33,13 +34,24 @@ class MultimodalModelConfig:
     img_embed_dim: int = 32
     img_num_patches: int = 16
     
-    # parameters for SpatialFusion
+    # Fusion module selection
+    fusion_type: str = "spatial"  # Either "spatial" or "cross_attention"
+    
+    # Common fusion parameters
     temperature: float = 0.1
-    max_dist_ratio: float = 0.5
+    max_dist_ratio: float = 1.5
+    
+    # CrossAttentionFusion specific parameters
+    fusion_num_heads: int = 4
+    fusion_dropout: float = 0.1
+    position_encoding_dim: int = 32
     
     # parameters for encoder dropouts
     naip_dropout: float = 0.1
     uavsar_dropout: float = 0.1
+
+    temporal_encoder: str = "gru"  # Type of temporal encoder: 'gru' or 'transformer'
+
 
     def __reduce__(self):
         """
@@ -62,10 +74,15 @@ class MultimodalModelConfig:
                 self.use_uavsar,
                 self.img_embed_dim,
                 self.img_num_patches,
+                self.fusion_type,
                 self.temperature,
                 self.max_dist_ratio,
+                self.fusion_num_heads,
+                self.fusion_dropout,
+                self.position_encoding_dim,
                 self.naip_dropout,
-                self.uavsar_dropout
+                self.uavsar_dropout,
+                self.temporal_encoder
             )
         )
 
@@ -84,7 +101,7 @@ import torch.nn.functional as F
 class MultimodalPointUpsampler(nn.Module):
     """
     Enhanced point cloud upsampler that can incorporate NAIP and UAVSAR imagery
-    with improved spatial fusion using PointTransformerConv
+    with configurable spatial fusion methods
     """
     def __init__(self, config: MultimodalModelConfig):
         """
@@ -114,7 +131,8 @@ class MultimodalPointUpsampler(nn.Module):
                 patch_size=10,  # 10x10 pixel patches
                 embed_dim=config.img_embed_dim,
                 num_patches=config.img_num_patches,
-                dropout=config.naip_dropout  # Use new dropout parameter from config
+                dropout=config.naip_dropout,
+                temporal_encoder_type=config.temporal_encoder  
             )
         
         if self.use_uavsar:
@@ -124,19 +142,34 @@ class MultimodalPointUpsampler(nn.Module):
                 patch_size=1,   # 1x1 pixel patches
                 embed_dim=config.img_embed_dim,
                 num_patches=config.img_num_patches,
-                dropout=config.uavsar_dropout  # Use new dropout parameter from config
+                dropout=config.uavsar_dropout,
+                temporal_encoder_type=config.temporal_encoder   
             )
         
-        # ====== 3) Improved Spatial Fusion with PointTransformerConv ======
-        self.fusion = SpatialFusion(
-            point_dim=config.feature_dim,
-            patch_dim=config.img_embed_dim,
-            use_naip=self.use_naip,
-            use_uavsar=self.use_uavsar,
-            num_patches=config.img_num_patches,
-            temperature=config.temperature,      # Use temperature parameter from config
-            max_dist_ratio=config.max_dist_ratio # Use max_dist_ratio parameter from config
-        )
+        # ====== 3) Configurable Fusion Module ======
+        # Select and initialize the appropriate fusion module based on config
+        if config.fusion_type.lower() == "cross_attention":
+            self.fusion = CrossAttentionFusion(
+                point_dim=config.feature_dim,
+                patch_dim=config.img_embed_dim,
+                use_naip=self.use_naip,
+                use_uavsar=self.use_uavsar,
+                num_patches=config.img_num_patches,
+                max_dist_ratio=config.max_dist_ratio,
+                num_heads=config.fusion_num_heads,
+                attention_dropout=config.fusion_dropout,
+                position_encoding_dim=config.position_encoding_dim
+            )
+        else:  # Default to spatial fusion
+            self.fusion = SpatialFusion(
+                point_dim=config.feature_dim,
+                patch_dim=config.img_embed_dim,
+                use_naip=self.use_naip,
+                use_uavsar=self.use_uavsar,
+                num_patches=config.img_num_patches,
+                temperature=config.temperature,
+                max_dist_ratio=config.max_dist_ratio
+            )
         
         # ====== 4) Node Shuffle (from original model) ======
         self.node_shuffle = Feature_Expansion(
@@ -166,7 +199,7 @@ class MultimodalPointUpsampler(nn.Module):
     def forward(self, dep_points, edge_index, dep_attr=None, naip=None, uavsar=None, center=None, scale=None, bbox=None):      
         
         """
-        Forward pass of the multimodal point cloud upsampler with improved spatial fusion
+        Forward pass of the multimodal point cloud upsampler with configurable fusion
         
         Args:
             dep_points: 3DEP point cloud coordinates [N_dep, 3]
@@ -203,23 +236,31 @@ class MultimodalPointUpsampler(nn.Module):
             # Make sure NAIP images are on the correct device
             if naip['images'] is not None:
                 naip['images'] = naip['images'].to(device)
-                
+                # Also move relative_dates to the same device if present
+                if 'relative_dates' in naip and naip['relative_dates'] is not None:
+                    naip['relative_dates'] = naip['relative_dates'].to(device)
+                    
             naip_embeddings = self.naip_encoder(
                 naip['images'],
-                naip.get('img_bbox', None)
+                naip.get('img_bbox', None),
+                naip.get('relative_dates', None)  # Add this parameter
             )  # [num_patches, embed_dim]
         
         if self.use_uavsar and uavsar is not None and 'images' in uavsar:
             # Make sure UAVSAR images are on the correct device
             if uavsar['images'] is not None:
                 uavsar['images'] = uavsar['images'].to(device)
-                
+                # Also move relative_dates to the same device if present
+                if 'relative_dates' in uavsar and uavsar['relative_dates'] is not None:
+                    uavsar['relative_dates'] = uavsar['relative_dates'].to(device)
+                    
             uavsar_embeddings = self.uavsar_encoder(
                 uavsar['images'],
-                uavsar.get('img_bbox', None)
+                uavsar.get('img_bbox', None),
+                uavsar.get('relative_dates', None)  # Add this parameter
             )  # [num_patches, embed_dim]
         
-        # ====== 3) Improved Spatial Fusion with PointTransformerConv ======
+        # ====== 3) Apply Selected Fusion Module ======
         x_fused = self.fusion(
             point_features=x_feat,                                # [N_dep, feat_dim]
             edge_index=edge_index,                               # [2, E]
@@ -235,8 +276,8 @@ class MultimodalPointUpsampler(nn.Module):
         
         # ====== 4) Feature Expansion ======
         x_up = self.node_shuffle(x_fused, edge_index, dep_points)  # [r*N_dep, adjusted_dim]
-        x_up = self.norm_after_nodeshuffle(x_up)
-        x_up = F.relu(x_up)
+        # x_up = self.norm_after_nodeshuffle(x_up)
+        # x_up = F.relu(x_up)
         
         # ====== 5) Decode to 3D Coordinates ======
         pred_points = self.point_decoder(x_up)  # [r*N_dep, 3]

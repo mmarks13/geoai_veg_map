@@ -190,6 +190,108 @@ class TemporalGRUEncoder(nn.Module):
         return aggregated
 
 
+
+class TemporalTransformerEncoder(nn.Module):
+    """
+    Lightweight transformer-based encoder for aggregating temporal information
+    with support for relative date-based positional encoding
+    """
+    def __init__(
+        self, 
+        embed_dim, 
+        num_heads=4, 
+        dropout=0.1, 
+        num_layers=2,
+        ff_multiplier=2,
+        max_temporal_len=20
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        
+        # Temporal positional encoding (fixed fallback)
+        self.temporal_pos_encoding = nn.Parameter(torch.zeros(1, max_temporal_len, embed_dim))
+        nn.init.normal_(self.temporal_pos_encoding, mean=0, std=0.02)
+        
+        # Date-based positional encoding projection
+        self.date_embedding = nn.Sequential(
+            nn.Linear(1, embed_dim // 2),
+            nn.GELU(),
+            nn.Linear(embed_dim // 2, embed_dim)
+        )
+        
+        # Transformer encoder layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=int(embed_dim * ff_multiplier),
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu'
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer,
+            num_layers=num_layers
+        )
+        
+        # Global temporal token for aggregation
+        self.temporal_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        nn.init.normal_(self.temporal_token, mean=0, std=0.02)
+        
+        # Final projection
+        self.projection = nn.Linear(embed_dim, embed_dim)
+    
+    def forward(self, x, relative_dates=None):
+        """
+        Args:
+            x: Patch embeddings across temporal dimension [T, N, D]
+                T: Number of temporal acquisitions
+                N: Number of patches per acquisition
+                D: Embedding dimension
+            relative_dates: Relative days from UAV acquisition date [T, 1]
+        Returns:
+            aggregated: Temporally aggregated patch embeddings [N, D]
+        """
+        T, N, D = x.shape  # [T, N, D]
+        
+        # Reshape to process each patch separately through time
+        x = x.permute(1, 0, 2)  # [N, T, D]
+        
+        # Add positional encodings based on relative dates if available
+        if relative_dates is not None:
+            # Ensure relative_dates has the right shape
+            if relative_dates.dim() == 1:
+                relative_dates = relative_dates.unsqueeze(1)  # [T, 1]
+                
+            # Generate date-based positional encodings
+            date_pos_enc = self.date_embedding(relative_dates)  # [T, D]
+            
+            # Expand to match batch dimension
+            date_pos_enc = date_pos_enc.unsqueeze(0).expand(N, -1, -1)  # [N, T, D]
+            
+            # Apply date-based positional encoding
+            x = x + date_pos_enc  # [N, T, D]
+        else:
+            # Fallback to standard positional encoding
+            pos_enc = self.temporal_pos_encoding[:, :T, :]
+            x = x + pos_enc  # [N, T, D]
+        
+        # Prepend temporal token to each patch's sequence
+        temp_tokens = self.temporal_token.expand(N, -1, -1)  # [N, 1, D]
+        x = torch.cat([temp_tokens, x], dim=1)  # [N, T+1, D]
+        
+        # Apply transformer encoder
+        x = self.transformer_encoder(x)  # [N, T+1, D]
+        
+        # Extract the temporal token which has aggregated information
+        aggregated = x[:, 0, :]  # [N, D]
+        
+        # Project to final dimension
+        aggregated = self.projection(aggregated)  # [N, D]
+        
+        return aggregated
+
+
+
 class NAIPEncoder(nn.Module):
     """
     Encoder for NAIP optical imagery with transformer-based processing
@@ -201,7 +303,13 @@ class NAIPEncoder(nn.Module):
         patch_size=10,          # 10x10 pixel patches
         embed_dim=32,           # Dimension of patch embeddings
         num_patches=16,         # Number of output patch embeddings
-        dropout=0.1             # Dropout rate
+        dropout=0.1,            # Dropout rate
+        temporal_encoder_type='gru',  # Type of temporal encoder: 'gru' or 'transformer'
+        # Additional parameters for transformer encoder
+        transformer_num_heads=4,
+        transformer_num_layers=2,
+        transformer_ff_multiplier=2,
+        max_temporal_len=32
     ):
         super().__init__()
         
@@ -227,7 +335,7 @@ class NAIPEncoder(nn.Module):
         self.patch_embed = PatchEmbedding(
             in_channels=in_channels,
             patch_size=patch_size,
-            embed_dim=embed_dim  # Use full embedding dimension
+            embed_dim=embed_dim
         )
         
         # Positional encoding (applied before transformer)
@@ -244,13 +352,27 @@ class NAIPEncoder(nn.Module):
         )
         
         # Temporal encoder for aggregating across time
-        self.temporal_encoder = TemporalGRUEncoder(embed_dim=embed_dim)
+        if temporal_encoder_type == 'gru':
+            self.temporal_encoder = TemporalGRUEncoder(embed_dim=embed_dim)
+        elif temporal_encoder_type == 'transformer':
+            self.temporal_encoder = TemporalTransformerEncoder(
+                embed_dim=embed_dim,
+                num_heads=transformer_num_heads,
+                dropout=dropout,
+                num_layers=transformer_num_layers,
+                ff_multiplier=transformer_ff_multiplier,
+                max_temporal_len=max_temporal_len
+            )
+        else:
+            raise ValueError(f"Unsupported temporal encoder type: {temporal_encoder_type}. Use 'gru' or 'transformer'.")
     
-    def forward(self, x, img_bbox=None):
+    
+    def forward(self, x, img_bbox=None, relative_dates=None):
         """
         Args:
-            x: NAIP images [T, C, H, W] where T is the number of temporal acquisitions
+            x: NAIP images [T, C, H, W] where T is number of temporal acquisitions
             img_bbox: Bounding box information for spatial alignment
+            relative_dates: Relative days from UAV acquisition date [T, 1]
         Returns:
             patch_embed: Patch embeddings with positional information [num_patches, embed_dim]
         """
@@ -280,13 +402,18 @@ class NAIPEncoder(nn.Module):
         # Stack along temporal dimension
         patch_embeds = torch.stack(patch_embeds)  # [T, n_patches, embed_dim]
         
-        # Aggregate across temporal dimension
-        aggregated = self.temporal_encoder(patch_embeds)  # [n_patches, embed_dim]
+        
+        # Aggregate across temporal dimension, using dates if available
+        if isinstance(self.temporal_encoder, TemporalTransformerEncoder) and relative_dates is not None:
+            aggregated = self.temporal_encoder(patch_embeds, relative_dates)
+        else:
+            aggregated = self.temporal_encoder(patch_embeds)
         
         # Normalize features
-        aggregated = F.normalize(aggregated, p=2, dim=1)  # [n_patches, embed_dim]
+        aggregated = F.normalize(aggregated, p=2, dim=1)
         
         return aggregated
+
 
 
 class UAVSAREncoder(nn.Module):
@@ -300,7 +427,13 @@ class UAVSAREncoder(nn.Module):
         patch_size=1,           # 1x1 pixel patches (treat each pixel as a patch)
         embed_dim=32,           # Dimension of patch embeddings
         num_patches=16,         # Number of output patch embeddings
-        dropout=0.1             # Dropout rate
+        dropout=0.1,            # Dropout rate
+        temporal_encoder_type='gru',  # Type of temporal encoder: 'gru' or 'transformer'
+        # Additional parameters for transformer encoder
+        transformer_num_heads=4,
+        transformer_num_layers=2,
+        transformer_ff_multiplier=2,
+        max_temporal_len=32
     ):
         super().__init__()
         
@@ -343,13 +476,26 @@ class UAVSAREncoder(nn.Module):
         )
         
         # Temporal encoder for aggregating across time
-        self.temporal_encoder = TemporalGRUEncoder(embed_dim=embed_dim)
+        if temporal_encoder_type == 'gru':
+            self.temporal_encoder = TemporalGRUEncoder(embed_dim=embed_dim)
+        elif temporal_encoder_type == 'transformer':
+            self.temporal_encoder = TemporalTransformerEncoder(
+                embed_dim=embed_dim,
+                num_heads=transformer_num_heads,
+                dropout=dropout,
+                num_layers=transformer_num_layers,
+                ff_multiplier=transformer_ff_multiplier,
+                max_temporal_len=max_temporal_len
+            )
+        else:
+            raise ValueError(f"Unsupported temporal encoder type: {temporal_encoder_type}. Use 'gru' or 'transformer'.")
     
-    def forward(self, x, img_bbox=None):
+    def forward(self, x, img_bbox=None, relative_dates=None):
         """
         Args:
             x: UAVSAR images [T, C, H, W] where T is the number of temporal acquisitions
             img_bbox: Bounding box information for spatial alignment
+            relative_dates: Relative days from UAV acquisition date [T, 1]
         Returns:
             patch_embed: Patch embeddings with positional information [num_patches, embed_dim]
         """
@@ -360,7 +506,9 @@ class UAVSAREncoder(nn.Module):
             return torch.zeros(self.num_patches, self.embed_dim, device=device)  # [num_patches, embed_dim]
             
         T, C, H, W = x.shape  # [T, C, H, W]
+
         
+        # Process each temporal acquisition
         patch_embeds = []
         for t in range(T):
             # Apply initial embedding
@@ -373,6 +521,7 @@ class UAVSAREncoder(nn.Module):
             patches = self.norm(patches)  # [1, H*W, embed_dim]
             patches = patches.squeeze(0)  # [H*W, embed_dim] = [n_patches, embed_dim]
             
+            
             # Add positional encoding
             patches = self.pos_encoding(patches)  # [n_patches, embed_dim]
             
@@ -384,10 +533,13 @@ class UAVSAREncoder(nn.Module):
         # Stack along temporal dimension
         patch_embeds = torch.stack(patch_embeds)  # [T, n_patches, embed_dim]
         
-        # Aggregate across temporal dimension
-        aggregated = self.temporal_encoder(patch_embeds)  # [n_patches, embed_dim]
+        # Aggregate across temporal dimension, using dates if available
+        if isinstance(self.temporal_encoder, TemporalTransformerEncoder) and relative_dates is not None:
+            aggregated = self.temporal_encoder(patch_embeds, relative_dates)
+        else:
+            aggregated = self.temporal_encoder(patch_embeds)
         
         # Normalize features
-        aggregated = F.normalize(aggregated, p=2, dim=1)  # [n_patches, embed_dim]
+        aggregated = F.normalize(aggregated, p=2, dim=1)
         
         return aggregated

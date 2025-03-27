@@ -120,18 +120,22 @@ class ShardedMultimodalPointCloudDataset(Dataset):
         # Add imagery data if requested
         naip_data = None
         uavsar_data = None
+
         
         if self.use_naip and 'naip' in sample:
             naip_data = {
                 'images': sample['naip'].get('images', None),
-                'img_bbox': sample['naip'].get('img_bbox', None)
+                'img_bbox': sample['naip'].get('img_bbox', None),
+                'relative_dates': sample['naip'].get('relative_dates', None) 
             }
         
         if self.use_uavsar and 'uavsar' in sample:
             uavsar_data = {
                 'images': sample['uavsar'].get('images', None),
-                'img_bbox': sample['uavsar'].get('img_bbox', None)
+                'img_bbox': sample['uavsar'].get('img_bbox', None),
+                'relative_dates': sample['uavsar'].get('relative_dates', None) 
             }
+
         
         return (dep_points_norm, uav_points_norm, edge_index, dep_points_attr, naip_data, uavsar_data, center, scale, bbox)
 
@@ -549,7 +553,7 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
     # Create the multimodal model and move it to the appropriate GPU
     model = create_multimodal_model(device, model_config)
     if world_size > 1:
-        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     if rank == 0:
         total_params, trainable_params = count_model_parameters(model)
