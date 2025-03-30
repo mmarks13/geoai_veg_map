@@ -221,6 +221,9 @@ class MultimodalPointUpsampler(nn.Module):
         # Get device from points tensor
         device = dep_points.device
         
+        #remove extreme values likely from bird returns 
+        dep_points[:, 2] = torch.clamp(dep_points[:, 2], 0, 150) # >150m is certainly a bird in any natural landscape
+
         # Default to zero attributes if None is provided
         if dep_attr is None:
             dep_attr = torch.zeros(dep_points.size(0), self.config.attr_dim, device=device)

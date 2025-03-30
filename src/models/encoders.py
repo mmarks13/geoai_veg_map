@@ -97,7 +97,7 @@ class TransformerEncoderBlock(nn.Module):
         # Layer normalization for attention
         self.norm1 = nn.LayerNorm(dim)
         # Self-attention layer 
-        self.attn = nn.MultiheadAttention(dim, num_heads=2, dropout=dropout, batch_first=True)
+        self.attn = nn.MultiheadAttention(dim, num_heads=4, dropout=dropout, batch_first=True)
         # Layer normalization for feed-forward
         self.norm2 = nn.LayerNorm(dim)
         # Feed-forward network
@@ -226,7 +226,7 @@ class TemporalTransformerEncoder(nn.Module):
             dim_feedforward=int(embed_dim * ff_multiplier),
             dropout=dropout,
             batch_first=True,
-            activation='gelu'
+            activation='relu'
         )
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer=encoder_layer,

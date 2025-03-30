@@ -433,60 +433,122 @@ def compute_point_attr_statistics(data_list):
     
     return means, stds, invalid_counts
 
+# def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
+#                                      uav_points: torch.Tensor,
+#                                      bbox: tuple,
+#                                      normalization_type: str = 'bbox'):
+#     """
+#     Normalizes 3DEP (dep_points) and UAV point clouds to a common spatial coordinate
+#     system defined by a 2D bounding box.
+    
+#     Inputs:
+#       dep_points: [N_dep, 3] tensor of 3DEP point coordinates.
+#       uav_points: [N_uav, 3] tensor of UAV point coordinates.
+#       bbox: Tuple (xmin, ymin, xmax, ymax) defining the spatial extent.
+#       normalization_type: 'mean_std' or 'bbox'. 'bbox' normalizes x,y using bbox and z using data stats.
+      
+#     Returns:
+#       dep_points_norm: [N_dep, 3] normalized 3DEP points.
+#       uav_points_norm: [N_uav, 3] normalized UAV points.
+#       center: [1, 3] tensor representing the normalization center.
+#       scale: Scalar tensor used for normalization.
+#     """
+#     xmin, ymin, xmax, ymax = bbox
+
+#     # Combine both point clouds to compute normalization parameters.
+#     combined = torch.cat([dep_points, uav_points], dim=0)  # Shape: [N_dep + N_uav, 3]
+
+#     if normalization_type == 'mean_std':
+#         center = combined.mean(dim=0, keepdim=True)  # [1, 3]
+#         combined_centered = combined - center
+#         scale = combined_centered.norm(dim=1).max().clamp_min(1e-9)
+#     elif normalization_type == 'bbox':
+#         # For x and y, use the center of the bounding box; for z, use the mean of z.
+#         center_xy = torch.tensor([(xmin + xmax) / 2, (ymin + ymax) / 2],
+#                                  dtype=combined.dtype, device=combined.device)
+#         center_z = combined[:, 2].mean().unsqueeze(0)
+#         center = torch.cat([center_xy, center_z], dim=0).unsqueeze(0)  # [1, 3]
+#         scale_xy = max(xmax - xmin, ymax - ymin)
+#         scale_z = (combined[:, 2].max() - combined[:, 2].min()).item()
+#         scale_value = max(scale_xy, scale_z)
+
+#         # Create scale tensor properly depending on its type
+#         if isinstance(scale_value, torch.Tensor):
+#             scale = scale_value.clone().detach().clamp_min(1e-9)
+#         else:
+#             # It's a scalar, so we can use torch.tensor() safely
+#             scale = torch.tensor(scale_value, dtype=combined.dtype, device=combined.device).clamp_min(1e-9)
+#     else:
+#         raise ValueError("normalization_type must be either 'mean_std' or 'bbox'.")
+
+#     # Normalize point clouds.
+#     dep_points_norm = (dep_points - center) / scale   # [N_dep, 3]
+#     uav_points_norm = (uav_points - center) / scale   # [N_uav, 3]
+    
+
+#     return dep_points_norm, uav_points_norm, center, scale
+
+
+
 def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
                                      uav_points: torch.Tensor,
-                                     bbox: tuple,
-                                     normalization_type: str = 'bbox'):
+                                     bbox: tuple):
     """
-    Normalizes 3DEP (dep_points) and UAV point clouds to a common spatial coordinate
-    system defined by a 2D bounding box.
+    Normalizes 3DEP and UAV point clouds to a common coordinate system where:
+    - x,y coordinates range from -5 to 5 (1 unit = 1 meter)
+    - z coordinates are in meters, with minimum z value set to 0
     
     Inputs:
       dep_points: [N_dep, 3] tensor of 3DEP point coordinates.
       uav_points: [N_uav, 3] tensor of UAV point coordinates.
       bbox: Tuple (xmin, ymin, xmax, ymax) defining the spatial extent.
-      normalization_type: 'mean_std' or 'bbox'. 'bbox' normalizes x,y using bbox and z using data stats.
       
     Returns:
       dep_points_norm: [N_dep, 3] normalized 3DEP points.
       uav_points_norm: [N_uav, 3] normalized UAV points.
       center: [1, 3] tensor representing the normalization center.
-      scale: Scalar tensor used for normalization.
+      scale: [1, 3] tensor with scale factors for x, y, z.
     """
     xmin, ymin, xmax, ymax = bbox
-
-    # Combine both point clouds to compute normalization parameters.
-    combined = torch.cat([dep_points, uav_points], dim=0)  # Shape: [N_dep + N_uav, 3]
-
-    if normalization_type == 'mean_std':
-        center = combined.mean(dim=0, keepdim=True)  # [1, 3]
-        combined_centered = combined - center
-        scale = combined_centered.norm(dim=1).max().clamp_min(1e-9)
-    elif normalization_type == 'bbox':
-        # For x and y, use the center of the bounding box; for z, use the mean of z.
-        center_xy = torch.tensor([(xmin + xmax) / 2, (ymin + ymax) / 2],
-                                 dtype=combined.dtype, device=combined.device)
-        center_z = combined[:, 2].mean().unsqueeze(0)
-        center = torch.cat([center_xy, center_z], dim=0).unsqueeze(0)  # [1, 3]
-        scale_xy = max(xmax - xmin, ymax - ymin)
-        scale_z = (combined[:, 2].max() - combined[:, 2].min()).item()
-        scale_value = max(scale_xy, scale_z)
-
-        # Create scale tensor properly depending on its type
-        if isinstance(scale_value, torch.Tensor):
-            scale = scale_value.clone().detach().clamp_min(1e-9)
-        else:
-            # It's a scalar, so we can use torch.tensor() safely
-            scale = torch.tensor(scale_value, dtype=combined.dtype, device=combined.device).clamp_min(1e-9)
-    else:
-        raise ValueError("normalization_type must be either 'mean_std' or 'bbox'.")
-
-    # Normalize point clouds.
-    dep_points_norm = (dep_points - center) / scale   # [N_dep, 3]
-    uav_points_norm = (uav_points - center) / scale   # [N_uav, 3]
     
-
+    # Combine both point clouds to find minimum z value
+    combined = torch.cat([dep_points, uav_points], dim=0)  # Shape: [N_dep + N_uav, 3]
+    z_min = combined[:, 2].min()
+    
+    # Calculate x,y centers from the bounding box
+    center_x = (xmin + xmax) / 2
+    center_y = (ymin + ymax) / 2
+    
+    # Create center tensor (for x,y we use bbox center, for z we use min value)
+    center = torch.tensor([[center_x, center_y, z_min]], 
+                         dtype=dep_points.dtype, device=dep_points.device)
+    
+    # Calculate x,y scales to map to [-5, 5] range
+    # For a 10x10m box, scale factor = 10/10 = 1 (dividing by 1 doesn't change values)
+    scale_x = (xmax - xmin) / 10
+    scale_y = (ymax - ymin) / 10
+    
+    # For z, we use scale of 1 to keep values in meters
+    scale_z = 1.0
+    
+    # Create scale tensor
+    scale = torch.tensor([[scale_x, scale_y, scale_z]], 
+                         dtype=dep_points.dtype, device=dep_points.device)
+    
+    # Apply normalization
+    dep_points_norm = torch.zeros_like(dep_points)
+    uav_points_norm = torch.zeros_like(uav_points)
+    
+    # Handle x,y coordinates (center at 0,0, scale to [-5,5] range)
+    dep_points_norm[:, :2] = (dep_points[:, :2] - center[:, :2]) / scale[:, :2]
+    uav_points_norm[:, :2] = (uav_points[:, :2] - center[:, :2]) / scale[:, :2]
+    
+    # Handle z coordinates (shift to make minimum = 0, keep in meters)
+    dep_points_norm[:, 2] = dep_points[:, 2] - center[:, 2]  # Just subtract minimum z
+    uav_points_norm[:, 2] = uav_points[:, 2] - center[:, 2]  # Just subtract minimum z
+    
     return dep_points_norm, uav_points_norm, center, scale
+
 
 ##########################################
 # Precomputation Function
@@ -561,7 +623,7 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
         
         # Normalize point clouds
         dep_points_norm, uav_points_norm, center, scale = normalize_point_clouds_with_bbox(
-            dep_points, uav_points, bbox, normalization_type=normalization_type
+            dep_points, uav_points, bbox
         )
         
         # Normalize point attributes if statistics are provided
@@ -656,7 +718,7 @@ def main():
 
     # Combine all datasets for computing statistics
     all_tiles = training_tiles + validation_tiles + test_tiles
-
+    all_tiles = validation_tiles
     
     # Compute global band statistics for NAIP and UAVSAR imagery
     print("Computing global band statistics...")

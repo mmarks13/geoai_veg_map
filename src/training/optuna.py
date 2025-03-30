@@ -47,11 +47,11 @@ def optuna_objective(trial, train_dataset, val_dataset, model_name, batch_size, 
     from src.training.multimodal_training import train_multimodal_model
     
     # Define hyperparameter search space using Optuna
-    feature_dim = 192 #trial.suggest_int('feature_dim', 64, 256, step=32)
+    feature_dim = 32 #trial.suggest_int('feature_dim', 64, 256, step=32)
     up_attn_hds = 1 #trial.suggest_int('up_attn_hds', 1, 2)
     up_dropout = .005 #trial.suggest_float('up_dropout', 0.0, 0.03)
     fnl_attn_hds = 2 #trial.suggest_int('fnl_attn_hds', 2, 3)
-    img_embed_dim = 64 #trial.suggest_int('img_embed_dim', 64, 96, step=32)
+    img_embed_dim = 16#trial.suggest_int('img_embed_dim', 32, 64, step=32)
     
     # SpatialFusion hyperparameters
     temperature = 0.01 #trial.suggest_float('temperature', 0.01, 0.5, log=True)
@@ -61,14 +61,14 @@ def optuna_objective(trial, train_dataset, val_dataset, model_name, batch_size, 
     
     # Encoder dropout parameters
     naip_dropout = 0.1 #trial.suggest_float('naip_dropout', 0.0, 0.3, step=0.1)
-    uavsar_dropout = 0.1 #trial.suggest_float('uavsar_dropout', 0.0, 0.3, step=0.1)
+    uavsar_dropout = 0.1 #trial.suggest_float('uavsar_dropout', 0.1, 0.3, step=0.1)
 
-    temporal_encoder = 'transformer' # trial.suggest_categorical("temporal_encoder", ['gru', 'transformer']) 
+    temporal_encoder ='transformer'# trial.suggest_categorical("temporal_encoder", ['gru', 'transformer']) 
     fusion = 'cross_attention' #trial.suggest_categorical("fusion", ['spatial', 'cross_attention']) 
-    fusion_dropout = 0.1 #trial.suggest_float('fusion_dropout', 0.0, 0.6, step = 0.2)
+    fusion_dropout = 0.10 #trial.suggest_float('fusion_dropout', 0.05, 0., step = 0.05)
     
-    fusion_num_heads = 4 #trial.suggest_int('fusion_num_heads', 2, 6, step=2)
-    position_encoding_dim = 24 #trial.suggest_int('position_encoding_dim', 12, 36, step=12)
+    fusion_num_heads = 2 #trial.suggest_int('fusion_num_heads', 2, 6, step=2)
+    position_encoding_dim = 12 #trial.suggest_int('position_encoding_dim', 12, 24, step=12)
     
     
     # Print trial information to console

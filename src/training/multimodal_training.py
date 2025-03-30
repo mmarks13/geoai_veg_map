@@ -25,6 +25,8 @@ from torch.utils.tensorboard import SummaryWriter
 os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
 os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_SOCKET_TIMEOUT"] = "1800"  # in seconds
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 
 # Import from the original ddp_training.py
 from src.training.ddp_training import (
@@ -121,6 +123,9 @@ class ShardedMultimodalPointCloudDataset(Dataset):
         naip_data = None
         uavsar_data = None
 
+        #add tile_id for debugging
+        tile_id = sample.get('tile_id', None)
+
         
         if self.use_naip and 'naip' in sample:
             naip_data = {
@@ -137,7 +142,7 @@ class ShardedMultimodalPointCloudDataset(Dataset):
             }
 
         
-        return (dep_points_norm, uav_points_norm, edge_index, dep_points_attr, naip_data, uavsar_data, center, scale, bbox)
+        return (dep_points_norm, uav_points_norm, edge_index, dep_points_attr, naip_data, uavsar_data, center, scale, bbox, tile_id)
 
 
 def multimodal_variable_size_collate(batch):
@@ -145,10 +150,10 @@ def multimodal_variable_size_collate(batch):
     Collate function for multimodal variable-sized point clouds.
     """
     dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list = [], [], [], [], [], []
-    center_list, scale_list, bbox_list = [], [], []
+    center_list, scale_list, bbox_list, tile_id_list = [], [], [], []
     
     for item in batch:
-        dep_pts, uav_pts, e_idx, dep_attr, naip_data, uavsar_data, center, scale, bbox = item
+        dep_pts, uav_pts, e_idx, dep_attr, naip_data, uavsar_data, center, scale, bbox, tile_id = item
         dep_list.append(dep_pts)
         uav_list.append(uav_pts)
         edge_list.append(e_idx)
@@ -158,8 +163,9 @@ def multimodal_variable_size_collate(batch):
         center_list.append(center)
         scale_list.append(scale)
         bbox_list.append(bbox)
+        tile_id_list.append(tile_id)
         
-    return dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list
+    return dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list, tile_id_list
 
 
 def process_multimodal_batch(model, batch, device):
@@ -167,7 +173,7 @@ def process_multimodal_batch(model, batch, device):
     Process a single multimodal batch through the model and compute the average loss per sample.
     Now includes spatial constraint information from center and scale.
     """
-    dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list = batch
+    dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list, tile_id_list = batch
     total_loss = 0.0
     sample_count = 0
     
@@ -201,7 +207,7 @@ def process_multimodal_batch(model, batch, device):
             naip_data, uavsar_data,
             center, scale, bbox
         )
-        
+
         # Create batch tensors for chamfer distance calculation
         pred_points_batch = pred_points.unsqueeze(0)
         uav_points_batch = uav_points.unsqueeze(0)
@@ -219,7 +225,7 @@ def process_multimodal_batch(model, batch, device):
         )
         
         if torch.isnan(chamfer_loss):
-            print(f"WARNING: Loss for a sample is NaN!")
+            print(f"WARNING: Loss for a sample is NaN! {tile_id_list[i]}")
         total_loss += chamfer_loss
         sample_count += 1
     
