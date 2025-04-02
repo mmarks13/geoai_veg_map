@@ -25,7 +25,6 @@ from torch.utils.tensorboard import SummaryWriter
 os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
 os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "1"
 os.environ["NCCL_SOCKET_TIMEOUT"] = "1800"  # in seconds
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 
 # Import from the original ddp_training.py
@@ -90,7 +89,7 @@ class ShardedMultimodalPointCloudDataset(Dataset):
             use_naip: Whether to include NAIP imagery data
             use_uavsar: Whether to include UAVSAR imagery data
         """
-        self.data = torch.load(shard_path)
+        self.data = torch.load(shard_path, weights_only=True)
         self.k = k
         self.use_naip = use_naip
         self.use_uavsar = use_uavsar
@@ -112,7 +111,7 @@ class ShardedMultimodalPointCloudDataset(Dataset):
         dep_points_norm = sample['dep_points_norm'] 
         uav_points_norm = sample['uav_points_norm']
         edge_index = sample['dep_edge_index']
-        dep_points_attr = sample.get('dep_points_attr', None)
+        dep_points_attr = sample['dep_points_attr_norm']
         
         # Extract normalization parameters
         center = sample.get('center', None)
@@ -294,7 +293,7 @@ def create_multimodal_shards(dataset, world_size, temp_dir, prefix,
 
 
 def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=None, epoch=0, 
-                    process_batch_fn=None, accumulation_steps=4, enable_debug=False, 
+                    process_batch_fn=None, accumulation_steps=1, enable_debug=False, 
                     scheduler=None):
     """
     Train the model for one epoch using DDP with TensorBoard logging and gradient accumulation.
@@ -369,7 +368,7 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
             scaler.unscale_(optimizer)
             
             # Clip gradients to prevent explosion
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3)
             
             # Update weights
             scaler.step(optimizer)
@@ -457,7 +456,7 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
                            model_name, batch_size, checkpoint_dir, model_config,
                            port, num_epochs, log_file, early_stopping_patience,
                            tensorboard_log_dir=None, enable_debug=False,
-                           accumulation_steps=3, visualize_samples=False, 
+                           accumulation_steps=1, visualize_samples=False, 
                            lr_scheduler_type="plateau",
                            max_lr=5e-4, pct_start=0.3, div_factor=25.0, final_div_factor=1e4):
     """
@@ -762,7 +761,7 @@ def train_multimodal_model(train_dataset,
                          temp_dir_root="data/output/tmp_shards",
                          tensorboard_log_dir="data/output/tensorboard_logs",
                          enable_debug=False,
-                         accumulation_steps=3,
+                         accumulation_steps=1,
                          visualize_samples=False,
                          lr_scheduler_type="plateau",    # New parameter
                          max_lr=5e-4,                    # New parameter

@@ -214,7 +214,7 @@ def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime, naip
         
         # Set any new invalid values (that might appear after normalization) to 0
         # which is the mean in normalized space
-        images[torch.isnan(images) | torch.isinf(images)] = 0.0
+        images[invalid_mask] = 0.0  # Reuse the mask 
         
         # Convert to float16 for memory efficiency
         images = images.to(torch.float16)
@@ -433,63 +433,9 @@ def compute_point_attr_statistics(data_list):
     
     return means, stds, invalid_counts
 
-# def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
-#                                      uav_points: torch.Tensor,
-#                                      bbox: tuple,
-#                                      normalization_type: str = 'bbox'):
-#     """
-#     Normalizes 3DEP (dep_points) and UAV point clouds to a common spatial coordinate
-#     system defined by a 2D bounding box.
-    
-#     Inputs:
-#       dep_points: [N_dep, 3] tensor of 3DEP point coordinates.
-#       uav_points: [N_uav, 3] tensor of UAV point coordinates.
-#       bbox: Tuple (xmin, ymin, xmax, ymax) defining the spatial extent.
-#       normalization_type: 'mean_std' or 'bbox'. 'bbox' normalizes x,y using bbox and z using data stats.
-      
-#     Returns:
-#       dep_points_norm: [N_dep, 3] normalized 3DEP points.
-#       uav_points_norm: [N_uav, 3] normalized UAV points.
-#       center: [1, 3] tensor representing the normalization center.
-#       scale: Scalar tensor used for normalization.
-#     """
-#     xmin, ymin, xmax, ymax = bbox
-
-#     # Combine both point clouds to compute normalization parameters.
-#     combined = torch.cat([dep_points, uav_points], dim=0)  # Shape: [N_dep + N_uav, 3]
-
-#     if normalization_type == 'mean_std':
-#         center = combined.mean(dim=0, keepdim=True)  # [1, 3]
-#         combined_centered = combined - center
-#         scale = combined_centered.norm(dim=1).max().clamp_min(1e-9)
-#     elif normalization_type == 'bbox':
-#         # For x and y, use the center of the bounding box; for z, use the mean of z.
-#         center_xy = torch.tensor([(xmin + xmax) / 2, (ymin + ymax) / 2],
-#                                  dtype=combined.dtype, device=combined.device)
-#         center_z = combined[:, 2].mean().unsqueeze(0)
-#         center = torch.cat([center_xy, center_z], dim=0).unsqueeze(0)  # [1, 3]
-#         scale_xy = max(xmax - xmin, ymax - ymin)
-#         scale_z = (combined[:, 2].max() - combined[:, 2].min()).item()
-#         scale_value = max(scale_xy, scale_z)
-
-#         # Create scale tensor properly depending on its type
-#         if isinstance(scale_value, torch.Tensor):
-#             scale = scale_value.clone().detach().clamp_min(1e-9)
-#         else:
-#             # It's a scalar, so we can use torch.tensor() safely
-#             scale = torch.tensor(scale_value, dtype=combined.dtype, device=combined.device).clamp_min(1e-9)
-#     else:
-#         raise ValueError("normalization_type must be either 'mean_std' or 'bbox'.")
-
-#     # Normalize point clouds.
-#     dep_points_norm = (dep_points - center) / scale   # [N_dep, 3]
-#     uav_points_norm = (uav_points - center) / scale   # [N_uav, 3]
-    
-
-#     return dep_points_norm, uav_points_norm, center, scale
 
 
-
+# 1. Update normalize_point_clouds_with_bbox function to convert point clouds to float16
 def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
                                      uav_points: torch.Tensor,
                                      bbox: tuple):
@@ -504,17 +450,18 @@ def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
       bbox: Tuple (xmin, ymin, xmax, ymax) defining the spatial extent.
       
     Returns:
-      dep_points_norm: [N_dep, 3] normalized 3DEP points.
-      uav_points_norm: [N_uav, 3] normalized UAV points.
+      dep_points_norm: [N_dep, 3] normalized 3DEP points in float16.
+      uav_points_norm: [N_uav, 3] normalized UAV points in float16.
       center: [1, 3] tensor representing the normalization center.
       scale: [1, 3] tensor with scale factors for x, y, z.
     """
     xmin, ymin, xmax, ymax = bbox
     
     # Combine both point clouds to find minimum z value
-    combined = torch.cat([dep_points, uav_points], dim=0)  # Shape: [N_dep + N_uav, 3]
-    z_min = combined[:, 2].min()
-    
+    z_min_dep = dep_points[:, 2].min()
+    z_min_uav = uav_points[:, 2].min()
+    z_min = min(z_min_dep, z_min_uav)
+
     # Calculate x,y centers from the bounding box
     center_x = (xmin + xmax) / 2
     center_y = (ymin + ymax) / 2
@@ -536,16 +483,22 @@ def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
                          dtype=dep_points.dtype, device=dep_points.device)
     
     # Apply normalization
-    dep_points_norm = torch.zeros_like(dep_points)
-    uav_points_norm = torch.zeros_like(uav_points)
+    dep_points_norm = dep_points.clone()
+    uav_points_norm = uav_points.clone()
     
     # Handle x,y coordinates (center at 0,0, scale to [-5,5] range)
-    dep_points_norm[:, :2] = (dep_points[:, :2] - center[:, :2]) / scale[:, :2]
-    uav_points_norm[:, :2] = (uav_points[:, :2] - center[:, :2]) / scale[:, :2]
+    dep_points_norm[:, :2] -= center[:, :2]
+    dep_points_norm[:, :2] /= scale[:, :2]
+    uav_points_norm[:, :2] -= center[:, :2]
+    uav_points_norm[:, :2] /= scale[:, :2]
     
     # Handle z coordinates (shift to make minimum = 0, keep in meters)
     dep_points_norm[:, 2] = dep_points[:, 2] - center[:, 2]  # Just subtract minimum z
     uav_points_norm[:, 2] = uav_points[:, 2] - center[:, 2]  # Just subtract minimum z
+    
+    # Convert to float16 for memory efficiency
+    dep_points_norm = dep_points_norm.to(torch.float16)
+    uav_points_norm = uav_points_norm.to(torch.float16)
     
     return dep_points_norm, uav_points_norm, center, scale
 
@@ -555,13 +508,15 @@ def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
 ##########################################
 
 def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=None, uavsar_stds=None, 
-                      point_attr_means=None, point_attr_stds=None, normalization_type: str = 'bbox'):
+                      point_attr_means=None, point_attr_stds=None, normalization_type: str = 'bbox',
+                      max_dep_points=10000):
     """
     Precompute all necessary features for each tile in the dataset.
     This function is updated to work with the flattened data structure.
     
     For each sample (tile), this function performs:
       - Downsampling of UAV points using the first available downsample mask.
+      - If max_dep_points is specified, randomly sample 3DEP points to that limit.
       - Normalization of 3DEP (dep_points) and downsampled UAV points to a common coordinate system,
         using the provided 2D bounding box.
       - Normalization of point attributes using global mean and standard deviation.
@@ -578,6 +533,7 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
       point_attr_means: Optional tensor of shape [n_attr] with mean values for point attributes.
       point_attr_stds: Optional tensor of shape [n_attr] with standard deviation values for point attributes.
       normalization_type: 'mean_std' or 'bbox'. 'bbox' normalizes x,y using bbox and z using data stats.
+      max_dep_points: If specified, randomly sample 3DEP points to this maximum number.
       
     Returns:
       precomputed_data_list: List of dictionaries with keys:
@@ -601,8 +557,17 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
         dep_points = sample['dep_points']       # [N_dep, 3] (3DEP points)
         dep_pnt_attr = sample['dep_pnt_attr']   # [N_dep, n_attr] (3DEP point attributes)
         uav_points = sample['uav_points']       # [N_uav, 3] (UAV points)
-        uav_pnt_attr = sample['uav_pnt_attr']   # [N_uav, n_attr] (UAV point attributes)
         bbox = sample['bbox']                   # (xmin, ymin, xmax, ymax)
+        
+        # Limit the number of 3DEP points if max_dep_points is specified
+        if max_dep_points is not None and len(dep_points) > max_dep_points:
+            # Generate random indices for sampling
+            indices = torch.randperm(len(dep_points))[:max_dep_points]
+            # Sample the points
+            dep_points = dep_points[indices]
+            # Sample the point attributes if they exist
+            if dep_pnt_attr is not None:
+                dep_pnt_attr = dep_pnt_attr[indices]
         
         # Downsample UAV points using the provided downsample mask
         if 'uav_downsample_mask' in sample and sample['uav_downsample_mask'] is not None:
@@ -610,17 +575,15 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
             if mask.dtype != torch.bool:
                 mask = mask.bool()
             uav_points = uav_points[mask]  # [N_uav_down, 3]
-            if uav_pnt_attr is not None:
-                uav_pnt_attr = uav_pnt_attr[mask]  # [N_uav_down, n_attr]
+
         # Alternatively, use the first mask from the list if available
         elif 'uav_downsample_masks' in sample and len(sample['uav_downsample_masks']) > 0:
             mask = sample['uav_downsample_masks'][0]
             if mask.dtype != torch.bool:
                 mask = mask.bool()
             uav_points = uav_points[mask]  # [N_uav_down, 3]
-            if uav_pnt_attr is not None:
-                uav_pnt_attr = uav_pnt_attr[mask]  # [N_uav_down, n_attr]
-        
+
+
         # Normalize point clouds
         dep_points_norm, uav_points_norm, center, scale = normalize_point_clouds_with_bbox(
             dep_points, uav_points, bbox
@@ -662,8 +625,18 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
             edge_index_k = knn_graph(dep_points_norm, k=k, loop=False)
             # Make graph undirected.
             edge_index_k = to_undirected(edge_index_k, num_nodes=dep_points_norm.size(0))
+            
             knn_edge_indices[k] = edge_index_k
         
+        #filter z values greater than 95m for UAV points. The drone was flown at ~120m AGL so this should be a safe filter
+        z_filter_mask = uav_points_norm[:, 2] <= 95
+        if z_filter_mask.sum() < len(uav_points_norm):
+            print(f"Filtered {len(uav_points_norm) - z_filter_mask.sum()} UAV points with z > 95m")            
+            if z_filter_mask.sum() < 0.8 * len(uav_points_norm):
+                print(f"Skipping tile due to more than 20% of UAV points being removed")
+                continue
+            uav_points_norm = uav_points_norm[z_filter_mask]    
+
         # --- Imagery Preprocessing ---
         # Get reference date from UAV metadata
         ref_date_str = sample['uav_meta']['datetime']
@@ -718,7 +691,6 @@ def main():
 
     # Combine all datasets for computing statistics
     all_tiles = training_tiles + validation_tiles + test_tiles
-    all_tiles = validation_tiles
     
     # Compute global band statistics for NAIP and UAVSAR imagery
     print("Computing global band statistics...")

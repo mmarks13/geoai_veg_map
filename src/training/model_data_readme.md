@@ -23,9 +23,6 @@ Each tile dictionary contains the following top-level keys:
 | `uav_points_attr` | Tensor or None | [N_uav, 3] | Attributes associated with UAV points. ['Intensity', 'ReturnNumber', 'NumberOfReturns']  |
 | `center` | Tensor | [1, 3] | Normalization center used for point cloud normalization |
 | `scale` | Scalar Tensor | [] | Normalization scale factor |
-| `dep_grid_indices` | Tensor | [N_dep] | Grid indices for 3DEP points (values 0 to grid_size²-1) |
-| `uav_grid_indices` | Tensor | [N_uav] | Grid indices for UAV points (values 0 to grid_size²-1) |
-| `grid_coords` | Tensor | [grid_size, grid_size, 2] | Normalized grid coordinates for positional encoding |
 | `knn_edge_indices` | Dict | - | KNN edge indices for different k values |
 | `naip` | Dict or None | - | Preprocessed NAIP imagery data |
 | `uavsar` | Dict or None | - | Preprocessed UAVSAR imagery data |
@@ -40,7 +37,7 @@ The `knn_edge_indices` dictionary maps k-values to edge indices:
 |-----|-----------|-------|-------------|
 | k (integer) | Tensor | [2, E] | Edge indices for KNN graph with k neighbors |
 
-Where k is one of: 10, 15, 20 and E is the number of edges.
+Where k is 15 E is the number of edges.
 
 ### NAIP Dictionary
 

@@ -266,17 +266,36 @@ def rotate_tile(tile, angle_degrees=None):
     
     # Convert angle to radians
     angle = np.radians(angle_degrees)
+    
+    # Determine the dtype of the point clouds to match
+    if 'dep_points_norm' in tile_copy and isinstance(tile_copy['dep_points_norm'], torch.Tensor):
+        # Use the dtype of the existing point cloud
+        target_dtype = tile_copy['dep_points_norm'].dtype
+    else:
+        # Default to float32 if we can't determine
+        target_dtype = torch.float32
+    
+    # Create rotation matrix with matching dtype
     rotation_matrix = torch.tensor([
         [np.cos(angle), -np.sin(angle), 0],
         [np.sin(angle), np.cos(angle), 0],
         [0, 0, 1]
-    ], dtype=torch.float32)
+    ], dtype=target_dtype)
     
     # Rotate point clouds
-    tile_copy['dep_points_norm'] = torch.matmul(tile_copy['dep_points_norm'], rotation_matrix)
-    tile_copy['uav_points_norm'] = torch.matmul(tile_copy['uav_points_norm'], rotation_matrix)
+    if 'dep_points_norm' in tile_copy and isinstance(tile_copy['dep_points_norm'], torch.Tensor):
+        tile_copy['dep_points_norm'] = torch.matmul(tile_copy['dep_points_norm'], rotation_matrix)
     
-    # Rotate NAIP imagery
+    if 'uav_points_norm' in tile_copy and isinstance(tile_copy['uav_points_norm'], torch.Tensor):
+        # Make sure we're using the same dtype for this point cloud as well
+        if tile_copy['uav_points_norm'].dtype != target_dtype:
+            # Fix for different dtypes between dep_points_norm and uav_points_norm
+            uav_rotation_matrix = rotation_matrix.to(tile_copy['uav_points_norm'].dtype)
+            tile_copy['uav_points_norm'] = torch.matmul(tile_copy['uav_points_norm'], uav_rotation_matrix)
+        else:
+            tile_copy['uav_points_norm'] = torch.matmul(tile_copy['uav_points_norm'], rotation_matrix)
+    
+    # Rotate NAIP imagery (unchanged from original)
     if tile_copy.get('naip') is not None and 'images' in tile_copy['naip']:
         n_images = tile_copy['naip']['images'].shape[0]
         rotated_images = []
@@ -341,34 +360,50 @@ def reflect_tile(tile, axis='x'):
     # Create a deep copy to avoid modifying the original
     tile_copy = copy.deepcopy(tile)
     
-    # Create reflection matrix based on axis
+    # Determine the dtype of the point clouds to match
+    if 'dep_points_norm' in tile_copy and isinstance(tile_copy['dep_points_norm'], torch.Tensor):
+        # Use the dtype of the existing point cloud
+        target_dtype = tile_copy['dep_points_norm'].dtype
+    else:
+        # Default to float32 if we can't determine
+        target_dtype = torch.float32
+    
+    # Create reflection matrix based on axis with matching dtype
     if axis == 'x':
         reflection_matrix = torch.tensor([
             [-1, 0, 0],
             [0, 1, 0],
             [0, 0, 1]
-        ], dtype=torch.float32)
+        ], dtype=target_dtype)
         flip_dims = [2]  # For imagery, flip along width (dim 2)
     elif axis == 'y':
         reflection_matrix = torch.tensor([
             [1, 0, 0],
             [0, -1, 0],
             [0, 0, 1]
-        ], dtype=torch.float32)
+        ], dtype=target_dtype)
         flip_dims = [1]  # For imagery, flip along height (dim 1)
     elif axis == 'both':
         reflection_matrix = torch.tensor([
             [-1, 0, 0],
             [0, -1, 0],
             [0, 0, 1]
-        ], dtype=torch.float32)
+        ], dtype=target_dtype)
         flip_dims = [1, 2]  # For imagery, flip along both dimensions
     else:
         raise ValueError(f"Invalid axis: {axis}")
     
     # Reflect point clouds
-    tile_copy['dep_points_norm'] = torch.matmul(tile_copy['dep_points_norm'], reflection_matrix)
-    tile_copy['uav_points_norm'] = torch.matmul(tile_copy['uav_points_norm'], reflection_matrix)
+    if 'dep_points_norm' in tile_copy and isinstance(tile_copy['dep_points_norm'], torch.Tensor):
+        tile_copy['dep_points_norm'] = torch.matmul(tile_copy['dep_points_norm'], reflection_matrix)
+    
+    if 'uav_points_norm' in tile_copy and isinstance(tile_copy['uav_points_norm'], torch.Tensor):
+        # Handle potential different dtype between point clouds
+        if tile_copy['uav_points_norm'].dtype != target_dtype:
+            uav_reflection_matrix = reflection_matrix.to(tile_copy['uav_points_norm'].dtype)
+            tile_copy['uav_points_norm'] = torch.matmul(tile_copy['uav_points_norm'], uav_reflection_matrix)
+        else:
+            tile_copy['uav_points_norm'] = torch.matmul(tile_copy['uav_points_norm'], reflection_matrix)
     
     # Reflect NAIP imagery
     if tile_copy.get('naip') is not None and 'images' in tile_copy['naip']:
@@ -385,6 +420,24 @@ def reflect_tile(tile, axis='x'):
     # Note: KNN indices will be regenerated at the end of the augmentation pipeline
     
     return tile_copy
+
+
+# Add this utility function to help with other tensor creation operations
+def create_tensor_with_matching_dtype(data, reference_tensor):
+    """
+    Create a tensor with the same dtype as the reference tensor.
+    
+    Parameters:
+        data: The data to convert to a tensor
+        reference_tensor: A tensor whose dtype we want to match
+        
+    Returns:
+        A tensor with the same dtype as reference_tensor
+    """
+    if isinstance(reference_tensor, torch.Tensor):
+        return torch.tensor(data, dtype=reference_tensor.dtype)
+    else:
+        return torch.tensor(data)  # Use default dtype
 
 
 def jitter_points(tile, xy_scale=0.02, z_scale=0.01):
@@ -405,10 +458,13 @@ def jitter_points(tile, xy_scale=0.02, z_scale=0.01):
     # Get point count for DEP points only
     n_dep = tile_copy['dep_points_norm'].shape[0]
     
-    # Generate noise (smaller for z dimension)
+    # Get the dtype of the existing points
+    target_dtype = tile_copy['dep_points_norm'].dtype
+    
+    # Generate noise (smaller for z dimension) with matching dtype
     dep_noise = torch.cat([
-        torch.randn(n_dep, 2) * xy_scale,
-        torch.randn(n_dep, 1) * z_scale
+        torch.randn(n_dep, 2, dtype=target_dtype) * xy_scale,
+        torch.randn(n_dep, 1, dtype=target_dtype) * z_scale
     ], dim=1)
     
     # Apply noise to DEP points only
@@ -534,125 +590,59 @@ def simulate_sensor_effects(tile, effect_strength=0.2, speckle_variance=0.1):
     
     return tile_copy
 
-
 def validate_augmented_tile(original_tile, augmented_tile, max_allowed_value=400.0):
     """
-    Validate that the augmented tile has the expected structure and valid values.
+    Simplified validation that checks only essential properties of the augmented tile.
     
     Parameters:
         original_tile (dict): The original tile dictionary
         augmented_tile (dict): The augmented tile dictionary to validate
-        max_allowed_value (float): Maximum absolute value allowed for specific tensors
+        max_allowed_value (float): Maximum absolute value allowed in tensors
         
     Returns:
         dict: The validated augmented tile or raises ValueError on validation failure
     """
-    # 1. Check that all keys from the original tile exist in the augmented tile
-    for key in original_tile.keys():
-        if key not in augmented_tile:
-            raise ValueError(f"Augmented tile is missing key: {key}")
+    # 1. Check that important keys exist
+    essential_keys = ['dep_points_norm']
+    for key in essential_keys:
+        if key in original_tile and key not in augmented_tile:
+            raise ValueError(f"Augmented tile is missing essential key: {key}")
     
-    # 2. Check for NaN/Inf in all tensors and extreme values in specific tensors that changed
-    for key, value in augmented_tile.items():
-        if isinstance(value, torch.Tensor):
-            # Check for NaN or Inf
-            if torch.isnan(value).any():
-                problematic_indices = torch.where(torch.isnan(value))
-                raise ValueError(f"NaN values found in {key} at indices {problematic_indices}")
-            
-            if torch.isinf(value).any():
-                problematic_indices = torch.where(torch.isinf(value))
-                raise ValueError(f"Inf values found in {key} at indices {problematic_indices}")
-                
-            # Check for extreme values in dep_points_attr_norm, but only where values changed
-            if key == 'dep_points_attr_norm' and value is not None and key in original_tile:
-                # Only check points that exist in both original and augmented
-                min_size = min(value.shape[0], original_tile[key].shape[0])
-                
-                # Compare values that have the same indices in both tensors
-                original_attrs = original_tile[key][:min_size]
-                current_attrs = value[:min_size]
-                
-                # Find where values have changed
-                changed_mask = original_attrs != current_attrs
-                
-                if changed_mask.any():
-                    # Extract changed values
-                    changed_values = current_attrs[changed_mask]
-                    
-                    # Check extreme values only in changed values
-                    if torch.abs(changed_values).max() > max_allowed_value:
-                        extreme_val = torch.abs(changed_values).max().item()
-                        # Find combined mask of extreme & changed values
-                        combined_mask = (torch.abs(current_attrs) > max_allowed_value) & changed_mask
-                        extreme_indices = torch.where(combined_mask)
-                        raise ValueError(f"Extreme value ({extreme_val}) found in changed values of {key} at indices {extreme_indices}")
+    # 2. Check for minimum number of points
+    if 'dep_points_norm' in augmented_tile:
+        point_count = augmented_tile['dep_points_norm'].shape[0]
+        if point_count < 500:
+            raise ValueError(f"Too few DEP points after augmentation: {point_count}")
         
-        # Handle nested dictionaries with special attention to imagery
-        elif isinstance(value, dict):
-            for sub_key, sub_value in value.items():
-                if isinstance(sub_value, torch.Tensor):
-                    # Check for NaN or Inf
-                    if torch.isnan(sub_value).any():
-                        problematic_indices = torch.where(torch.isnan(sub_value))
-                        raise ValueError(f"NaN values found in {key}[{sub_key}] at indices {problematic_indices}")
-                    
-                    if torch.isinf(sub_value).any():
-                        problematic_indices = torch.where(torch.isinf(sub_value))
-                        raise ValueError(f"Inf values found in {key}[{sub_key}] at indices {problematic_indices}")
-                    
-                    # Check for extreme values in imagery, but only where values changed
-                    if (key == 'naip' or key == 'uavsar') and sub_key == 'images' and \
-                       key in original_tile and sub_key in original_tile[key]:
-                        original_images = original_tile[key][sub_key]
-                        
-                        # Check if shapes match for comparison
-                        if original_images.shape == sub_value.shape:
-                            # Find where values have changed
-                            changed_mask = original_images != sub_value
-                            
-                            if changed_mask.any():
-                                # Extract changed values
-                                changed_values = sub_value[changed_mask]
-                                
-                                # Check extreme values only in changed values
-                                if torch.abs(changed_values).max() > max_allowed_value:
-                                    extreme_val = torch.abs(changed_values).max().item()
-                                    # Find combined mask of extreme & changed values
-                                    combined_mask = (torch.abs(sub_value) > max_allowed_value) & changed_mask
-                                    extreme_indices = torch.where(combined_mask)
-                                    raise ValueError(f"Extreme value ({extreme_val}) found in changed values of {key}[{sub_key}] at indices {extreme_indices}")
+        # 3. Quick check for NaN/Inf in point clouds
+        points = augmented_tile['dep_points_norm']
+        if torch.isnan(points).any():
+            raise ValueError("NaN values found in dep_points_norm")
+        if torch.isinf(points).any():
+            raise ValueError("Inf values found in dep_points_norm")
+        
+        # 4. Check for extreme values in point clouds
+        if torch.abs(points).max() > max_allowed_value:
+            raise ValueError(f"Extreme values found in dep_points_norm: {torch.abs(points).max().item()}")
     
-    # 3. Check dimensions of image tensors
-    image_keys = ['naip', 'uavsar']  # These should maintain dimensions
-    
-    for key in image_keys:
-        if key in original_tile and key in augmented_tile:
-            if isinstance(original_tile[key], dict) and isinstance(augmented_tile[key], dict):
-                # Check dimensions of nested tensors
-                for sub_key, sub_value in original_tile[key].items():
-                    if (sub_key in augmented_tile[key] and 
-                        isinstance(sub_value, torch.Tensor) and 
-                        isinstance(augmented_tile[key][sub_key], torch.Tensor)):
-                        if sub_value.shape != augmented_tile[key][sub_key].shape:
-                            raise ValueError(f"Dimension mismatch in {key}[{sub_key}]: " +
-                                           f"original {sub_value.shape}, augmented {augmented_tile[key][sub_key].shape}")
-    
-    # 4. Additional checks for point clouds
-    # Check for minimum point count
-    if 'dep_points_norm' in augmented_tile and augmented_tile['dep_points_norm'].shape[0] < 20:
-        raise ValueError(f"Too few DEP points after augmentation: {augmented_tile['dep_points_norm'].shape[0]}")
-    
-    # Check that point dimensions are correct (should be 3D)
-    if 'dep_points_norm' in augmented_tile and augmented_tile['dep_points_norm'].shape[1] != 3:
-        raise ValueError(f"Invalid point dimension: expected 3, got {augmented_tile['dep_points_norm'].shape[1]}")
-    
-    # If point attributes exist, check matching dimensions
+    # 5. Check that point attributes match point count if they exist
     if ('dep_points_norm' in augmented_tile and 
         'dep_points_attr_norm' in augmented_tile and 
         augmented_tile['dep_points_attr_norm'] is not None):
         if augmented_tile['dep_points_norm'].shape[0] != augmented_tile['dep_points_attr_norm'].shape[0]:
             raise ValueError(f"Point count mismatch: {augmented_tile['dep_points_norm'].shape[0]} points but {augmented_tile['dep_points_attr_norm'].shape[0]} attributes")
+    
+    # 6. Quick check for critical image data if it exists
+    for img_type in ['naip', 'uavsar']:
+        if (img_type in augmented_tile and 
+            isinstance(augmented_tile[img_type], dict) and 
+            'images' in augmented_tile[img_type]):
+            images = augmented_tile[img_type]['images']
+            # Only check for NaN/Inf - these should never occur in valid images
+            if torch.isnan(images).any():
+                raise ValueError(f"NaN values found in {img_type} images")
+            if torch.isinf(images).any():
+                raise ValueError(f"Inf values found in {img_type} images")
     
     return augmented_tile
 
@@ -751,12 +741,157 @@ def remove_horizontal_slice(tile, min_slice_height=0.05, max_slice_height=0.2, m
     return tile_copy
 
 
-def randomly_augment_tile(
-    tile, 
-    config=None
-):
+def get_tensor_dtypes(obj, path=""):
+    """
+    Recursively extract the dtypes of all tensors in a nested dictionary/list structure.
+    
+    Parameters:
+        obj: The object to extract dtypes from (dict, list, tensor, or other)
+        path: Current path in the nested structure (for tracking)
+        
+    Returns:
+        dict: Dictionary mapping paths to dtypes
+    """
+    dtypes = {}
+    
+    if isinstance(obj, torch.Tensor):
+        dtypes[path] = obj.dtype
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            new_path = f"{path}.{key}" if path else key
+            dtypes.update(get_tensor_dtypes(value, new_path))
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            new_path = f"{path}[{i}]"
+            dtypes.update(get_tensor_dtypes(item, new_path))
+            
+    return dtypes
+
+def get_tensor_by_path(obj, path):
+    """
+    Get a tensor from a nested structure using the path.
+    
+    Parameters:
+        obj: The object to navigate (dict, list, etc.)
+        path: The path to the tensor
+        
+    Returns:
+        The tensor at the specified path
+    """
+    if not path:
+        return obj
+    
+    if "." in path:
+        key, rest = path.split(".", 1)
+        return get_tensor_by_path(obj[key], rest)
+    elif "[" in path:
+        key, index = path.split("[", 1)
+        index = int(index.rstrip("]"))
+        return get_tensor_by_path(obj[key][index], "")
+    else:
+        return obj[path]
+
+def set_tensor_by_path(obj, path, tensor):
+    """
+    Set a tensor in a nested structure using the path.
+    
+    Parameters:
+        obj: The object to navigate and modify (dict, list, etc.)
+        path: The path to the tensor
+        tensor: The tensor to set
+    """
+    if "." in path:
+        key, rest = path.split(".", 1)
+        set_tensor_by_path(obj[key], rest, tensor)
+    elif "[" in path:
+        key, index = path.split("[", 1)
+        index = int(index.rstrip("]"))
+        obj[key][index] = tensor
+    else:
+        obj[path] = tensor
+
+def ensure_dtypes_match(obj, original_dtypes):
+    """
+    Ensure all tensors in obj have the same dtype as in original_dtypes.
+    
+    Parameters:
+        obj: The object to check and modify (dict, list, tensor, etc.)
+        original_dtypes: Dict mapping paths to original dtypes
+        
+    Returns:
+        int: Number of tensors that needed correction
+    """
+    corrections = 0
+    
+    for path, dtype in original_dtypes.items():
+        try:
+            tensor = get_tensor_by_path(obj, path)
+            if isinstance(tensor, torch.Tensor) and tensor.dtype != dtype:
+                # Convert the tensor to the original dtype
+                fixed_tensor = tensor.to(dtype)
+                set_tensor_by_path(obj, path, fixed_tensor)
+                corrections += 1
+        except (KeyError, IndexError):
+            # This can happen if the structure changed during augmentation
+            # (e.g., some points were removed)
+            continue
+            
+    return corrections
+
+
+def get_dynamic_probabilities(tile, base_config):
+    """
+    Adjusts point modification probabilities based on the number of points in the point cloud.
+    
+    Parameters:
+        tile (dict): The tile dictionary containing point clouds
+        base_config (dict): Base configuration with default probabilities
+        
+    Returns:
+        dict: Modified configuration with adjusted probabilities
+    """
+    # Create a copy of the base configuration
+    config = copy.deepcopy(base_config)
+    
+    # Get the number of points in the point cloud
+    if 'dep_points_norm' in tile and isinstance(tile['dep_points_norm'], torch.Tensor):
+        num_points = tile['dep_points_norm'].shape[0]
+        
+        # Define thresholds for point counts
+        low_threshold = 2500   # Below this is considered "few points"
+        high_threshold = 6000  # Above this is considered "many points"
+        
+        # Calculate scaling factor between 0.1 (few points) and 1.0 (many points)
+        scale = max(0.1, min(1.0, (num_points - low_threshold) / (high_threshold - low_threshold)))
+        
+        # Adjust probabilities for point-removing operations
+        config['remove_points_probability'] *= scale
+        config['mask_points_probability'] *= scale
+        config['remove_horizontal_slice_probability'] *= scale
+            
+        # Also adjust the removal ratios for operations that remove points
+        if 'remove_points_ratio' in config:
+            config['remove_points_ratio'] *= scale
+        
+        if num_points < low_threshold:
+            # For very small point clouds, adjust mask parameters
+            if 'mask_min_removal_ratio' in config:
+                config['mask_min_removal_ratio'] *= scale
+            if 'mask_max_removal_ratio' in config:
+                config['mask_max_removal_ratio'] *= scale
+            if 'horizontal_slice_min_removal_ratio' in config:
+                config['horizontal_slice_min_removal_ratio'] *= scale
+            if 'horizontal_slice_max_removal_ratio' in config:
+                config['horizontal_slice_max_removal_ratio'] *= scale
+    
+    return config
+
+
+
+def randomly_augment_tile(tile, config=None):
     """
     Apply multiple augmentation techniques randomly based on provided probabilities.
+    More efficient version with reduced copying and checking.
     
     Parameters:
         tile (dict): The tile dictionary to augment
@@ -769,23 +904,23 @@ def randomly_augment_tile(
     if config is None:
         config = {
             # Basic transformations
-            'rotate_probability': 0.3,
-            'reflect_probability': 0.3,
-            'jitter_probability': 0.5,
+            'rotate_probability': 1,
+            'reflect_probability': 0.5,
+            'jitter_probability': 0.3,
             
             # Point cloud modifications
-            'add_points_probability': 0,
-            'remove_points_probability': 0.4,
-            'mask_points_probability': 0,
-            'remove_horizontal_slice_probability': 0.3,
+            'add_points_probability': 0.2,
+            'remove_points_probability': 0.5,
+            'mask_points_probability': 0.5,
+            'remove_horizontal_slice_probability': 0.5,
             
             # Imagery and attributes
             'temporal_shift_probability': 0.4,
             'attribute_augment_probability': 0.4,
-            'spectral_band_probability': 0.5,
-            'sensor_effects_probability': 0.4,
+            'spectral_band_probability': 0.3,
+            'sensor_effects_probability': 0.3,
             
-            # Parameters
+            # Parameters (unchanged from original)
             'max_shift_days': 30,
             'jitter_xy_scale': 0.02,
             'jitter_z_scale': 0.01,
@@ -798,8 +933,8 @@ def randomly_augment_tile(
             'mask_min_radius': 0.05,
             'mask_max_radius': 0.2,
             'mask_count': 1,
-            'mask_min_removal_ratio': 0.7,  # Added parameter
-            'mask_max_removal_ratio': 1.0,  # Added parameter
+            'mask_min_removal_ratio': 0.7,
+            'mask_max_removal_ratio': 1.0,
             'sensor_effect_strength': 0.2,
             'uavsar_noise_variance': 0.1,
             'horizontal_slice_min_height': 0.05,
@@ -810,14 +945,31 @@ def randomly_augment_tile(
         }
     
     # Make a deep copy of the tile to avoid modifying original
+    # This is the only deep copy we'll make
     augmented_tile = copy.deepcopy(tile)
     
-    # Store original state for validation
-    original_tile = copy.deepcopy(tile)
+    # Store original dtypes for key tensors only
+    original_dtypes = {}
+    if 'dep_points_norm' in augmented_tile and isinstance(augmented_tile['dep_points_norm'], torch.Tensor):
+        original_dtypes['dep_points_norm'] = augmented_tile['dep_points_norm'].dtype
+    if 'dep_points_attr_norm' in augmented_tile and isinstance(augmented_tile['dep_points_attr_norm'], torch.Tensor):
+        original_dtypes['dep_points_attr_norm'] = augmented_tile['dep_points_attr_norm'].dtype
     
-    # Apply augmentations with try/except blocks to catch issues
+    # Adjust point modification probabilities based on point count
+    if 'dep_points_norm' in augmented_tile and isinstance(augmented_tile['dep_points_norm'], torch.Tensor):
+        num_points = augmented_tile['dep_points_norm'].shape[0]
+        small_point_cloud = 6000
+        if num_points < small_point_cloud:
+            # Reduce probabilities for small point clouds
+            scale = max(0.1, num_points / small_point_cloud)
+            config = config.copy()  # Shallow copy is sufficient
+            config['remove_points_probability'] *= scale
+            config['mask_points_probability'] *= scale
+            config['remove_horizontal_slice_probability'] *= scale
+    
     try:
-        # Randomly apply augmentation techniques based on probabilities
+        # Apply augmentation techniques directly to augmented_tile
+        # Each function gets augmented_tile and returns the modified augmented_tile
         
         # 1. Rotate points and imagery
         if random.random() < config['rotate_probability']:
@@ -858,8 +1010,8 @@ def randomly_augment_tile(
                 min_radius=config['mask_min_radius'],
                 max_radius=config['mask_max_radius'],
                 n_masks=config['mask_count'],
-                min_removal_ratio=config['mask_min_removal_ratio'],  # Added parameter
-                max_removal_ratio=config['mask_max_removal_ratio']   # Added parameter
+                min_removal_ratio=config['mask_min_removal_ratio'],
+                max_removal_ratio=config['mask_max_removal_ratio']
             )
             
         # 7. Remove horizontal slice
@@ -905,19 +1057,57 @@ def randomly_augment_tile(
         
         # Regenerate KNN edge indices only once, after all transformations
         if 'knn_edge_indices' in augmented_tile:
+            # Simply regenerate the indices for each k value
             for k in augmented_tile['knn_edge_indices']:
                 edge_index_k = knn_graph(augmented_tile['dep_points_norm'], k=k, loop=False)
                 edge_index_k = to_undirected(edge_index_k, num_nodes=augmented_tile['dep_points_norm'].size(0))
                 augmented_tile['knn_edge_indices'][k] = edge_index_k
-        
-        # Validate the augmented tile
-        augmented_tile = validate_augmented_tile(original_tile, augmented_tile)
-        
+                
         return augmented_tile
         
     except Exception as e:
         print(f"Error during augmentation: {str(e)}")
-        return copy.deepcopy(original_tile)  # Return a copy of the original tile as fallback
+        return copy.deepcopy(tile)  # Return a copy of the original tile as fallback
+
+
+
+
+
+# Additional function to check and report data type inconsistencies
+def check_dtype_consistency(original_tile, augmented_tile):
+    """
+    Check for any data type inconsistencies between original and augmented tiles.
+    
+    Parameters:
+        original_tile (dict): The original tile dictionary
+        augmented_tile (dict): The augmented tile dictionary
+        
+    Returns:
+        list: List of inconsistencies found
+    """
+    inconsistencies = []
+    
+    def check_tensor_dtype(orig, aug, path=""):
+        if isinstance(orig, torch.Tensor) and isinstance(aug, torch.Tensor):
+            if orig.dtype != aug.dtype:
+                inconsistencies.append({
+                    'path': path,
+                    'original_dtype': str(orig.dtype),
+                    'augmented_dtype': str(aug.dtype)
+                })
+        elif isinstance(orig, dict) and isinstance(aug, dict):
+            # Check common keys
+            for key in set(orig.keys()) & set(aug.keys()):
+                new_path = f"{path}.{key}" if path else key
+                check_tensor_dtype(orig[key], aug[key], new_path)
+        elif isinstance(orig, list) and isinstance(aug, list):
+            # Check elements of lists with matching indices
+            for i in range(min(len(orig), len(aug))):
+                new_path = f"{path}[{i}]"
+                check_tensor_dtype(orig[i], aug[i], new_path)
+    
+    check_tensor_dtype(original_tile, augmented_tile)
+    return inconsistencies
 
 
 
@@ -926,6 +1116,8 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
                 prob_vector=None, total_augmentations=None):
     """
     Create augmented versions of tiles in a dataset with flexible sampling strategy.
+    Will continue sampling until the desired number of augmentations is met,
+    with a cap of 500 resampling attempts for validation failures.
     
     Parameters:
         tiles (list): List of tile dictionaries
@@ -970,7 +1162,11 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
         # Strategy: Sample with replacement until we reach total_augmentations
         print(f"Creating {total_augmentations} augmentations by sampling tiles with replacement")
         
-        for i in range(total_augmentations):
+        successful_augmentations = 0
+        resample_attempts = 0  # Track attempts to resample due to validation failures
+        max_resample_attempts = 500  # Cap on resample attempts
+        
+        while successful_augmentations < total_augmentations and resample_attempts < max_resample_attempts:
             # Sample a tile based on probability vector
             if prob_vector is not None:
                 tile_idx = np.random.choice(len(sampled_tiles), p=prob_vector)
@@ -990,29 +1186,38 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
                     
                     # Update tile_id if present to indicate it's augmented
                     if 'tile_id' in augmented_tile:
-                        augmented_tile['tile_id'] = f"{augmented_tile['tile_id']}_aug_{i+1}"
+                        augmented_tile['tile_id'] = f"{augmented_tile['tile_id']}_aug_{successful_augmentations+1}"
                     
                     augmented_tiles.append(augmented_tile)
                     augmentation_stats["successful"] += 1
+                    successful_augmentations += 1
                     
                     # Print progress periodically
-                    if (i+1) % 100 == 0:
+                    if successful_augmentations % 100 == 0:
                         success_rate = (augmentation_stats["successful"] / augmentation_stats["total_attempted"]) * 100
-                        print(f"Generated {i+1}/{total_augmentations} augmentations, " +
-                              f"success rate: {success_rate:.2f}%")
+                        print(f"Generated {successful_augmentations}/{total_augmentations} augmentations, " +
+                              f"success rate: {success_rate:.2f}%, resampling attempts: {resample_attempts}")
                     
                 except ValueError as e:
-                    print(f"Validation failed for tile {tile_idx}, augmentation {i+1}: {str(e)}")
+                    print(f"Validation failed for tile {tile_idx}, attempt {augmentation_stats['total_attempted']}: {str(e)}")
                     augmentation_stats["failures"] += 1
                     augmentation_failures += 1
+                    resample_attempts += 1
                     
             except Exception as e:
-                print(f"Augmentation error for tile {tile_idx}, augmentation {i+1}: {str(e)}")
+                print(f"Augmentation error for tile {tile_idx}, attempt {augmentation_stats['total_attempted']}: {str(e)}")
                 augmentation_stats["failures"] += 1
                 augmentation_failures += 1
+                resample_attempts += 1
+        
+        # Check if we reached the cap on resampling attempts
+        if resample_attempts >= max_resample_attempts:
+            print(f"WARNING: Reached the maximum number of resampling attempts ({max_resample_attempts}).")
+            print(f"Only generated {successful_augmentations}/{total_augmentations} requested augmentations.")
     
     else:
         # Original strategy: Process each sampled tile n_augmentations times
+        # (keeping the original implementation for this part)
         for i, tile in enumerate(sampled_tiles):
             tile_failures = 0
             
@@ -1080,6 +1285,9 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
     print(f"Dataset augmentation complete:")
     if total_augmentations is not None:
         print(f"  Target augmentations: {total_augmentations}")
+        print(f"  Successfully created: {len(augmented_tiles)}")
+        if len(augmented_tiles) < total_augmentations:
+            print(f"  Missing augmentations: {total_augmentations - len(augmented_tiles)}")
     else:
         print(f"  Original tiles used for augmentation: {len(sampled_tiles)}")
     print(f"  Successfully augmented tiles: {len(augmented_tiles)}")
@@ -1091,20 +1299,19 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
 
 
 
-
 if __name__ == "__main__":
     # Load your dataset
     import torch
-    
+    print("Beginning data augmentation...  ")
     print("Loading training tiles...")
-    training_tiles = torch.load('data/processed/model_data/precomputed_training_tiles.pt')
+    training_tiles = torch.load('data/processed/model_data/precomputed_training_tiles.pt', weights_only=False)
 
 
     ### Calculate sampling probabilities based on standard deviations of point clouds ###
     # Calculate the standard deviation for each point cloud
     std_devs = []
     for tile in training_tiles:
-        points = tile['uav_points_norm']  # Assuming this is a torch tensor of shape (N, 3)
+        points = tile['uav_points_norm']  # (N, 3)
         std_dev = (torch.std(points[:, :2], dim=0).mean() +  torch.std(points[:, 2], dim=0)).item()  # Weight z std dev higher
         std_devs.append(std_dev)
 
@@ -1113,7 +1320,11 @@ if __name__ == "__main__":
     # Apply an alternative to softmax: temperature-scaled softmax
 
     print("calculating sampling probabilities based on uav_points_norm standard deviations...")
-    temperature = 3  # Higher temperature makes the distribution more uniform
+    # Clamp the max std_devs to the 95th percentile
+    percentile_95 = np.percentile(std_devs, 95)
+    std_devs = np.clip(std_devs, None, percentile_95)
+
+    temperature = 4  # Increase the temperature for a more gradual change
     scaled_probs = np.exp(std_devs / temperature) / np.sum(np.exp(std_devs / temperature))
 
     # Print the top 10 and bottom 10 values of scaled_probs
@@ -1132,7 +1343,7 @@ if __name__ == "__main__":
         'add_points_probability': 0.2,
         'remove_points_probability': 0.5,
         'mask_points_probability': 0.5,
-        'remove_horizontal_slice_probability': 0.6,  
+        'remove_horizontal_slice_probability': 0.5,  
         
         # Imagery and attributes
         'temporal_shift_probability': 0.5,
@@ -1149,29 +1360,27 @@ if __name__ == "__main__":
         'band_scale_range': (0.9, 1.1),
         'add_points_ratio': 0.1,
         'add_points_max_distance': 0.01,
-        'remove_points_ratio': 0.05,
+        'remove_points_ratio': 0.1,
         'mask_min_radius': 0.10,
-        'mask_max_radius': 1,
-        'mask_min_removal_ratio': 0.25, 
-        'mask_max_removal_ratio': 1,  
+        'mask_max_radius': 0.75,
+        'mask_min_removal_ratio': 0.2, 
+        'mask_max_removal_ratio': 0.6,  
         'mask_count': 2,
         'sensor_effect_strength': 0.2,
         'uavsar_noise_variance': 0.1,
-        'horizontal_slice_min_height': 0.5,  
+        'horizontal_slice_min_height': 0.3,  
         'horizontal_slice_max_height': 2,   
         'horizontal_slice_max_position': 0.5, #0.5 is middle of point cloud, 1 is top
-        'horizontal_slice_min_removal_ratio': 0.30, 
-        'horizontal_slice_max_removal_ratio': 1  
-    }
+        'horizontal_slice_min_removal_ratio': 0.3, 
+        'horizontal_slice_max_removal_ratio': 0.7     }
 
     
-    # Augment the dataset (create one augmented version per original tile)
     print("Augmenting dataset...")
     desired_total_tiles = 50000
     total_augmentations = desired_total_tiles - len(training_tiles) 
     augmented_tiles = augment_dataset(training_tiles, n_augmentations=1, config=config, prob_vector=scaled_probs, total_augmentations=total_augmentations)
 
-    augmented_training_tiles = training_tiles + augmented_tiles
+    # augmented_training_tiles = training_tiles + augmented_tiles
     # Save the augmented dataset
     print("Saving augmented dataset...")
-    torch.save(augmented_training_tiles, 'data/processed/model_data/augmented_training_tiles_50k.pt')
+    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_25k.pt')
