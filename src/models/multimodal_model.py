@@ -63,6 +63,11 @@ class MultimodalModelConfig:
     uavsar_dropout: float = 0.1
 
     temporal_encoder: str = "gru"  # Type of temporal encoder: 'gru' or 'transformer'
+    
+    # Checkpoint loading parameters
+    checkpoint_path: str = None  # Path to checkpoint file for weight initialization
+    layers_to_load: list = None  # Specific layers to load from checkpoint
+    layers_to_freeze: list = None  # Specific layers to freeze (must be in layers_to_load or loaded from checkpoint)
 
 
     def __reduce__(self):
@@ -94,16 +99,103 @@ class MultimodalModelConfig:
                 self.position_encoding_dim,
                 self.naip_dropout,
                 self.uavsar_dropout,
-                self.temporal_encoder
+                self.temporal_encoder,
+                self.checkpoint_path,
+                self.layers_to_load,
+                self.layers_to_freeze
             )
         )
 
 def create_multimodal_model(device, config: MultimodalModelConfig):
     """
     Create a multimodal point upsampling model based on configuration.
+    Optionally initialize with specific layers from a checkpoint and freeze them.
+    
+    Args:
+        device: The device to load the model onto
+        config: MultimodalModelConfig object with optional checkpoint_path, layers_to_load, and layers_to_freeze
     """
+    # Create the model with default initialization
     model = MultimodalPointUpsampler(config)
+    
+    # Track loaded layers for freezing functionality
+    loaded_layers = set()
+    
+    # Selectively load weights if a checkpoint path is provided
+    if config.checkpoint_path:
+        # Load the checkpoint
+        checkpoint = torch.load(config.checkpoint_path, map_location=device)
+        
+        # Extract the state dictionary if needed
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            pretrained_dict = checkpoint['model_state_dict']
+        else:
+            pretrained_dict = checkpoint
+            
+        # Get the current model state
+        model_dict = model.state_dict()
+        
+        # Filter the pretrained dictionary
+        if config.layers_to_load is not None:
+            # Load only specific layers
+            filtered_dict = {k: v for k, v in pretrained_dict.items() if k in config.layers_to_load and k in model_dict}
+        else:
+            # Load all matching layers (keys that exist in both dictionaries)
+            filtered_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            
+        # Keep track of what was loaded for freezing
+        loaded_layers = set(filtered_dict.keys())
+        
+        # Print detailed info about what's being loaded
+        print(f"\nLoading {len(filtered_dict)} layers from checkpoint: {config.checkpoint_path}")
+        print("Loaded layers:")
+        for idx, layer_name in enumerate(sorted(filtered_dict.keys())):
+            print(f"  {idx+1}. {layer_name}")
+        
+        # Update model state with the filtered weights
+        model_dict.update(filtered_dict)
+        model.load_state_dict(model_dict)
+    
+    # Apply freezing if specified in config
+    if config.layers_to_freeze:
+        # Verify that layers_to_freeze are in loaded_layers
+        invalid_freeze_layers = [layer for layer in config.layers_to_freeze if layer not in loaded_layers]
+        
+        if invalid_freeze_layers:
+            print("\nWARNING: The following layers were specified to freeze but were not loaded from checkpoint:")
+            for layer in invalid_freeze_layers:
+                print(f"  - {layer}")
+            print("These layers will not be frozen.")
+        
+        # Filter to only freeze layers that were actually loaded
+        valid_freeze_layers = [layer for layer in config.layers_to_freeze if layer in loaded_layers]
+        
+        # Handle freezing for the valid layers
+        if valid_freeze_layers:
+            print(f"\nFreezing {len(valid_freeze_layers)} loaded layers:")
+            
+            # Helper function to set requires_grad for specific parameters
+            def set_requires_grad(model, layer_names, requires_grad=False):
+                named_params = dict(model.named_parameters())
+                for name in layer_names:
+                    if name in named_params:
+                        named_params[name].requires_grad = requires_grad
+                        print(f"  - {name} (frozen)")
+            
+            # Freeze specific parameters in the model
+            set_requires_grad(model, valid_freeze_layers, requires_grad=False)
+    
+    # Move model to the specified device
     model.to(device)
+    
+    # Print a summary of trainable vs non-trainable parameters
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\nModel Summary:")
+    print(f"  - Total parameters: {total_params:,}")
+    print(f"  - Trainable parameters: {trainable_params:,} ({trainable_params/total_params:.2%})")
+    print(f"  - Frozen parameters: {total_params - trainable_params:,} ({(total_params - trainable_params)/total_params:.2%})")
+    
     return model
 
 
