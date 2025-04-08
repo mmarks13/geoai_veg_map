@@ -75,6 +75,80 @@ class OneCycleLR(_LRScheduler):
             alpha = 0.5 * (1 + math.cos(math.pi * progress))
             return [self.min_lr + alpha * (self.max_lr - self.min_lr) for _ in self.base_lrs]
 
+class WarmupReduceLROnPlateau(_LRScheduler):
+    """
+    Adds a linear warmup phase to ReduceLROnPlateau scheduler.
+    
+    Args:
+        optimizer: Optimizer to adjust learning rate for
+        max_lr: Maximum learning rate after warmup
+        total_epochs: Total number of epochs for training
+        pct_start: Percentage of total epochs to use for warmup phase
+        div_factor: Initial LR = max_lr / div_factor
+        **kwargs: Additional arguments to pass to ReduceLROnPlateau
+    """
+    def __init__(self, optimizer, max_lr, total_epochs, pct_start=0.3, 
+                 div_factor=25.0, mode='min', factor=0.9, patience=2, 
+                 verbose=False, **kwargs):
+        self.max_lr = max_lr
+        self.total_epochs = total_epochs
+        self.pct_start = pct_start
+        self.div_factor = div_factor
+        self.initial_lr = max_lr / div_factor
+        self.warmup_epochs = int(total_epochs * pct_start)
+        self.current_epoch = 0
+        
+        # Initialize optimizer with initial LR
+        for group in optimizer.param_groups:
+            group['lr'] = self.initial_lr
+            
+        # Set up plateau scheduler to start after warmup
+        self.plateau_scheduler = ReduceLROnPlateau(
+            optimizer, mode=mode, factor=factor, 
+            patience=patience, verbose=verbose, **kwargs
+        )
+        self.in_warmup = True
+        
+        # Initialize as a proper LR scheduler
+        super(WarmupReduceLROnPlateau, self).__init__(optimizer)
+    
+    def get_lr(self):
+        """Return current learning rate for each param group"""
+        return [group['lr'] for group in self.optimizer.param_groups]
+        
+    def step(self, metrics=None, epoch=None):
+        """
+        Update scheduler based on metrics.
+        
+        Args:
+            metrics: Validation metrics used by ReduceLROnPlateau
+            epoch: Current epoch number (optional, uses internal counter if None)
+        """
+        if epoch is not None:
+            self.current_epoch = epoch
+        else:
+            self.current_epoch += 1
+            
+        # During warmup period, linearly increase learning rate
+        if self.current_epoch < self.warmup_epochs:
+            progress = self.current_epoch / self.warmup_epochs
+            new_lr = self.initial_lr + progress * (self.max_lr - self.initial_lr)
+            for group in self.optimizer.param_groups:
+                group['lr'] = new_lr
+            self.in_warmup = True
+        # After warmup, use ReduceLROnPlateau behavior
+        else:
+            if self.in_warmup:
+                # First epoch after warmup, set LR to max_lr
+                for group in self.optimizer.param_groups:
+                    group['lr'] = self.max_lr
+                self.in_warmup = False
+            
+            # Let plateau scheduler handle LR after warmup
+            if metrics is not None:
+                self.plateau_scheduler.step(metrics)
+            else:
+                self.plateau_scheduler.step()
 
 
 class ShardedMultimodalPointCloudDataset(Dataset):
@@ -213,7 +287,7 @@ def process_multimodal_batch(model, batch, device):
         
         pred_length = torch.tensor([pred_points.shape[0]], device=device)
         uav_length = torch.tensor([uav_points.shape[0]], device=device)
-        
+
         # Calculate Chamfer distance loss
         from src.utils.chamfer_distance import chamfer_distance
         chamfer_loss, _ = chamfer_distance(
@@ -222,21 +296,111 @@ def process_multimodal_batch(model, batch, device):
             x_lengths=pred_length,
             y_lengths=uav_length
         )
-        
+
         if torch.isnan(chamfer_loss):
             print(f"WARNING: Loss for a sample is NaN! {tile_id_list[i]}")
+
+        if torch.isinf(chamfer_loss):
+            print(f"WARNING: Loss for a sample is Inf! {tile_id_list[i]}")
+            
         total_loss += chamfer_loss
         sample_count += 1
     
     return total_loss / sample_count if sample_count > 0 else total_loss
 
 
+
+
 def create_multimodal_model(device, config: MultimodalModelConfig):
     """
     Create a multimodal point upsampling model based on configuration.
+    Optionally initialize with specific layers from a checkpoint and freeze them.
+    
+    Args:
+        device: The device to load the model onto
+        config: MultimodalModelConfig object with optional checkpoint_path, layers_to_load, and layers_to_freeze
     """
+    # Create the model with default initialization
     model = MultimodalPointUpsampler(config)
+    
+    # Track loaded layers for freezing functionality
+    loaded_layers = set()
+    
+    # Selectively load weights if a checkpoint path is provided
+    if config.checkpoint_path:
+        # Load the checkpoint
+        checkpoint = torch.load(config.checkpoint_path, map_location=device)
+        
+        # Extract the state dictionary if needed
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            pretrained_dict = checkpoint['model_state_dict']
+        else:
+            pretrained_dict = checkpoint
+            
+        # Get the current model state
+        model_dict = model.state_dict()
+        
+        # Filter the pretrained dictionary
+        if config.layers_to_load is not None:
+            # Load only specific layers
+            filtered_dict = {k: v for k, v in pretrained_dict.items() if k in config.layers_to_load and k in model_dict}
+        else:
+            # Load all matching layers (keys that exist in both dictionaries)
+            filtered_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+            
+        # Keep track of what was loaded for freezing
+        loaded_layers = set(filtered_dict.keys())
+        
+        # Print detailed info about what's being loaded
+        print(f"\nLoading {len(filtered_dict)} layers from checkpoint: {config.checkpoint_path}")
+        print("Loaded layers:")
+        for idx, layer_name in enumerate(sorted(filtered_dict.keys())):
+            print(f"  {idx+1}. {layer_name}")
+        
+        # Update model state with the filtered weights
+        model_dict.update(filtered_dict)
+        model.load_state_dict(model_dict)
+    
+    # Apply freezing if specified in config
+    if config.layers_to_freeze:
+        # Verify that layers_to_freeze are in loaded_layers
+        invalid_freeze_layers = [layer for layer in config.layers_to_freeze if layer not in loaded_layers]
+        
+        if invalid_freeze_layers:
+            print("\nWARNING: The following layers were specified to freeze but were not loaded from checkpoint:")
+            for layer in invalid_freeze_layers:
+                print(f"  - {layer}")
+            print("These layers will not be frozen.")
+        
+        # Filter to only freeze layers that were actually loaded
+        valid_freeze_layers = [layer for layer in config.layers_to_freeze if layer in loaded_layers]
+        
+        # Handle freezing for the valid layers
+        if valid_freeze_layers:
+            print(f"\nFreezing {len(valid_freeze_layers)} loaded layers:")
+            
+            # Helper function to set requires_grad for specific parameters
+            def set_requires_grad(model, layer_names, requires_grad=False):
+                named_params = dict(model.named_parameters())
+                for name in layer_names:
+                    if name in named_params:
+                        named_params[name].requires_grad = requires_grad
+                        print(f"  - {name} (frozen)")
+            
+            # Freeze specific parameters in the model
+            set_requires_grad(model, valid_freeze_layers, requires_grad=False)
+    
+    # Move model to the specified device
     model.to(device)
+    
+    # Print a summary of trainable vs non-trainable parameters
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\nModel Summary:")
+    print(f"  - Total parameters: {total_params:,}")
+    print(f"  - Trainable parameters: {trainable_params:,} ({trainable_params/total_params:.2%})")
+    print(f"  - Frozen parameters: {total_params - trainable_params:,} ({(total_params - trainable_params)/total_params:.2%})")
+    
     return model
 
 
@@ -368,7 +532,7 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
             scaler.unscale_(optimizer)
             
             # Clip gradients to prevent explosion
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=6)
             
             # Update weights
             scaler.step(optimizer)
@@ -596,9 +760,17 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
             final_div_factor=final_div_factor
         )
         scheduler_batch_update = True  # Flag to indicate batch-level updates
-    else:  # "plateau" - default behavior
-        scheduler = ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.3, patience=5, verbose=(rank==0)
+    else:  # "plateau" with warmup
+        scheduler = WarmupReduceLROnPlateau(
+            optimizer, 
+            max_lr=max_lr,
+            total_epochs=num_epochs,
+            pct_start=pct_start,
+            div_factor=div_factor,
+            mode='min', 
+            factor=0.9, 
+            patience=2, 
+            verbose=(rank==0)
         )
         scheduler_batch_update = False  # Flag to indicate epoch-level updates
 

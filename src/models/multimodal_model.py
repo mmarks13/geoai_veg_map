@@ -24,56 +24,66 @@ from .fusion import SpatialFusion
 from .cross_attn_fusion import CrossAttentionFusion
 import math
 
+
 @dataclass
 class MultimodalModelConfig:
     # Core model parameters
     k: int = 15
-    feature_dim: int = 96
+    feature_dim: int = 256
     up_ratio: int = 2
-    pos_mlp_hdn: int = 32
-    up_attn_hds: int = 2
-    up_concat: bool = True
-    up_beta: bool = False
-    up_dropout: float = 0.0
-    fnl_attn_hds: int = 2
+    pos_mlp_hdn: int = 16
+
+    # Point Transformer parameters
+    num_lcl_heads: int = 4  # Local attention heads (for MultiHeadPointTransformerConv)
+    num_glbl_heads: int = 4  # Global attention heads (for PosAwareGlobalFlashAttention)
+    pt_attn_dropout: float = 0.0
+
+
+    # Legacy parameters (kept for backward compatibility)
+    up_attn_hds: int = 4     # Legacy parameter (use num_lcl_heads instead)
+    up_concat: bool = True   # No longer used but kept for backward compatibility
+    up_beta: bool = False    # Legacy parameter
+    fnl_attn_hds: int = 4  # Final attention heads
+
     attr_dim: int = 3
-    
+
     # Modality flags for ablation
     use_naip: bool = False
     use_uavsar: bool = False
-    
+
     # Imagery encoder parameters
-    img_embed_dim: int = 32
+    img_embed_dim: int = 64
     img_num_patches: int = 16
-    
+
     # Fusion module selection
     fusion_type: str = "spatial"  # Either "spatial" or "cross_attention"
-    
+
     # Common fusion parameters
     temperature: float = 0.1
     max_dist_ratio: float = 1.5
-    
+
     # CrossAttentionFusion specific parameters
     fusion_num_heads: int = 4
     fusion_dropout: float = 0.1
     position_encoding_dim: int = 32
-    
-    # parameters for encoder dropouts
+
+    # Parameters for encoder dropouts
     naip_dropout: float = 0.1
     uavsar_dropout: float = 0.1
 
     temporal_encoder: str = "gru"  # Type of temporal encoder: 'gru' or 'transformer'
-    
+
     # Checkpoint loading parameters
     checkpoint_path: str = None  # Path to checkpoint file for weight initialization
     layers_to_load: list = None  # Specific layers to load from checkpoint
-    layers_to_freeze: list = None  # Specific layers to freeze (must be in layers_to_load or loaded from checkpoint)
+    layers_to_freeze: list = None # Specific layers to freeze (must be in layers_to_load or loaded from checkpoint)
 
 
     def __reduce__(self):
         """
         Custom reduce method to make the class picklable for multiprocessing.
         """
+        # Corrected order of arguments to match field definition order
         return (
             self.__class__,
             (
@@ -81,10 +91,12 @@ class MultimodalModelConfig:
                 self.feature_dim,
                 self.up_ratio,
                 self.pos_mlp_hdn,
+                self.num_lcl_heads,
+                self.num_glbl_heads,
+                self.pt_attn_dropout,
                 self.up_attn_hds,
                 self.up_concat,
                 self.up_beta,
-                self.up_dropout,
                 self.fnl_attn_hds,
                 self.attr_dim,
                 self.use_naip,
@@ -102,109 +114,31 @@ class MultimodalModelConfig:
                 self.temporal_encoder,
                 self.checkpoint_path,
                 self.layers_to_load,
-                self.layers_to_freeze
+                self.layers_to_freeze,
             )
         )
 
-def create_multimodal_model(device, config: MultimodalModelConfig):
-    """
-    Create a multimodal point upsampling model based on configuration.
-    Optionally initialize with specific layers from a checkpoint and freeze them.
-    
-    Args:
-        device: The device to load the model onto
-        config: MultimodalModelConfig object with optional checkpoint_path, layers_to_load, and layers_to_freeze
-    """
-    # Create the model with default initialization
-    model = MultimodalPointUpsampler(config)
-    
-    # Track loaded layers for freezing functionality
-    loaded_layers = set()
-    
-    # Selectively load weights if a checkpoint path is provided
-    if config.checkpoint_path:
-        # Load the checkpoint
-        checkpoint = torch.load(config.checkpoint_path, map_location=device)
-        
-        # Extract the state dictionary if needed
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            pretrained_dict = checkpoint['model_state_dict']
-        else:
-            pretrained_dict = checkpoint
-            
-        # Get the current model state
-        model_dict = model.state_dict()
-        
-        # Filter the pretrained dictionary
-        if config.layers_to_load is not None:
-            # Load only specific layers
-            filtered_dict = {k: v for k, v in pretrained_dict.items() if k in config.layers_to_load and k in model_dict}
-        else:
-            # Load all matching layers (keys that exist in both dictionaries)
-            filtered_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-            
-        # Keep track of what was loaded for freezing
-        loaded_layers = set(filtered_dict.keys())
-        
-        # Print detailed info about what's being loaded
-        print(f"\nLoading {len(filtered_dict)} layers from checkpoint: {config.checkpoint_path}")
-        print("Loaded layers:")
-        for idx, layer_name in enumerate(sorted(filtered_dict.keys())):
-            print(f"  {idx+1}. {layer_name}")
-        
-        # Update model state with the filtered weights
-        model_dict.update(filtered_dict)
-        model.load_state_dict(model_dict)
-    
-    # Apply freezing if specified in config
-    if config.layers_to_freeze:
-        # Verify that layers_to_freeze are in loaded_layers
-        invalid_freeze_layers = [layer for layer in config.layers_to_freeze if layer not in loaded_layers]
-        
-        if invalid_freeze_layers:
-            print("\nWARNING: The following layers were specified to freeze but were not loaded from checkpoint:")
-            for layer in invalid_freeze_layers:
-                print(f"  - {layer}")
-            print("These layers will not be frozen.")
-        
-        # Filter to only freeze layers that were actually loaded
-        valid_freeze_layers = [layer for layer in config.layers_to_freeze if layer in loaded_layers]
-        
-        # Handle freezing for the valid layers
-        if valid_freeze_layers:
-            print(f"\nFreezing {len(valid_freeze_layers)} loaded layers:")
-            
-            # Helper function to set requires_grad for specific parameters
-            def set_requires_grad(model, layer_names, requires_grad=False):
-                named_params = dict(model.named_parameters())
-                for name in layer_names:
-                    if name in named_params:
-                        named_params[name].requires_grad = requires_grad
-                        print(f"  - {name} (frozen)")
-            
-            # Freeze specific parameters in the model
-            set_requires_grad(model, valid_freeze_layers, requires_grad=False)
-    
-    # Move model to the specified device
-    model.to(device)
-    
-    # Print a summary of trainable vs non-trainable parameters
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"\nModel Summary:")
-    print(f"  - Total parameters: {total_params:,}")
-    print(f"  - Trainable parameters: {trainable_params:,} ({trainable_params/total_params:.2%})")
-    print(f"  - Frozen parameters: {total_params - trainable_params:,} ({(total_params - trainable_params)/total_params:.2%})")
-    
-    return model
+
 
 
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import PointTransformerConv
 from torch.nn.functional import scaled_dot_product_attention
+from torch import Tensor
+from typing import Optional, Union, Tuple
+from torch_geometric.nn.conv import PointTransformerConv
+
+# PyTorch Geometric imports
+from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.nn.inits import reset
+from torch_geometric.typing import Adj, OptTensor, SparseTensor
+import torch_sparse  # For set_diag function
+from torch_geometric.utils import add_self_loops, remove_self_loops, softmax
+from torch_geometric.nn.pool import knn_graph
+from torch_geometric.utils import to_undirected
 
 
 class PosAwareGlobalFlashAttention(nn.Module):
@@ -218,7 +152,7 @@ class PosAwareGlobalFlashAttention(nn.Module):
     - Applies multi-head self-attention using scaled dot product attention
     - Global attention across all points
     """
-    def __init__(self, dim, pos_encoding_dim=32, num_heads=4, dropout=0.1):
+    def __init__(self, dim, pos_encoding_dim=32, num_heads=4, dropout=0):
         """
         Initialize Position-Aware Global Flash Attention module.
        
@@ -321,183 +255,298 @@ class PosAwareGlobalFlashAttention(nn.Module):
         return output
 
 
+
 class MultiHeadPointTransformer(nn.Module):
     """
     A multi-head implementation using multiple PointTransformerConv layers.
+    
+    This class implements a multi-head attention mechanism for point cloud processing
+    by using multiple parallel PointTransformerConv layers and combining their outputs
+    through concatenation.
     """
-    def __init__(self, in_channels, out_channels, heads=4, concat=True):
+    def __init__(self, in_channels, out_channels, heads=4):
         super().__init__()
         self.heads = heads
-        self.concat = concat
-       
-        # If concat=True, each head contributes out_channels/heads features
-        self.head_out_channels = out_channels // heads if concat else out_channels
-       
+        
+        # Calculate output channels per head
+        # Each head contributes out_channels/heads features
+        self.head_out_channels = out_channels // heads
+        
         # Create multiple PointTransformerConv instances (one per head)
         self.convs = nn.ModuleList([
-            PointTransformerConv(in_channels, self.head_out_channels)
+            PointTransformerConv(in_channels, self.head_out_channels) 
             for _ in range(heads)
         ])
-       
-        # Projection layers when concat=True
-        if concat and heads > 1:
+        
+        # Define projection layer for multiple heads
+        if heads > 1:
             self.projection = nn.Sequential(
                 nn.Linear(heads * self.head_out_channels, out_channels),
                 nn.ReLU(),
                 nn.Linear(out_channels, out_channels)
             )
-        elif not concat and heads > 1:
-            self.projection = nn.Linear(heads * out_channels, out_channels)
         else:
+            # For single head, no projection needed
             self.projection = nn.Identity()
-       
+
+    #NOTE: need to add normalization layer here instead of in main block. 
+    
     def forward(self, x, pos, edge_index):
-        # Apply each head
+        """
+        Forward pass through the multi-head transformer.
+        
+        Args:
+            x: Node features
+            pos: Node positions
+            edge_index: Graph connectivity
+            
+        Returns:
+            Transformed node features
+        """
+        # Apply each transformer head in parallel
         head_outputs = [conv(x, pos, edge_index) for conv in self.convs]
-       
-        if self.concat:
-            # Concatenate the outputs along the feature dimension
-            concat_output = torch.cat(head_outputs, dim=-1)
-            if self.heads > 1:
-                return self.projection(concat_output)
-            else:
-                return concat_output
-        else:
-            # If not concatenating, either average or use projection
-            if self.heads > 1:
-                concat_output = torch.cat(head_outputs, dim=-1)
-                return self.projection(concat_output)
-            else:
-                return head_outputs[0]
+        
+        # Concatenate the outputs along the feature dimension
+        concat_output = torch.cat(head_outputs, dim=-1)
+        
+        # Apply projection to get final output
+        return self.projection(concat_output)
 
 
-class FeatureExtractor(nn.Module):
+
+
+
+#MultiScalePointAttention
+class LocalGlobalPointAttentionBlock(nn.Module):
     """
-    Takes positions, attributes, and a precomputed edge_index and returns features.
-    Uses PointTransformerConv layers to capture local geometric detail and Flash Attention.
+    Enhanced local-global attention block with dual MLP design:
+    1. Local attention → MLP → Upsampling (optional) → Global attention → MLP
+    
+    Supports feature-guided position generation for upsampling.
     """
-    def __init__(self, feature_dim=64, attr_dim=3, pos_encoding_dim=32):
-        super().__init__()
-        # First PointTransformerConv layer with half the output dimension
-        self.pt_conv1 = MultiHeadPointTransformer(in_channels=attr_dim, out_channels=feature_dim//2)
-       
-        # Position-aware flash attention layer
-        self.pos_flash_attention = PosAwareGlobalFlashAttention(
-            dim=feature_dim//2,
-            pos_encoding_dim=pos_encoding_dim,
-            num_heads=4
-        )
-       
-        # Second layer with original feature dimension
-        self.pt_conv2 = MultiHeadPointTransformer(in_channels=feature_dim//2, out_channels=feature_dim)
-
-    def forward(self, pos, attr, edge_index):
+    def __init__(self, 
+                 in_channels, 
+                 out_channels, 
+                 num_lcl_heads=4,
+                 num_glbl_heads=4,
+                 pos_encoding_dim=32, 
+                 dropout=0.0, 
+                 up_ratio=None,
+                 k_neighbors=15,
+                 pos_gen_hidden_dim=64):
         """
+        Initialize the LocalGlobalPointAttentionBlock
+        
         Args:
-            pos: Tensor of shape [N, 3] containing point coordinates.
-            attr: Tensor of shape [N, attr_dim] containing point attributes.
-            edge_index: Tensor of shape [2, E] containing the edge indices.
-        Returns:
-            x_feat: Tensor of shape [N, feature_dim] representing per-point features.
-        """
-        # Use first PointTransformerConv layer
-        x_feat = self.pt_conv1(attr, pos, edge_index)
-       
-        # Apply position-aware flash attention
-        x_feat = self.pos_flash_attention(x_feat, pos)
-       
-        # Use second PointTransformerConv layer
-        x_feat = self.pt_conv2(x_feat, pos, edge_index)
-       
-        return x_feat
-
-
-class Feature_Expansion(nn.Module):
-    def __init__(self, feat_dim=64, up_ratio=2, pos_encoding_dim=32,
-                 up_attn_hds=2, up_concat=True, fnl_attn_hds=2):
-        """  
-        This module:
-          (a) Uses a MultiHeadPointTransformer to expand features.
-          (b) Performs periodic shuffle to upsample features.
-          (c) Refines features using a position-aware flash attention module.
+            in_channels: Input feature dimensions
+            out_channels: Output feature dimensions
+            num_lcl_heads: Number of attention heads for local attention
+            num_glbl_heads: Number of attention heads for global attention
+            pos_encoding_dim: Dimension for positional encoding
+            dropout: Dropout probability
+            up_ratio: If provided, performs point upsampling by this ratio
+            k_neighbors: Number of neighbors for KNN graph construction when edge_index is None
+            pos_gen_hidden_dim: Hidden dimension for position generator network
         """
         super().__init__()
-        self.feat_dim = feat_dim
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_lcl_heads = num_lcl_heads
+        self.num_glbl_heads = num_glbl_heads
+        self.pos_encoding_dim = pos_encoding_dim
+        self.dropout = dropout
         self.up_ratio = up_ratio
-
-        # MultiHeadPointTransformer for feature expansion
+        self.k_neighbors = k_neighbors
+        
+        # Determine internal dimensions based on whether upsampling or not
+        if up_ratio is not None:
+            # When upsampling, the PointTransformer expands features by up_ratio
+            self.pt_out_channels = up_ratio * out_channels
+            # After reshaping, features return to original dimension
+            self.flash_attn_dim = out_channels
+        else:
+            # Without upsampling, both modules work with the same dimensions
+            self.pt_out_channels = out_channels
+            self.flash_attn_dim = out_channels
+        
+        # 1. Local structure module (MultiHeadPointTransformer)
+        # Note: This now includes LayerNorm internally
         self.point_transformer = MultiHeadPointTransformer(
-            in_channels=feat_dim,
-            out_channels=up_ratio * feat_dim,
-            heads=up_attn_hds,
-            concat=up_concat
+            in_channels=in_channels,
+            out_channels=self.pt_out_channels,
+            heads=num_lcl_heads
         )
-       
-        # Position-aware global flash attention
+                
+        self.local_norm = nn.LayerNorm(self.pt_out_channels)
+
+        # 2. First MLP (after local attention)
+        self.local_mlp = nn.Sequential(
+            nn.Linear(self.pt_out_channels, self.pt_out_channels),
+            nn.ReLU(),
+            nn.Linear(self.pt_out_channels, self.pt_out_channels)
+        )
+        # Inside LocalGlobalPointAttentionBlock.__init__
+        # Add validation to ensure pos_encoding_dim is valid before using it
+        if not pos_encoding_dim or not isinstance(pos_encoding_dim, int) or pos_encoding_dim <= 0:
+            # Provide a sensible default
+            print(pos_encoding_dim)
+            pos_encoding_dim = 32  # or any other reasonable default
+            print(f"Warning: Invalid pos_encoding_dim provided, using default: {pos_encoding_dim}")
+
+        # 3. Global context module (PosAwareGlobalFlashAttention)
         self.pos_flash_attention = PosAwareGlobalFlashAttention(
-            dim=feat_dim,
+            dim=self.flash_attn_dim,
             pos_encoding_dim=pos_encoding_dim,
-            num_heads=fnl_attn_hds
+            num_heads=num_glbl_heads,
+            dropout=dropout
         )
-   
-    def forward(self, x_feat, original_pos, edge_index):
+        
+        # 4. Second MLP (after global attention)
+        self.global_mlp = nn.Sequential(
+            nn.Linear(out_channels, out_channels),
+            nn.ReLU(),
+            nn.Linear(out_channels, out_channels)
+        )
+        
+        # Feature-guided position generator (only used when upsampling)
+        if up_ratio is not None:
+            self.position_generator = nn.Sequential(
+                nn.Linear(out_channels, pos_gen_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(pos_gen_hidden_dim, pos_gen_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(pos_gen_hidden_dim, 3)
+            )
+            
+            # Initialize the last layer with small weights for stable training
+            nn.init.normal_(self.position_generator[-1].weight, mean=0.0, std=0.02)
+            nn.init.zeros_(self.position_generator[-1].bias)
+    
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}('
+                f'in={self.in_channels}, '
+                f'out={self.out_channels}, '
+                f'lcl_heads={self.num_lcl_heads}, '
+                f'glbl_heads={self.num_glbl_heads}, '
+                f'up_ratio={self.up_ratio})')
+        
+    def forward(self, x_feat, pos, edge_index=None):
         """
+        Forward pass through the LocalGlobalPointAttentionBlock
+        
         Args:
-            x_feat: [N, feat_dim] node features.
-            edge_index: [2, E] graph connectivity.
-            original_pos: [N, 3] original coordinates corresponding to x_feat.
+            x_feat: [N, in_channels] Input features
+            pos: [N, 3] Input 3D positions
+            edge_index: [2, E] Graph connectivity (optional, will build KNN if None)
+            
         Returns:
-            x_out: [r*N, feat_dim] refined features with position-aware attention.
+            Tuple containing:
+              - Output features: [N, out_channels] or [up_ratio*N, out_channels]
+              - Output positions: [N, 3] or [up_ratio*N, 3]
         """
-        N, C = x_feat.shape
-        r = self.up_ratio
-       
-        # 1) Feature Expansion using MultiHeadPointTransformer
-        x_expanded = self.point_transformer(x_feat, original_pos, edge_index)
-       
-        # 2) Group features: reshape to [N, r, feat_dim]
-        # Each original point now has r associated feature vectors
-        x_grouped = x_expanded.view(N, r, C)
-       
-        # 3) Convert to upsampled format: transform from [N, r, feat_dim] to [r*N, feat_dim]
-        # This reorganizes data so we have r*N total points with feat_dim features each
-        x_upsampled = x_grouped.permute(1, 0, 2).reshape(r * N, C)
+        # Build KNN graph if edge_index is not provided
+        if edge_index is None:
+            edge_index = knn_graph(
+                pos, 
+                k=self.k_neighbors, 
+                batch=None,
+                loop=False, 
+                flow='source_to_target'
+            )
+            edge_index = to_undirected(edge_index)  # Make edges bidirectional
+            
+        # Store input for potential residual connection
+        identity = x_feat if self.in_channels == self.out_channels else None
+        
+        # 1. Apply local attention via MultiHeadPointTransformer
+        x_local = self.point_transformer(x_feat, pos, edge_index)
+        
+        # 2. LayerNorm application after local attention
+        x_local = self.local_norm(x_local)
+ 
+        # 3. Apply first MLP
+        x_local = self.local_mlp(x_local) + x_local  # Residual connection
+        
+        # 4. Apply upsampling if up_ratio is specified
+        if self.up_ratio is not None:
+            # Upsampling logic remains unchanged
+            r = self.up_ratio
+            N = x_feat.shape[0]
+            C = self.flash_attn_dim
+            
+            # Group features: reshape to [N, r, out_channels]
+            x_grouped = x_local.view(N, r, C)
+            
+            # Convert to upsampled format: from [N, r, out_channels] to [r*N, out_channels]
+            x_upsampled = x_grouped.permute(1, 0, 2).reshape(r * N, C)
+            
+            # Feature-guided position generation
+            base_positions = pos.repeat_interleave(r, dim=0)  # [r*N, 3]
+            position_offsets = self.position_generator(x_upsampled)  # [r*N, 3]
+            pos_upsampled = base_positions + position_offsets  # [r*N, 3]
+            
+            # Apply global attention on upsampled features with generated positions
+            x_global = self.pos_flash_attention(x_upsampled, pos_upsampled)
+            
+            # Apply second MLP
+            x_global = self.global_mlp(x_global) + x_global  # Residual connection
+            
+            return x_global, pos_upsampled
+        else:
+            # Without upsampling, just apply global attention directly
+            x_global = self.pos_flash_attention(x_local, pos)
+            
+            # Apply second MLP
+            x_global = self.global_mlp(x_global) + x_global  # Residual connection
+            
+            # Add residual connection from input if dimensions match
+            if identity is not None:
+                x_global = x_global + identity
+            
+            return x_global, pos
 
-        # 4) Duplicate the original positions r times to match upsampled points
-        pos_rN = original_pos.unsqueeze(0).expand(r, N, 3).reshape(r * N, 3)
 
-        # 5) Apply position-aware flash attention with duplicatetd original positions
-        x_final = self.pos_flash_attention(x_upsampled, pos_rN)
-       
-        return x_final
+
 
 
 class MultimodalPointUpsampler(nn.Module):
     """
-    Enhanced point cloud upsampler that can incorporate NAIP and UAVSAR imagery
-    with configurable spatial fusion methods
+    Enhanced point cloud upsampler that incorporates LocalGlobalPointAttentionBlocks
+    for better feature extraction and upsampling, with support for multimodal fusion.
     """
     def __init__(self, config: MultimodalModelConfig):
         """
         Initialize the multimodal point cloud upsampler
-       
+        
         Args:
             config: Configuration for the model
         """
         super().__init__()
         self.config = config
-       
+        
         # Track which modalities are being used
         self.use_naip = config.use_naip
         self.use_uavsar = config.use_uavsar
-       
-        # ====== 1) Feature Extractor  ======
-        self.feature_extractor = FeatureExtractor(
-            feature_dim=config.feature_dim,
-            attr_dim=config.attr_dim,
-            pos_encoding_dim=config.position_encoding_dim
+        
+        # Ensure we have the necessary dropout parameters with defaults
+        extractor_dropout = getattr(config, 'extractor_dropout', config.pt_attn_dropout)
+        expansion_dropout = getattr(config, 'expansion_dropout', config.pt_attn_dropout)
+        refinement_dropout = getattr(config, 'refinement_dropout', config.pt_attn_dropout)
+        
+        # Get position generation hidden dimension with default
+        pos_gen_hidden_dim = getattr(config, 'pos_gen_hidden_dim', 64)
+        
+        # ====== 1) Initial Feature Extractor (LocalGlobalPointAttentionBlock) ======
+        self.feature_extractor = LocalGlobalPointAttentionBlock(
+            in_channels=config.attr_dim,
+            out_channels=config.feature_dim,
+            num_lcl_heads= config.num_lcl_heads, #use 8 since we go from 3D to feature_dim (256)  
+            num_glbl_heads=config.num_glbl_heads, 
+            pos_encoding_dim=config.position_encoding_dim,
+            dropout=extractor_dropout,
+            k_neighbors=config.k
         )
-       
+        
         # ====== 2) Imagery Encoders ======
         if self.use_naip:
             self.naip_encoder = NAIPEncoder(
@@ -509,7 +558,7 @@ class MultimodalPointUpsampler(nn.Module):
                 dropout=config.naip_dropout,
                 temporal_encoder_type=config.temporal_encoder  
             )
-       
+        
         if self.use_uavsar:
             self.uavsar_encoder = UAVSAREncoder(
                 in_channels=6,  # 6 polarization bands
@@ -520,9 +569,8 @@ class MultimodalPointUpsampler(nn.Module):
                 dropout=config.uavsar_dropout,
                 temporal_encoder_type=config.temporal_encoder  
             )
-       
+        
         # ====== 3) Configurable Fusion Module ======
-        # Select and initialize the appropriate fusion module based on config
         if config.fusion_type.lower() == "cross_attention":
             self.fusion = CrossAttentionFusion(
                 point_dim=config.feature_dim,
@@ -545,18 +593,32 @@ class MultimodalPointUpsampler(nn.Module):
                 temperature=config.temperature,
                 max_dist_ratio=config.max_dist_ratio
             )
-       
-        # ====== 4) Feature Expansion ======
-        self.feature_expansion = Feature_Expansion(
-            feat_dim=config.feature_dim,
-            up_ratio=config.up_ratio,
-            up_attn_hds=config.up_attn_hds,
-            up_concat=True,
+        
+        # ====== 4) Feature Expansion with Upsampling (LocalGlobalPointAttentionBlock) ======
+        self.feature_expansion = LocalGlobalPointAttentionBlock(
+            in_channels=config.feature_dim,
+            out_channels=config.feature_dim,
+            num_lcl_heads=config.up_attn_hds,  # Replace num_heads with num_lcl_heads
+            num_glbl_heads=config.num_glbl_heads,  # Use the global heads config parameter
             pos_encoding_dim=config.position_encoding_dim,
-            fnl_attn_hds=config.fnl_attn_hds
+            dropout=expansion_dropout,
+            up_ratio=config.up_ratio,
+            pos_gen_hidden_dim=pos_gen_hidden_dim,
+            k_neighbors=config.k
         )
-       
-        # ====== 5) Point Decoder ======
+        
+        # ====== 5) Additional Feature Refinement (LocalGlobalPointAttentionBlock) ======
+        self.feature_refinement = LocalGlobalPointAttentionBlock(
+            in_channels=config.feature_dim,
+            out_channels=config.feature_dim,
+            num_lcl_heads=config.up_attn_hds,  # Replace num_heads with num_lcl_heads
+            num_glbl_heads=config.num_glbl_heads,  # Use the global heads config parameter
+            pos_encoding_dim=config.position_encoding_dim,
+            dropout=refinement_dropout,
+            k_neighbors=config.k
+        )
+        
+        # ====== 6) Point Decoder ======
         self.point_decoder = nn.Sequential(
             nn.Linear(config.feature_dim, config.feature_dim // 2),
             nn.ReLU(),
@@ -566,12 +628,11 @@ class MultimodalPointUpsampler(nn.Module):
             nn.ReLU(),
             nn.Linear(config.feature_dim // 8, 3)
         )
-   
-    def forward(self, dep_points, edge_index, dep_attr=None, naip=None, uavsar=None, center=None, scale=None, bbox=None):      
-       
+    
+    def forward(self, dep_points, edge_index, dep_attr=None, naip=None, uavsar=None, center=None, scale=None, bbox=None):
         """
         Forward pass of the multimodal point cloud upsampler with configurable fusion
-       
+        
         Args:
             dep_points: 3DEP point cloud coordinates [N_dep, 3]
             edge_index: Edge indices for graph connectivity [2, E]
@@ -585,23 +646,23 @@ class MultimodalPointUpsampler(nn.Module):
             center: Center used for point cloud normalization [1, 3]
             scale: Scale used for point cloud normalization
             bbox: Point cloud bounding box [xmin, ymin, xmax, ymax]
-       
+        
         Returns:
             pred_points: Predicted point cloud coordinates [r*N_dep, 3]
         """
         # Get device from points tensor
         device = dep_points.device
-       
+        
         # Remove extreme values likely from bird returns
         dep_points[:, 2] = torch.clamp(dep_points[:, 2], 0, 150)  # >150m is certainly a bird in any natural landscape
 
         # ====== 1) Point Cloud Feature Extraction ======
-        x_feat = self.feature_extractor(dep_points, dep_attr, edge_index)  # [N_dep, feat_dim]
-       
+        x_feat, _ = self.feature_extractor(dep_attr, dep_points, edge_index)  # [N_dep, feat_dim]
+        
         # ====== 2) Imagery Feature Extraction (if applicable) ======
         naip_embeddings = None
         uavsar_embeddings = None
-       
+        
         if self.use_naip and naip is not None and 'images' in naip:
             # Make sure NAIP images are on the correct device
             if naip['images'] is not None:
@@ -615,7 +676,7 @@ class MultimodalPointUpsampler(nn.Module):
                 naip.get('img_bbox', None),
                 naip.get('relative_dates', None)
             )  # [num_patches, embed_dim]
-       
+        
         if self.use_uavsar and uavsar is not None and 'images' in uavsar:
             # Make sure UAVSAR images are on the correct device
             if uavsar['images'] is not None:
@@ -629,7 +690,7 @@ class MultimodalPointUpsampler(nn.Module):
                 uavsar.get('img_bbox', None),
                 uavsar.get('relative_dates', None)
             )  # [num_patches, embed_dim]
-       
+        
         # ====== 3) Apply Selected Fusion Module ======
         x_fused = self.fusion(
             point_features=x_feat,                                # [N_dep, feat_dim]
@@ -643,11 +704,28 @@ class MultimodalPointUpsampler(nn.Module):
             center=center,                                        # [1, 3]
             scale=scale                                           # scalar                                        
         )  # [N_dep, feat_dim]
-       
-        # ====== 4) Feature Expansion ======
-        x_up = self.feature_expansion(x_fused, dep_points, edge_index)  # [r*N_dep, feat_dim]
-       
-        # ====== 5) Decode to 3D Coordinates ======
-        pred_points = self.point_decoder(x_up)  # [r*N_dep, 3]
-       
+        
+        # ====== 4) Feature Expansion with Upsampling ======
+        x_up, pos_up = self.feature_expansion(x_fused, dep_points, edge_index)  # [r*N_dep, feat_dim], [r*N_dep, 3]
+        
+        # ====== 5) Construct new KNN graph for upsampled points ======
+        # We do this explicitly to have control over KNN parameters
+        pos_up_edge_index = knn_graph(
+            pos_up, 
+            k=self.config.k, 
+            batch=None,
+            loop=False, 
+            flow='source_to_target'
+        )
+        pos_up_edge_index = to_undirected(pos_up_edge_index)  # Make edges bidirectional
+        
+        # ====== 6) Feature Refinement with new edge indices ======
+        x_refined, _ = self.feature_refinement(x_up, pos_up, pos_up_edge_index)  # [r*N_dep, feat_dim]
+        
+        # ====== 7) Decode to 3D Coordinates ======
+        pred_offset = self.point_decoder(x_up)  # [r*N_dep, 3]
+        
+        # Add predicted offsets to the upsampled positions to get final coordinates
+        pred_points = pos_up + pred_offset
+        
         return pred_points

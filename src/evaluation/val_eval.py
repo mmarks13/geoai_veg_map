@@ -174,21 +174,13 @@ def process_sample_for_evaluation(model, sample_data, device):
     
     if torch.isnan(chamfer_loss):
         print(f"WARNING: Loss for sample is NaN! {tile_id}")
+
+    if torch.isinf(chamfer_loss):
+        print(f"WARNING: Loss for sample is Inf! {tile_id}")
     
     return pred_points, chamfer_loss.item()
 
 def evaluate_validation_samples(model, dataloader, device):
-    """
-    Evaluate model on validation samples and return predictions and losses.
-    
-    Args:
-        model: Trained model
-        dataloader: DataLoader for validation data
-        device: Device to run evaluation on
-        
-    Returns:
-        List of dictionaries with sample info, predictions, and losses
-    """
     model.eval()  # Set model to evaluation mode
     results = []
     
@@ -218,7 +210,10 @@ def evaluate_validation_samples(model, dataloader, device):
                     'pred_points': pred_points.cpu(),
                     'uav_points': uav_list[i].cpu(),
                     'dep_points': dep_list[i].cpu(),
-                    'loss': loss
+                    'loss': loss,
+                    'naip': naip_list[i],  
+                    'uavsar': uavsar_list[i],  
+                    'bbox': bbox_list[i] if bbox_list[i] is not None else None  # Include bbox for overlay
                 }
                 
                 results.append(result)
@@ -252,12 +247,9 @@ def main():
         up_attn_hds=4,       # Upsampling attention heads
         up_ratio=2,          # Upsampling ratio
         pos_mlp_hdn=32,      # Hidden dimension for positional MLP
-        up_concat=True,      # Whether to concatenate attention heads
-        up_beta=False,       # Whether to use beta parameter
-        up_dropout=0.005,    # upsample Dropout rate
         
-        use_naip = True,
-        use_uavsar = True,
+        use_naip = False,
+        use_uavsar = False,
         
         # Imagery encoder parameters
         img_embed_dim=64,    # Dimension of patch embeddings
@@ -273,11 +265,16 @@ def main():
         # cross attention fusion parameters
         fusion_dropout = 0.10,
         fusion_num_heads = 4,
-        position_encoding_dim = 24
+        position_encoding_dim = 24,
+
+        # Point Transformer parameters
+        num_lcl_heads = 4,  # Local attention heads (for MultiHeadPointTransformerConv)
+        num_glbl_heads = 4,  # Global attention heads (for PosAwareGlobalFlashAttention)
+        pt_attn_dropout = 0.0
     )
     
     # Load the model
-    model_path = "data/output/checkpoints/0402_freeze_test_naip_uavsar_k15_f256_b5_e10.pth"
+    model_path = "/home/jovyan/geoai_veg_map/data/output/checkpoints/0404_huber2m_3DEP_Only_baseline_k15_f256_b6_e40.pth"
     model = load_model(model_path, config)
     model.to(device)
     print("Model loaded successfully")

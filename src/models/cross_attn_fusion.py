@@ -35,16 +35,16 @@ class CrossAttentionFusion(nn.Module):
         self.position_encoding_dim = position_encoding_dim
         self.use_distance_mask = use_distance_mask
         
-        # If neither modality is used, this module becomes a pass-through
+        # If neither modality is used, we'll still use the same model architecture
+        # but without concatenating any additional features
         if not (use_naip or use_uavsar):
             self.identity = True
-            return
         else:
             self.identity = False
-        
+
         # Projects for point features to create queries
         self.point_query_proj = nn.Linear(point_dim, point_dim)
-        
+
         # Projections for patch features to create keys and values
         if use_naip:
             self.naip_key_proj = nn.Linear(patch_dim + position_encoding_dim, point_dim)
@@ -53,28 +53,23 @@ class CrossAttentionFusion(nn.Module):
         if use_uavsar:
             self.uavsar_key_proj = nn.Linear(patch_dim + position_encoding_dim, point_dim)
             self.uavsar_value_proj = nn.Linear(patch_dim + position_encoding_dim, point_dim)
-        
+
         # Layer normalization for pre-processing
         self.norm1 = nn.LayerNorm(point_dim)
-        
-        # Calculate output dimension after concatenation (similar to SpatialFusion)
+
+        # Calculate output dimension after concatenation
         concat_dim = point_dim  # Start with point features
         if use_naip:
             concat_dim += point_dim  # Add NAIP attention output dimension
         if use_uavsar:
             concat_dim += point_dim  # Add UAVSAR attention output dimension
+
+        # Linear layers for feature extraction and projection
+        self.linear1 = nn.Linear(concat_dim, concat_dim)
+        self.linear2 = nn.Linear(concat_dim, point_dim)
+        self.act = nn.ReLU()  # ReLU activation between linear layers
+
         
-        # Point Transformer blocks for feature extraction and projection (from SpatialFusion)
-        self.pt_transformer_block = PointTransformerConv(
-            in_channels=concat_dim, 
-            out_channels=concat_dim
-        )
-        
-        self.pt_conv_projection = PointTransformerConv(
-            in_channels=concat_dim, 
-            out_channels=point_dim
-        )
-    
     def positional_encoding(self, positions, dim):
         """
         Generate sinusoidal positional encodings for multi-dimensional positions
@@ -321,25 +316,16 @@ class CrossAttentionFusion(nn.Module):
             uavsar_attn_output = self.cross_attention(queries, uavsar_keys, uavsar_values, mask)  # [N, D_p]
             to_concat.append(uavsar_attn_output)
         
-        # Combine outputs using concatenation and PointTransformerConv (similar to SpatialFusion)
+        # Combine outputs using concatenation and linear layers
         if len(to_concat) > 1:  # If we have at least one modality in addition to point features
             # Concatenate features
             concatenated = torch.cat(to_concat, dim=1)  # [N, D_p + ...] 
-            
-            # Apply point transformer block for feature extraction
-            concatenated = self.pt_transformer_block(
-                x=concatenated,           # [N, concat_dim]
-                pos=point_positions,      # [N, 3]
-                edge_index=edge_index     # [2, E]
-            )
-            
-            # Apply PointTransformerConv to project down to original point dimension
-            fused_features = self.pt_conv_projection(
-                x=concatenated,           # [N, concat_dim]
-                pos=point_positions,      # [N, 3]
-                edge_index=edge_index     # [2, E]
-            )  # [N, D_p]
         else:
-            fused_features = point_features  # [N, D_p]
+            # If no modalities used, just use the point features
+            concatenated = point_features  # [N, D_p]
+
+        # Apply linear layers for feature extraction and projection 
+        concatenated = self.act(self.linear1(concatenated))  # [N, concat_dim or D_p]
+        fused_features = self.linear2(concatenated)  # [N, D_p]
         
         return fused_features

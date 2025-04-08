@@ -51,7 +51,7 @@ import warnings
 
 
 
-def check_point_cloud_coverage(points, grid_size=1.0, min_points_per_cell=1, min_coverage_pct=80):
+def check_point_cloud_coverage(points, bbox, grid_size=1.0, min_points_per_cell=1, min_coverage_pct=80):
     """
     Check if a point cloud has sufficient coverage across a grid.
     
@@ -59,6 +59,8 @@ def check_point_cloud_coverage(points, grid_size=1.0, min_points_per_cell=1, min
     -----------
     points : torch.Tensor
         Point cloud tensor of shape (N, 3) containing (x, y, z) coordinates
+    bbox : list or tuple
+        Bounding box of the tile in format [minx, miny, maxx, maxy]
     grid_size : float
         Size of each grid cell in meters
     min_points_per_cell : int
@@ -76,9 +78,8 @@ def check_point_cloud_coverage(points, grid_size=1.0, min_points_per_cell=1, min
     x = points[:, 0]
     y = points[:, 1]
     
-    # Determine grid bounds from data
-    x_min, x_max = x.min().item(), x.max().item()
-    y_min, y_max = y.min().item(), y.max().item()
+    # Use the provided bbox instead of calculating from points
+    x_min, y_min, x_max, y_max = bbox
     
     # Calculate the number of cells in each dimension
     # Add a small epsilon to ensure upper bound is included
@@ -109,26 +110,25 @@ def check_point_cloud_coverage(points, grid_size=1.0, min_points_per_cell=1, min
     # Count cells with sufficient points
     cells_with_min_points = (cell_counts >= min_points_per_cell).sum().item()
     
-    # Calculate total possible cells in a 10x10 grid (or actual bounds if smaller)
-    expected_x_cells = min(10, x_cells)
-    expected_y_cells = min(10, y_cells)
-    total_expected_cells = expected_x_cells * expected_y_cells
+    # Calculate total possible cells in the grid
+    total_cells = x_cells * y_cells
     
     # Calculate coverage percentage
-    coverage_pct = (cells_with_min_points / total_expected_cells) * 100
+    coverage_pct = (cells_with_min_points / total_cells) * 100
     
     # Check if coverage meets the threshold
     is_complete = coverage_pct >= min_coverage_pct
     
     # Gather statistics for reporting
     stats = {
-        "total_cells": total_expected_cells,
+        "total_cells": total_cells,
         "covered_cells": cells_with_min_points,
         "coverage_pct": coverage_pct,
         "avg_points_per_covered_cell": cell_counts.float().mean().item()
     }
     
     return is_complete, stats
+    
 def validate_tile(tile, min_uav_points=10000, min_dep_points=500, 
                  min_uav_coverage_pct=80, min_points_per_cell=1,
                  min_uav_to_dep_ratio=None):
@@ -177,9 +177,14 @@ def validate_tile(tile, min_uav_points=10000, min_dep_points=500,
     if uav_points.shape[0] < min_uav_points:
         return False, f"Insufficient UAV points: {uav_points.shape[0]} < {min_uav_points}"
     
-    # Check UAV point cloud coverage
+    # Check if 'bbox' exists in the tile
+    if 'bbox' not in tile or tile['bbox'] is None:
+        return False, "Missing bounding box information"
+    
+    # Check UAV point cloud coverage using the tile's bbox
     is_complete, coverage_stats = check_point_cloud_coverage(
         uav_points, 
+        bbox=tile['bbox'],
         grid_size=1.0,
         min_points_per_cell=min_points_per_cell,
         min_coverage_pct=min_uav_coverage_pct
@@ -440,12 +445,13 @@ if __name__ == "__main__":
                         help='Minimum number of UAV points required for a valid tile.')
     parser.add_argument('--min-dep-points', type=int, default=500,
                         help='Minimum number of DEP points required for a valid tile.')
-    parser.add_argument('--min-coverage', type=float, default=80.0,
+    parser.add_argument('--min-coverage', type=float, default=100,
                         help='Minimum percentage of grid cells that must be covered in UAV point cloud.')
-    parser.add_argument('--min-points-per-cell', type=int, default=1,
-                        help='Minimum points per grid cell to consider it covered.')
+    parser.add_argument('--min-points-per-cell', type=int, default=10,
+                        help='Minimum points per grid cell to consider it covered.') 
     parser.add_argument('--min-uav-to-dep-ratio', type=float, default=None,
                         help='If provided, validates that the number of UAV points is at least this many times greater than the number of DEP points.')
+
     
     # Parse arguments
     args = parser.parse_args()
