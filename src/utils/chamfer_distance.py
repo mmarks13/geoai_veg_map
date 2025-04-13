@@ -104,10 +104,10 @@ def chamfer_distance(
     weights=None,
     batch_reduction="mean",
     point_reduction="mean",
-    norm_type="Huber",
+    norm_type="L2_squared",
     huber_delta=2.0, 
     trim_percentage_x_to_y=0.0,
-    trim_percentage_y_to_x=0.001,
+    trim_percentage_y_to_x=0.01,
     eps=1e-8
 ):
     """

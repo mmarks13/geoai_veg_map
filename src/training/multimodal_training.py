@@ -532,7 +532,7 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
             scaler.unscale_(optimizer)
             
             # Clip gradients to prevent explosion
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=6)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3)
             
             # Update weights
             scaler.step(optimizer)
@@ -921,90 +921,141 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
     return result
 
 
-def train_multimodal_model(train_dataset,
-                         val_dataset,
-                         model_name,
-                         batch_size,
-                         checkpoint_dir,
-                         model_config=MultimodalModelConfig(),  # Use MultimodalModelConfig
+def train_multimodal_model(train_dataset=None,
+                         val_dataset=None,
+                         train_data_paths=None,
+                         val_data_path=None,
+                         model_name="model",
+                         batch_size=8,
+                         checkpoint_dir="checkpoints",
+                         model_config=None,
                          num_epochs=60,
                          log_file="logs/training_log.txt",
-                         early_stopping_patience=20,
+                         early_stopping_patience=40,
                          temp_dir_root="data/output/tmp_shards",
+                         shard_cache_dir="data/output/cached_shards",
+                         use_cached_shards=False,
                          tensorboard_log_dir="data/output/tensorboard_logs",
                          enable_debug=False,
                          accumulation_steps=1,
                          visualize_samples=False,
-                         lr_scheduler_type="plateau",    # New parameter
-                         max_lr=5e-4,                    # New parameter
-                         pct_start=0.3,                  # New parameter
-                         div_factor=25.0,                # New parameter
-                         final_div_factor=1e4):          # New parameter
+                         lr_scheduler_type="plateau",
+                         max_lr=5e-4,
+                         pct_start=0.3,
+                         div_factor=25.0,
+                         final_div_factor=1e4):
     """
-    Unified training entry point for the multimodal model.
-    
-    Parameters:
-      - train_dataset, val_dataset: Precomputed dataset objects.
-      - model_name: Name of the model (used for logging and checkpointing).
-      - batch_size: Batch size per GPU.
-      - checkpoint_dir: Directory in which checkpoints will be saved.
-      - model_config: Instance of MultimodalModelConfig with model hyperparameters.
-      - num_epochs: Number of epochs to train.
-      - log_file: Path for logging.
-      - early_stopping_patience: Number of epochs without improvement before early stopping.
-      - temp_dir_root: Base directory to use for temporary shards.
-      - tensorboard_log_dir: Directory to store TensorBoard logs
-      - enable_debug: Whether to enable debugging features
-      - visualize_samples: Whether to visualize sample predictions
-      - lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
-      - max_lr: Maximum learning rate for OneCycleLR
-      - pct_start: Percentage of total steps for warmup phase in OneCycleLR
-      - div_factor: Initial learning rate = max_lr / div_factor
-      - final_div_factor: Final learning rate = initial_lr / final_div_factor
-      
-    Returns:
-      The best validation loss (as reported by the rank-0 process), or None if training failed.
+    Unified training entry point for the multimodal model with shard caching.
     """
     # Create required directories
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     os.makedirs(temp_dir_root, exist_ok=True)
+    os.makedirs(shard_cache_dir, exist_ok=True)
     
-    if tensorboard_log_dir:
-        os.makedirs(tensorboard_log_dir, exist_ok=True)
-        print(f"TensorBoard logs will be saved to: {tensorboard_log_dir}")
-        print(f"To view TensorBoard, run: tensorboard --logdir={tensorboard_log_dir}")
-        
-        print(f"Debug mode: {enable_debug}")
+    # [Setup code remains the same...]
     
-    # Log scheduler information
-    print(f"Using {lr_scheduler_type} learning rate scheduler")
-    if lr_scheduler_type == "onecycle":
-        print(f"OneCycleLR parameters: max_lr={max_lr}, pct_start={pct_start}, "
-              f"div_factor={div_factor}, final_div_factor={final_div_factor}")
-
-    # Create a unique temporary directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    temp_dir = os.path.join(temp_dir_root, f"multimodal_shards_{timestamp}")
-    os.makedirs(temp_dir, exist_ok=True)
-
     world_size = torch.cuda.device_count()
     print(f"Using {world_size} GPU(s) for training.")
 
-    # Pre-shard the datasets to disk with multimodal support
-    print("Creating training data shards...")
-    train_shard_paths = create_multimodal_shards(
-        train_dataset, world_size, temp_dir, "train", 
-        use_naip=model_config.use_naip, 
-        use_uavsar=model_config.use_uavsar
-    )
+    # Generate a cache key based on data source paths and sizes
+    if train_data_paths is not None and val_data_path is not None:
+        # When using file paths
+        if isinstance(train_data_paths, list):
+            # For multiple training data files, hash their paths
+            import hashlib
+            paths_str = "".join(sorted(train_data_paths)) + val_data_path
+            cache_key = hashlib.md5(paths_str.encode()).hexdigest()[:10]
+        else:
+            # For single training data file
+            import hashlib
+            paths_str = train_data_paths + val_data_path
+            cache_key = hashlib.md5(paths_str.encode()).hexdigest()[:10]
+    elif train_dataset is not None and val_dataset is not None:
+        # When using preloaded datasets, use their lengths
+        train_len = len(train_dataset)
+        val_len = len(val_dataset)
+        cache_key = f"train{train_len}_val{val_len}"
+    else:
+        raise ValueError("Either train_data_paths and val_data_path OR train_dataset and val_dataset must be provided")
     
-    print("Creating validation data shards...")
-    val_shard_paths = create_multimodal_shards(
-        val_dataset, world_size, temp_dir, "val", 
-        use_naip=model_config.use_naip, 
-        use_uavsar=model_config.use_uavsar
-    )
+    # Paths for cached shards
+    train_cache_paths = [os.path.join(shard_cache_dir, f"{cache_key}_train_shard_{i}.pt") for i in range(world_size)]
+    val_cache_paths = [os.path.join(shard_cache_dir, f"{cache_key}_val_shard_{i}.pt") for i in range(world_size)]
+    
+    # Check if cached shards exist and should be used
+    cached_shards_exist = all(os.path.exists(p) for p in train_cache_paths + val_cache_paths)
+    
+    if use_cached_shards and cached_shards_exist:
+        print(f"Using cached shards with key: {cache_key}")
+        train_shard_paths = train_cache_paths
+        val_shard_paths = val_cache_paths
+    else:
+        # Need to create shards
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_dir = os.path.join(temp_dir_root, f"multimodal_shards_{timestamp}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+         # Load data if needed and paths are provided
+        if (train_dataset is None or val_dataset is None) and train_data_paths is not None and val_data_path is not None:
+            print("Loading data from file paths...")
+            
+            # Load and combine training data if paths are provided
+            if isinstance(train_data_paths, list):
+                train_dataset = []
+                for path in train_data_paths:
+                    print(f"Loading training data from {path}...")
+                    data = torch.load(path, weights_only=False)
+                    train_dataset.extend(data)
+            else:
+                # Single path provided
+                print(f"Loading training data from {train_data_paths}...")
+                train_dataset = torch.load(train_data_paths, weights_only=False)
+            
+            # Load validation data
+            print(f"Loading validation data from {val_data_path}...")
+            val_dataset = torch.load(val_data_path, weights_only=False)
+            
+            print(f"Loaded {len(train_dataset)} training samples and {len(val_dataset)} validation samples")
+        elif train_dataset is None or val_dataset is None:
+            raise ValueError("Either train_data_paths and val_data_path OR train_dataset and val_dataset must be provided")
+
+        
+        # Create shards
+        print("Creating training data shards...")
+        train_shard_paths = create_multimodal_shards(
+            train_dataset, world_size, temp_dir, "train", 
+            use_naip=model_config.use_naip, 
+            use_uavsar=model_config.use_uavsar
+        )
+        
+        print("Creating validation data shards...")
+        val_shard_paths = create_multimodal_shards(
+            val_dataset, world_size, temp_dir, "val", 
+            use_naip=model_config.use_naip, 
+            use_uavsar=model_config.use_uavsar
+        )
+        
+        # Cache the shards for future use
+        print(f"Caching shards with key: {cache_key}")
+        for i, (train_shard, val_shard) in enumerate(zip(train_shard_paths, val_shard_paths)):
+            cached_train_path = train_cache_paths[i]
+            cached_val_path = val_cache_paths[i]
+            
+            shutil.copy(train_shard, cached_train_path)
+            shutil.copy(val_shard, cached_val_path)
+            
+            # Update paths to use the cached versions
+            train_shard_paths[i] = cached_train_path
+            val_shard_paths[i] = cached_val_path
+        
+        print("Cleaning up memory...")
+        del train_dataset
+        del val_dataset
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 
     # Find a free port for DDP communication
     port = find_free_port()
@@ -1095,33 +1146,32 @@ def train_multimodal_model(train_dataset,
             final_div_factor=final_div_factor
         )
     
-    # Clean up temporary shards directory
-    print(f"Cleaning up temporary directory: {temp_dir}")
-    shutil.rmtree(temp_dir, ignore_errors=True)
+    # Clean up temporary shards directory if it was created
+    if 'temp_dir' in locals() and temp_dir:
+        print(f"Cleaning up temporary directory: {temp_dir}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     return best_val_loss
 
+    
 
-def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir, 
-                        model_name="pointupsampler", batch_size=8, epochs=40, enable_debug=False,
-                        lr_scheduler_type="onecycle", max_lr=5e-4, pct_start=0.3, 
-                        div_factor=25.0, final_div_factor=1e4):
+def run_ablation_studies(train_dataset=None, val_dataset=None,
+                       train_data_paths=None, val_data_path=None,
+                       base_config=None, checkpoint_dir="checkpoints", 
+                       model_name="pointupsampler", batch_size=8, epochs=40, 
+                       enable_debug=False, use_cached_shards=False,
+                       shard_cache_dir="data/output/cached_shards",
+                       lr_scheduler_type="onecycle", max_lr=5e-4, pct_start=0.3, 
+                       div_factor=25.0, final_div_factor=1e4):
     """
     Run ablation studies with different modality combinations.
     
     Args:
-        train_dataset: Training dataset
-        val_dataset: Validation dataset
-        base_config: Base configuration for all models
-        checkpoint_dir: Base directory for checkpoints
-        batch_size: Batch size per GPU
-        epochs: Number of epochs to train
-        enable_debug: Whether to enable debugging features
-        lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
-        max_lr: Maximum learning rate for OneCycleLR
-        pct_start: Percentage of total steps for warmup phase in OneCycleLR
-        div_factor: Initial learning rate = max_lr / div_factor
-        final_div_factor: Final learning rate = initial_lr / final_div_factor
+        train_dataset: Training dataset (optional if train_data_paths provided)
+        val_dataset: Validation dataset (optional if val_data_path provided)
+        train_data_paths: List of paths to training data files
+        val_data_path: Path to validation data file
+        [other parameters remain the same]
     """
     import os
     import time
@@ -1129,9 +1179,6 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
     
     # Import here to ensure we're using the same class reference
     from src.models.multimodal_model import MultimodalModelConfig
-    
-    # Run sequentially instead of using multiprocessing
-    # This avoids pickling issues with the config class
     
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     
@@ -1141,6 +1188,40 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         print(f"OneCycleLR parameters: max_lr={max_lr}, pct_start={pct_start}, "
               f"div_factor={div_factor}, final_div_factor={final_div_factor}")
     
+
+      # 1. Baseline (3DEP Only)
+    print("\n\n========== Running Baseline (3DEP Only) ==========\n")
+    baseline_config_dict = {k: v for k, v in asdict(base_config).items()}
+    baseline_config_dict['use_naip'] = False
+    baseline_config_dict['use_uavsar'] = False
+    baseline_config = MultimodalModelConfig(**baseline_config_dict)
+    
+    # Make a unique directory for this run
+    baseline_dir = os.path.join(checkpoint_dir, f"baseline_{timestamp}")
+    os.makedirs(baseline_dir, exist_ok=True)
+    
+    train_multimodal_model(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        train_data_paths=train_data_paths,
+        val_data_path=val_data_path,
+        model_name=model_name,
+        batch_size=batch_size,
+        checkpoint_dir=baseline_dir,
+        model_config=baseline_config,
+        num_epochs=epochs,
+        enable_debug=enable_debug,
+        visualize_samples=enable_debug,
+        use_cached_shards=use_cached_shards,
+        shard_cache_dir=shard_cache_dir,
+        lr_scheduler_type=lr_scheduler_type,
+        max_lr=max_lr,
+        pct_start=pct_start,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor
+    )
+
+
     # 4. Both SAR & Optical
     print("\n\n========== Running Combined (SAR & Optical) ==========\n")
     combined_config_dict = {k: v for k, v in asdict(base_config).items()}
@@ -1155,6 +1236,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
     train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        train_data_paths=train_data_paths,
+        val_data_path=val_data_path,
         model_name=model_name,
         batch_size=batch_size,
         checkpoint_dir=combined_dir,
@@ -1162,6 +1245,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         num_epochs=epochs,
         enable_debug=enable_debug,
         visualize_samples=enable_debug,
+        use_cached_shards=use_cached_shards,
+        shard_cache_dir=shard_cache_dir,
         lr_scheduler_type=lr_scheduler_type,
         max_lr=max_lr,
         pct_start=pct_start,
@@ -1169,33 +1254,7 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         final_div_factor=final_div_factor
     )
     
-    # 1. Baseline (3DEP Only)
-    print("\n\n========== Running Baseline (3DEP Only) ==========\n")
-    baseline_config_dict = {k: v for k, v in asdict(base_config).items()}
-    baseline_config_dict['use_naip'] = False
-    baseline_config_dict['use_uavsar'] = False
-    baseline_config = MultimodalModelConfig(**baseline_config_dict)
-    
-    # Make a unique directory for this run
-    baseline_dir = os.path.join(checkpoint_dir, f"baseline_{timestamp}")
-    os.makedirs(baseline_dir, exist_ok=True)
-    
-    train_multimodal_model(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        model_name=model_name,
-        batch_size=batch_size,
-        checkpoint_dir=baseline_dir,
-        model_config=baseline_config,
-        num_epochs=epochs,
-        enable_debug=enable_debug,
-        visualize_samples=enable_debug,
-        lr_scheduler_type=lr_scheduler_type,
-        max_lr=max_lr,
-        pct_start=pct_start,
-        div_factor=div_factor,
-        final_div_factor=final_div_factor
-    )
+  
     
     # 2. SAR-Only
     print("\n\n========== Running SAR-Only ==========\n")
@@ -1211,6 +1270,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
     train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        train_data_paths=train_data_paths,
+        val_data_path=val_data_path,
         model_name=model_name,
         batch_size=batch_size,
         checkpoint_dir=sar_dir,
@@ -1218,6 +1279,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         num_epochs=epochs,
         enable_debug=enable_debug,
         visualize_samples=enable_debug,
+        use_cached_shards=use_cached_shards,
+        shard_cache_dir=shard_cache_dir,
         lr_scheduler_type=lr_scheduler_type,
         max_lr=max_lr,
         pct_start=pct_start,
@@ -1239,6 +1302,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
     train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        train_data_paths=train_data_paths,
+        val_data_path=val_data_path,
         model_name=model_name,
         batch_size=batch_size,
         checkpoint_dir=optical_dir,
@@ -1246,6 +1311,8 @@ def run_ablation_studies(train_dataset, val_dataset, base_config, checkpoint_dir
         num_epochs=epochs,
         enable_debug=enable_debug,
         visualize_samples=enable_debug,
+        use_cached_shards=use_cached_shards,
+        shard_cache_dir=shard_cache_dir,
         lr_scheduler_type=lr_scheduler_type,
         max_lr=max_lr,
         pct_start=pct_start,

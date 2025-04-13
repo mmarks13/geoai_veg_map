@@ -1337,17 +1337,17 @@ if __name__ == "__main__":
         # Basic transformations
         'rotate_probability': 1,
         'reflect_probability': 0.5,
-        'jitter_probability': 0,
+        'jitter_probability':1,
         
         # Point cloud modifications
-        'add_points_probability': 0,
-        'remove_points_probability': 0.5,
-        'mask_points_probability': 0.5,
-        'remove_horizontal_slice_probability': 0.5,  
+        'add_points_probability': 0.0,
+        'remove_points_probability': 0.2,
+        'mask_points_probability': 0.2,
+        'remove_horizontal_slice_probability': 0.2,  
         
         # Imagery and attributes
         'temporal_shift_probability': 0.5,
-        'attribute_augment_probability': 0.3,
+        'attribute_augment_probability': 0,
         'spectral_band_probability': 0.3,
         'sensor_effects_probability': 0.3,
         
@@ -1366,7 +1366,7 @@ if __name__ == "__main__":
         'mask_min_removal_ratio': 0.1, 
         'mask_max_removal_ratio': 0.5,  
         'mask_count': 2,
-        'sensor_effect_strength': 0.2,
+        'sensor_effect_strength': 0.1,
         'uavsar_noise_variance': 0.1,
         'horizontal_slice_min_height': 0.3,  
         'horizontal_slice_max_height': 2,   
@@ -1376,12 +1376,12 @@ if __name__ == "__main__":
 
     
     print("Augmenting dataset...")
-    desired_total_tiles = 50000
+    desired_total_tiles = 30000
     
     total_augmentations = desired_total_tiles - len(training_tiles) 
-    augmented_tiles = augment_dataset(training_tiles, n_augmentations=1, config=config, prob_vector=None, total_augmentations=None)
+    augmented_tiles = augment_dataset(training_tiles, n_augmentations=1, config=config, prob_vector=scaled_probs, total_augmentations=total_augmentations)
 
     # augmented_training_tiles = training_tiles + augmented_tiles
     # Save the augmented dataset
     print("Saving augmented dataset...")
-    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_25k.pt')
+    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_12k.pt')

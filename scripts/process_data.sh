@@ -2,8 +2,9 @@
 
 
 
-# # # python src/data_prep/process_uav_lidar.py
-# # # python src/data_prep/create_training_tile_bboxes.py 
+
+# python src/data_prep/process_uav_lidar.py
+# python src/data_prep/create_training_tile_bboxes.py 
 
 # # based the tile bounding boxes, generate training data from the local stac catalogs of UAVSAR, UAV LiDAR, and NAIP, and the planetary computer 3DEP stac
 # python src/data_prep/generate_training_data.py\
@@ -36,11 +37,16 @@
 #     --pt-file data/processed/model_data/combined_training_data_v2.pt \
 #     --geojson-file /home/jovyan/geoai_veg_map/data/processed/test_val_polygons.geojson \
 #     --output-dir data/processed/model_data \
-#     --min-uav-points 8000 \
+#     --min-uav-points 18000 \
 #     --min-dep-points 200 \
 #     --min-uav-to-dep-ratio 1.1 \
+#     --min-coverage 95 \
 #     --test-val-ratio 0.6 \
-#     --random-seed 123
+#     --min-points-per-cell 6 \
+#     --random-seed 123 
 
 #precompute data for pytorch training
-python src/training/precompute_data.py
+python src/data_prep/precompute_data.py
+
+# # augment the original training data
+# python src/data_prep/data_augmentation.py

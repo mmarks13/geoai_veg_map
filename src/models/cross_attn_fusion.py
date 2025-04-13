@@ -35,10 +35,10 @@ class CrossAttentionFusion(nn.Module):
         self.position_encoding_dim = position_encoding_dim
         self.use_distance_mask = use_distance_mask
         
-        # If neither modality is used, we'll still use the same model architecture
-        # but without concatenating any additional features
+        # If neither modality is used, this module becomes a pass-through
         if not (use_naip or use_uavsar):
             self.identity = True
+            return
         else:
             self.identity = False
 
@@ -68,7 +68,9 @@ class CrossAttentionFusion(nn.Module):
         self.linear1 = nn.Linear(concat_dim, concat_dim)
         self.linear2 = nn.Linear(concat_dim, point_dim)
         self.act = nn.ReLU()  # ReLU activation between linear layers
-
+       
+        # Add layer normalization for post-processing
+        self.norm2 = nn.LayerNorm(point_dim)
         
     def positional_encoding(self, positions, dim):
         """
@@ -215,8 +217,6 @@ class CrossAttentionFusion(nn.Module):
             main_bbox: Bounding box of the point cloud [xmin, ymin, xmax, ymax]
             naip_bbox: Bounding box of NAIP imagery [minx, miny, maxx, maxy]
             uavsar_bbox: Bounding box of UAVSAR imagery [minx, miny, maxx, maxy]
-            center: Center used for point cloud normalization [1, 3]
-            scale: Scale used for point cloud normalization
             
         Returns:
             fused_features: Point features enhanced with patch information [N, D_p]
@@ -226,7 +226,8 @@ class CrossAttentionFusion(nn.Module):
             return point_features  # [N, D_p]
         
         # If we don't have position information, we can't do spatial fusion
-        if point_positions is None or center is None or scale is None:
+        if point_positions is None:
+            print("No point positions provided, returning original point features.")
             return point_features  # [N, D_p]
         
         # Get device
@@ -327,5 +328,8 @@ class CrossAttentionFusion(nn.Module):
         # Apply linear layers for feature extraction and projection 
         concatenated = self.act(self.linear1(concatenated))  # [N, concat_dim or D_p]
         fused_features = self.linear2(concatenated)  # [N, D_p]
+        
+        # Apply normalization to the output features
+        fused_features = self.norm2(fused_features)  # [N, D_p]
         
         return fused_features

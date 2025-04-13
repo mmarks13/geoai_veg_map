@@ -290,11 +290,34 @@ def generate_model_report(
     n_low_improvement_samples=0,
     n_high_improvement_samples=0,
     dpi=150,
-    naip_norm_stats_path="data/processed/model_data/naip_normalization_stats.pt" 
-
+    naip_norm_stats_path="data/processed/model_data/naip_normalization_stats.pt",
+    model_config=None
 ):
     """
     Generate a comprehensive PDF report for model evaluation.
+    
+    Parameters:
+    -----------
+    model_path : str
+        Path to the trained model checkpoint
+    validation_data_path : str
+        Path to the validation data
+    output_dir : str, optional
+        Directory to save the report
+    n_high_loss_samples : int, optional
+        Number of highest loss samples to include
+    n_random_samples : int, optional
+        Number of random samples to include
+    n_low_improvement_samples : int, optional
+        Number of lowest improvement samples to include
+    n_high_improvement_samples : int, optional
+        Number of highest improvement samples to include
+    dpi : int, optional
+        DPI for rasterized images in the report
+    naip_norm_stats_path : str, optional
+        Path to NAIP normalization statistics
+    model_config : MultimodalModelConfig, optional
+        Model configuration. If None, a default configuration will be used
     """
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -313,35 +336,38 @@ def generate_model_report(
     print(f"Using device: {device}")
     
     # Set model configuration
-    config = MultimodalModelConfig(
-        # Your existing configuration here
-        fnl_attn_hds=4,
-        feature_dim=256,     
-        k=15,                
-        up_attn_hds=4,       
-        up_ratio=2,          
-        pos_mlp_hdn=32,      
-       
-        use_naip=False,
-        use_uavsar=False,
-        img_embed_dim=64,    
-        img_num_patches=16,  
-        naip_dropout=0.05,
-        uavsar_dropout=0.05,
-        temporal_encoder='transformer',
-        fusion_type='cross_attention',
-        max_dist_ratio=1.5,
-        fusion_dropout=0.10,
-        fusion_num_heads=4,
-        position_encoding_dim=24,
-
-
-        # Point Transformer parameters
-        num_lcl_heads = 4,  # Local attention heads (for MultiHeadPointTransformerConv)
-        num_glbl_heads = 4,  # Global attention heads (for PosAwareGlobalFlashAttention)
-        pt_attn_dropout = 0.0
-    )
+    if model_config is None:
+        # Use default configuration if no config is provided
+        config = MultimodalModelConfig(
+            # Default configuration
+            fnl_attn_hds=4,
+            feature_dim=256,     
+            k=15,                
+            up_attn_hds=4,       
+            up_ratio=2,          
+            pos_mlp_hdn=32,      
+           
+            use_naip=False,
+            use_uavsar=False,
+            img_embed_dim=64,    
+            img_num_patches=16,  
+            naip_dropout=0.05,
+            uavsar_dropout=0.05,
+            temporal_encoder='transformer',
+            fusion_type='cross_attention',
+            max_dist_ratio=1.5,
+            fusion_dropout=0.10,
+            fusion_num_heads=4,
+            position_encoding_dim=24,
     
+            # Point Transformer parameters
+            num_lcl_heads = 4,  # Local attention heads (for MultiHeadPointTransformerConv)
+            num_glbl_heads = 4,  # Global attention heads (for PosAwareGlobalFlashAttention)
+            pt_attn_dropout = 0.0
+        )
+    else:
+        # Use provided configuration
+        config = model_config
     
     # Load the model
     model = load_model(model_path, config)
@@ -451,30 +477,27 @@ def generate_model_report(
         if n_high_loss_samples > 0:
             print(f"Adding {len(high_loss_samples)} highest loss samples...")
             for i, sample in enumerate(tqdm(high_loss_samples)):
-                generate_sample_page(pdf, sample, i, "high-loss", naip_norm_stats=naip_norm_stats)  # Pass stats here
+                generate_sample_page(pdf, sample, i, "high-loss", naip_norm_stats=naip_norm_stats)
         
         # Generate low improvement sample pages
         if n_low_improvement_samples > 0:
             print(f"Adding {len(low_improvement_samples)} lowest improvement samples...")
             for i, sample in enumerate(tqdm(low_improvement_samples)):
-                generate_sample_page(pdf, sample, i, "low-improvement", naip_norm_stats=naip_norm_stats)  # Pass stats here
+                generate_sample_page(pdf, sample, i, "low-improvement", naip_norm_stats=naip_norm_stats)
         
         # Generate high improvement sample pages
         if n_high_improvement_samples > 0:
             print(f"Adding {len(high_improvement_samples)} highest improvement samples...")
             for i, sample in enumerate(tqdm(high_improvement_samples)):
-                generate_sample_page(pdf, sample, i, "high-improvement", naip_norm_stats=naip_norm_stats)  # Pass stats here
+                generate_sample_page(pdf, sample, i, "high-improvement", naip_norm_stats=naip_norm_stats)
         
         # Generate random sample pages
         if n_random_samples > 0:
             print(f"Adding {len(random_samples)} random samples...")
             for i, sample in enumerate(tqdm(random_samples)):
-                generate_sample_page(pdf, sample, i, "random", naip_norm_stats=naip_norm_stats)  # Pass stats here
+                generate_sample_page(pdf, sample, i, "random", naip_norm_stats=naip_norm_stats)
     
     print(f"Report saved to {report_path}")
-
-
-
 
 def generate_overview_pages(pdf, results, model_path, dpi=150):
     """
@@ -548,8 +571,6 @@ def generate_overview_pages(pdf, results, model_path, dpi=150):
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     pdf.savefig(fig, dpi=dpi)
     plt.close(fig)
-
-
 
 def generate_sample_page(pdf, sample, index, sample_type, dpi=150, naip_norm_stats=None):
     """
@@ -652,14 +673,14 @@ def generate_sample_page(pdf, sample, index, sample_type, dpi=150, naip_norm_sta
         pdf.savefig(fig, dpi=dpi)
         plt.close(fig)
     
-        naip_data = sample.get('naip')
+    naip_data = sample.get('naip')
     if naip_data and 'images' in naip_data and naip_data['images'] is not None:
         try:
             # Create NAIP visualization with normalization stats
             naip_title = f"{title} - NAIP Imagery"
             naip_fig = plot_naip_imagery(
                 naip_data, 
-                naip_norm_stats=naip_norm_stats,  # Pass stats here
+                naip_norm_stats=naip_norm_stats,
                 bbox_overlay=bbox if bbox is not None else None,
                 title=naip_title
             )
@@ -678,21 +699,75 @@ def generate_sample_page(pdf, sample, index, sample_type, dpi=150, naip_norm_sta
             pdf.savefig(fig, dpi=dpi)
             plt.close(fig)
 
-
 if __name__ == "__main__":
     # Define paths
-    model_path = "/home/jovyan/geoai_veg_map/data/output/checkpoints/0407_LGPA_4e4_NoAugData_b5_baseline_k15_f256_b5_e40.pth"
+    model_path = "/home/jovyan/geoai_veg_map/data/output/checkpoints/0412_LGPA_3e4_256ft_b5_e40_heads_8-4-8-4-4-4_naip_uavsar_k15_f256_b5_e40.pth"
     validation_data_path = "data/processed/model_data/precomputed_validation_tiles.pt"
     output_dir = "data/output/reports"
     
+    # Define a base model configuration
+    custom_config = MultimodalModelConfig(
+        # Core model parameters
+        feature_dim=256,     # Feature dimension
+        k=15,                # Number of neighbors for KNN
+        up_ratio=2,          # Upsampling ratio
+        pos_mlp_hdn=16,      # Hidden dimension for positional MLP
+        pt_attn_dropout=0.10,
+        
+        # Granular attention head configurations
+        extractor_lcl_heads=8,  # Local attention heads for feature extractor
+        extractor_glbl_heads=4,  # Global attention heads for feature extractor
+        expansion_lcl_heads=8,  # Local attention heads for feature expansion
+        expansion_glbl_heads=4,  # Global attention heads for feature expansion
+        refinement_lcl_heads=4,  # Local attention heads for feature refinement
+        refinement_glbl_heads=4,  # Global attention heads for feature refinement
+        
+        # Deprecated/legacy parameters
+        num_lcl_heads=4,      # Local attention heads (for backward compatibility)
+        num_glbl_heads=4,     # Global attention heads (for backward compatibility)
+        up_attn_hds=4,        # Legacy parameter (upsampling attention heads)
+        fnl_attn_hds=2,       # Legacy parameter (final attention heads)
+        up_concat=True,       # Legacy parameter (no longer used)
+        up_beta=False,        # Legacy parameter
+        
+        # Modality flags
+        use_naip=True,
+        use_uavsar=True,
+        
+        # Imagery encoder parameters
+        img_embed_dim=128,    # Dimension of patch embeddings
+        img_num_patches=16,  # Number of output patch embeddings
+        naip_dropout=0.10,
+        uavsar_dropout=0.10,
+        temporal_encoder='transformer',
+        
+        # Fusion parameters
+        fusion_type='cross_attention',
+        max_dist_ratio=1.5,
+
+        # Cross attention fusion parameters
+        fusion_dropout=0.10,
+        fusion_num_heads=4,
+        position_encoding_dim=24,
+        
+        # Other parameters
+        attr_dim=3,
+        
+        # Checkpoint parameters (commented out in the original)
+        # checkpoint_path="data/output/checkpoints/baseline_20250402-073326/0402_baseline_k15_f256_b5_e30.pth",
+        # checkpoint_path="/home/jovyan/geoai_veg_map/data/output/checkpoints/0404_huber2m_3DEP_baseline_baseline_k15_f256_b6_e80.pth",
+        # layers_to_load=["feature_extractor.pt_conv1.convs.0.weight", "feature_extractor.pt_conv2.convs.0.weight"],
+        # layers_to_freeze=["feature_extractor.pt_conv1.convs.0.weight"]  # Freeze a subset of loaded layers
+    )
     # Generate the report
     generate_model_report(
         model_path=model_path,
         validation_data_path=validation_data_path,
         output_dir=output_dir,
-        n_high_loss_samples=20,         # Samples with highest prediction loss
-        n_low_improvement_samples=20,    # Samples where model didn't improve much over input
-        n_high_improvement_samples=20,   # Samples where model significantly improved over input
-        n_random_samples=50,            # Random samples from remaining tiles
-        dpi=150                          # Resolution for rasterized images
+        n_high_loss_samples=80,
+        n_low_improvement_samples=80,
+        n_high_improvement_samples=80,
+        n_random_samples=80,
+        dpi=150,
+        model_config=custom_config  
     )
