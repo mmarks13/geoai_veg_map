@@ -191,16 +191,112 @@ class TemporalGRUEncoder(nn.Module):
 
 
 
+class TemporalDifferenceModule(nn.Module):
+    """
+    Module that computes and processes temporal differences between frames
+    with learned non-linear aggregation and consideration of time intervals
+    """
+    def __init__(self, embed_dim, dropout=0.1):
+        super().__init__()
+        
+        # MLP for processing frame differences with time interval information
+        self.diff_mlp = nn.Sequential(
+            nn.Linear(embed_dim + 1, embed_dim),  # +1 for time interval
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim, embed_dim)
+        )
+        
+        # Attention-based aggregation for differences
+        self.diff_attention = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=2,  
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        # Query vector for attention-based aggregation
+        self.query_vector = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        nn.init.normal_(self.query_vector, mean=0, std=0.02)
+        
+        # Layer norm for pre-attention normalization
+        self.norm = nn.LayerNorm(embed_dim)
+        
+    def forward(self, x, relative_dates=None):
+        """
+        Args:
+            x: Temporal sequence of embeddings [N, T, D]
+                N: Number of patches
+                T: Number of temporal frames
+                D: Embedding dimension
+            relative_dates: Relative days from reference date [T, 1] or [T]
+        Returns:
+            diff_features: Aggregated difference features [N, D]
+        """
+        N, T, D = x.shape
+        
+        # Skip if we have only one frame
+        if T <= 1:
+            return torch.zeros(N, D, device=x.device)
+        
+        # Compute temporal differences (embeddings)
+        diffs = x[:, 1:, :] - x[:, :-1, :]  # [N, T-1, D]
+        
+        # Process time intervals if available
+        if relative_dates is not None:
+            # Ensure relative_dates has the right shape
+            if relative_dates.dim() == 1:
+                relative_dates = relative_dates.unsqueeze(1)  # [T, 1]
+            
+            # Compute time intervals between consecutive frames
+            time_diffs = relative_dates[1:] - relative_dates[:-1]  # [T-1, 1]
+            
+            # Normalize time differences
+            # This helps with numerical stability
+            time_diffs = time_diffs / (time_diffs.abs().max() + 1e-6)
+            
+            # Expand time differences to match batch dimension
+            time_diffs = time_diffs.expand(N, T-1, 1)  # [N, T-1, 1]
+            
+            # Concatenate embedding differences with time differences
+            diffs_with_time = torch.cat([diffs, time_diffs], dim=2)  # [N, T-1, D+1]
+            
+            # Process differences through MLP
+            processed_diffs = self.diff_mlp(diffs_with_time)  # [N, T-1, D]
+        else:
+            # If no time information, just process the embedding differences
+            processed_diffs = self.diff_mlp(diffs)  # [N, T-1, D]
+        
+        # Apply layer normalization before attention
+        processed_diffs = self.norm(processed_diffs)  # [N, T-1, D]
+        
+        # Expand query vector to batch size
+        query = self.query_vector.expand(N, -1, -1)  # [N, 1, D]
+        
+        # Attention-based aggregation of differences
+        diff_agg, _ = self.diff_attention(
+            query=query,                 # [N, 1, D]
+            key=processed_diffs,         # [N, T-1, D]
+            value=processed_diffs        # [N, T-1, D]
+        )  # [N, 1, D]
+        
+        # Remove singleton dimension
+        diff_agg = diff_agg.squeeze(1)  # [N, D]
+        
+        return diff_agg
+
+
+
 class TemporalTransformerEncoder(nn.Module):
     """
     Lightweight transformer-based encoder for aggregating temporal information
-    with support for relative date-based positional encoding
+    with support for relative date-based positional encoding and temporal difference module for better change detection
     """
     def __init__(
         self, 
         embed_dim, 
-        num_heads=4, 
-        dropout=0.1, 
+        num_heads=2, 
+        dropout=0.05, 
         num_layers=2,
         ff_multiplier=2,
         max_temporal_len=20
@@ -237,9 +333,21 @@ class TemporalTransformerEncoder(nn.Module):
         self.temporal_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         nn.init.normal_(self.temporal_token, mean=0, std=0.02)
         
-        # Final projection
-        self.projection = nn.Linear(embed_dim, embed_dim)
-    
+        # Temporal difference module
+        self.diff_module = TemporalDifferenceModule(
+            embed_dim=embed_dim,
+            dropout=dropout
+        )
+        
+        # Fusion layer to combine transformer and difference features
+        self.fusion = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim, embed_dim)
+        )
+        
     def forward(self, x, relative_dates=None):
         """
         Args:
@@ -269,27 +377,35 @@ class TemporalTransformerEncoder(nn.Module):
             date_pos_enc = date_pos_enc.unsqueeze(0).expand(N, -1, -1)  # [N, T, D]
             
             # Apply date-based positional encoding
-            x = x + date_pos_enc  # [N, T, D]
+            x_with_pos = x + date_pos_enc  # [N, T, D]
         else:
             # Fallback to standard positional encoding
             pos_enc = self.temporal_pos_encoding[:, :T, :]
-            x = x + pos_enc  # [N, T, D]
+            x_with_pos = x + pos_enc  # [N, T, D]
         
-        # Prepend temporal token to each patch's sequence
+        # Process through temporal difference module
+        diff_features = self.diff_module(x_with_pos, relative_dates)  # [N, D]
+        
+        # Prepend temporal token for transformer processing
         temp_tokens = self.temporal_token.expand(N, -1, -1)  # [N, 1, D]
-        x = torch.cat([temp_tokens, x], dim=1)  # [N, T+1, D]
+        x_with_token = torch.cat([temp_tokens, x_with_pos], dim=1)  # [N, T+1, D]
         
         # Apply transformer encoder
-        x = self.transformer_encoder(x)  # [N, T+1, D]
+        transformer_output = self.transformer_encoder(x_with_token)  # [N, T+1, D]
         
         # Extract the temporal token which has aggregated information
-        aggregated = x[:, 0, :]  # [N, D]
+        transformer_features = transformer_output[:, 0, :]  # [N, D]
         
-        # Project to final dimension
-        aggregated = self.projection(aggregated)  # [N, D]
+        # Combine transformer features with difference features
+        combined = torch.cat([transformer_features, diff_features], dim=1)  # [N, 2*D]
+        
+        # Fuse the features
+        fused = self.fusion(combined)  # [N, D]
+        
+        # Normalize the final features
+        aggregated = F.normalize(fused, p=2, dim=1)
         
         return aggregated
-
 
 
 class NAIPEncoder(nn.Module):

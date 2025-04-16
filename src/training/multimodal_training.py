@@ -48,33 +48,45 @@ from src.models.multimodal_model import MultimodalModelConfig, MultimodalPointUp
 import math
 from torch.optim.lr_scheduler import _LRScheduler
 
+
 class OneCycleLR(_LRScheduler):
     """
-    One Cycle Learning Rate policy.
+    One Cycle Learning Rate policy supporting multiple parameter groups.
     """
     def __init__(self, optimizer, max_lr, total_steps, pct_start=0.3, 
                  div_factor=25.0, final_div_factor=1e4, last_epoch=-1):
-        self.max_lr = max_lr
+        # Ensure max_lr is a list with one element per param group.
+        if isinstance(max_lr, (list, tuple)):
+            self.max_lr = list(max_lr)
+        else:
+            self.max_lr = [max_lr] * len(optimizer.param_groups)
+        
         self.total_steps = total_steps
         self.pct_start = pct_start
         self.div_factor = div_factor
         self.final_div_factor = final_div_factor
-        self.initial_lr = max_lr / div_factor
-        self.min_lr = self.initial_lr / final_div_factor
+        
+        # Compute initial and minimum LRs for each param group.
+        self.initial_lr = [lr / div_factor for lr in self.max_lr]
+        self.min_lr = [init_lr / final_div_factor for init_lr in self.initial_lr]
+        
         self.warmup_steps = int(total_steps * pct_start)
         super(OneCycleLR, self).__init__(optimizer, last_epoch)
         
     def get_lr(self):
         if self.last_epoch < self.warmup_steps:
-            # Warmup phase: linear increase from initial_lr to max_lr
+            # Warmup phase: linear increase from initial_lr to max_lr for each group.
             alpha = self.last_epoch / self.warmup_steps
-            return [self.initial_lr + alpha * (self.max_lr - self.initial_lr) for _ in self.base_lrs]
+            return [init_lr + alpha * (max_lr - init_lr)
+                    for init_lr, max_lr in zip(self.initial_lr, self.max_lr)]
         else:
-            # Cooldown phase: cosine annealing from max_lr to min_lr
+            # Cooldown phase: cosine annealing from max_lr to min_lr for each group.
             progress = (self.last_epoch - self.warmup_steps) / (self.total_steps - self.warmup_steps)
             alpha = 0.5 * (1 + math.cos(math.pi * progress))
-            return [self.min_lr + alpha * (self.max_lr - self.min_lr) for _ in self.base_lrs]
+            return [min_lr + alpha * (max_lr - min_lr)
+                    for min_lr, max_lr in zip(self.min_lr, self.max_lr)]
 
+                
 class WarmupReduceLROnPlateau(_LRScheduler):
     """
     Adds a linear warmup phase to ReduceLROnPlateau scheduler.
@@ -88,7 +100,7 @@ class WarmupReduceLROnPlateau(_LRScheduler):
         **kwargs: Additional arguments to pass to ReduceLROnPlateau
     """
     def __init__(self, optimizer, max_lr, total_epochs, pct_start=0.3, 
-                 div_factor=25.0, mode='min', factor=0.9, patience=2, 
+                 div_factor=25.0, mode='min', factor=0.5, patience=3, 
                  verbose=False, **kwargs):
         self.max_lr = max_lr
         self.total_epochs = total_epochs
@@ -314,11 +326,7 @@ def process_multimodal_batch(model, batch, device):
 def create_multimodal_model(device, config: MultimodalModelConfig):
     """
     Create a multimodal point upsampling model based on configuration.
-    Optionally initialize with specific layers from a checkpoint and freeze them.
-    
-    Args:
-        device: The device to load the model onto
-        config: MultimodalModelConfig object with optional checkpoint_path, layers_to_load, and layers_to_freeze
+    Returns the model and a set of parameter names that were loaded from checkpoint.
     """
     # Create the model with default initialization
     model = MultimodalPointUpsampler(config)
@@ -354,8 +362,8 @@ def create_multimodal_model(device, config: MultimodalModelConfig):
         # Print detailed info about what's being loaded
         print(f"\nLoading {len(filtered_dict)} layers from checkpoint: {config.checkpoint_path}")
         print("Loaded layers:")
-        for idx, layer_name in enumerate(sorted(filtered_dict.keys())):
-            print(f"  {idx+1}. {layer_name}")
+        # for idx, layer_name in enumerate(sorted(filtered_dict.keys())):
+        #     print(f"  {idx+1}. {layer_name}")
         
         # Update model state with the filtered weights
         model_dict.update(filtered_dict)
@@ -401,7 +409,7 @@ def create_multimodal_model(device, config: MultimodalModelConfig):
     print(f"  - Trainable parameters: {trainable_params:,} ({trainable_params/total_params:.2%})")
     print(f"  - Frozen parameters: {total_params - trainable_params:,} ({(total_params - trainable_params)/total_params:.2%})")
     
-    return model
+    return model, loaded_layers  # Return both the model and loaded layers
 
 
 def create_multimodal_shards(dataset, world_size, temp_dir, prefix, 
@@ -622,19 +630,12 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
                            tensorboard_log_dir=None, enable_debug=False,
                            accumulation_steps=1, visualize_samples=False, 
                            lr_scheduler_type="plateau",
-                           max_lr=5e-4, pct_start=0.3, div_factor=25.0, final_div_factor=1e4):
+                           max_lr=5e-4, pct_start=0.3, div_factor=25.0, final_div_factor=1e4,
+                           dscrm_lr_ratio=10.0):
     """
-    Worker function for training the multimodal model.
-    
-    Args:
-        enable_debug: Whether to enable debugging features (default: False)
-        lr_scheduler_type: Type of learning rate scheduler to use ("plateau" or "onecycle")
-        max_lr: Maximum learning rate for OneCycleLR
-        pct_start: Percentage of total steps for warmup phase in OneCycleLR
-        div_factor: Initial learning rate = max_lr / div_factor
-        final_div_factor: Final learning rate = initial_lr / final_div_factor
+    Worker function for training the multimodal model with discriminative learning rates.
     """
-    # Setup DDP environment
+    # Setup DDP environment 
     setup_successful = setup_ddp(rank, world_size, port)
     if not setup_successful:
         print(f"Rank {rank}: Failed to set up DDP")
@@ -657,7 +658,8 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
         writer.add_text('Config/model_parameters', config_str, 0)
         writer.add_text('Config/training_parameters', 
                       f"batch_size: {batch_size}\nnum_epochs: {num_epochs}\n" +
-                      f"early_stopping_patience: {early_stopping_patience}", 0)
+                      f"early_stopping_patience: {early_stopping_patience}\n" +
+                      f"max_lr: {max_lr}\ndscrm_lr_ratio: {dscrm_lr_ratio}", 0)
         
         # Basic GPU monitoring if debugging is enabled
         if enable_debug:
@@ -673,7 +675,8 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
         logger = setup_logging(model_name, log_file)
         logger.info(f"Starting training with model_config: {asdict(model_config)}")
         logger.info(f"Training parameters: batch_size: {batch_size}, "
-                    f"num_epochs: {num_epochs}, early_stopping_patience: {early_stopping_patience}")
+                    f"num_epochs: {num_epochs}, early_stopping_patience: {early_stopping_patience}, "
+                    f"max_lr: {max_lr}, dscrm_lr_ratio: {dscrm_lr_ratio}")
         if tensorboard_log_dir:
             logger.info(f"TensorBoard logging enabled at: {tensorboard_log_dir}")
             logger.info(f"Debug mode: {enable_debug}")
@@ -720,46 +723,56 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
     )
 
     # Create the multimodal model and move it to the appropriate GPU
-    model = create_multimodal_model(device, model_config)
+    # Now also get the set of loaded layer names
+    model, loaded_layers = create_multimodal_model(device, model_config)
+    
+    # Group parameters based on whether they were loaded from checkpoint
+    pretrained_params = []
+    new_params = []
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:  # Only include trainable parameters
+            if name in loaded_layers:
+                pretrained_params.append(param)
+            else:
+                new_params.append(param)
+    
+    # Calculate learning rates for each group
+    base_lr = max_lr  # Learning rate for new parameters
+    pretrained_lr = base_lr / dscrm_lr_ratio  # Reduced learning rate for pretrained parameters
+    
+    if rank == 0:
+        print(f"\nApplying discriminative learning rates:")
+        print(f"  - New parameters: {len(new_params)} parameters with lr={base_lr}")
+        print(f"  - Pretrained parameters: {len(pretrained_params)} parameters with lr={pretrained_lr}")
+    
+    # Set up parameter groups for the optimizer with different starting LRs
+    param_groups = [
+        {'params': pretrained_params, 'lr': pretrained_lr if lr_scheduler_type == "plateau" else pretrained_lr/div_factor},
+        {'params': new_params, 'lr': base_lr if lr_scheduler_type == "plateau" else base_lr/div_factor}
+    ]
+    
+    # Initialize optimizer with parameter groups
+    optimizer = optim.Adam(param_groups)
+
+    # wrap the model in DDP after setting up the optimizer
     if world_size > 1:
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
-
-    if rank == 0:
-        total_params, trainable_params = count_model_parameters(model)
-        model_size = get_model_size_bytes(model)
-        logger.info(f"Total parameters: {total_params:,}")
-        logger.info(f"Trainable parameters: {trainable_params:,}")
-        logger.info(f"Model size: {format_size(model_size)}")
-        
-        # Log model info to TensorBoard
-        if writer is not None:
-            writer.add_text('Model/parameters', 
-                          f"Total parameters: {total_params:,}\n" +
-                          f"Trainable parameters: {trainable_params:,}\n" +
-                          f"Model size: {format_size(model_size)}", 0)
-            
-            # Add model structure text
-            model_structure = str(model.module if isinstance(model, DDP) else model)
-            writer.add_text('Model/structure', f'```\n{model_structure}\n```', 0)
 
     # Calculate total steps for OneCycleLR
     total_steps = (len(train_loader) // accumulation_steps) * num_epochs
     
-    # Initialize optimizer with appropriate initial learning rate
-    initial_lr = max_lr if lr_scheduler_type == "plateau" else max_lr / div_factor
-    optimizer = optim.Adam(model.parameters(), lr=initial_lr)
-    
-    # Initialize appropriate scheduler based on type
+    # Initialize scheduler based on type
     if lr_scheduler_type == "onecycle":
         scheduler = OneCycleLR(
-            optimizer, 
-            max_lr=max_lr,
+            optimizer,
+            max_lr=[pretrained_lr, base_lr],  # List of maximum LRs for each param group
             total_steps=total_steps,
             pct_start=pct_start,
             div_factor=div_factor,
             final_div_factor=final_div_factor
         )
-        scheduler_batch_update = True  # Flag to indicate batch-level updates
+        scheduler_batch_update = True
     else:  # "plateau" with warmup
         scheduler = WarmupReduceLROnPlateau(
             optimizer, 
@@ -778,10 +791,10 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
 
     # Log LR scheduler info
     if rank == 0 and logger is not None:
-        logger.info(f"Using {lr_scheduler_type} learning rate scheduler")
+        logger.info(f"Using {lr_scheduler_type} learning rate scheduler with discriminative rates")
+        logger.info(f"Pretrained params LR: {pretrained_lr}, New params LR: {base_lr}")
         if lr_scheduler_type == "onecycle":
-            logger.info(f"OneCycleLR parameters: max_lr={max_lr}, " 
-                      f"pct_start={pct_start}, div_factor={div_factor}, "
+            logger.info(f"OneCycleLR parameters: pct_start={pct_start}, div_factor={div_factor}, "
                       f"final_div_factor={final_div_factor}")
 
     best_val_loss = float('inf')
@@ -849,7 +862,10 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 epochs_without_improvement = 0
-                best_model_state = model.module.state_dict() if world_size > 1 else model.state_dict()
+                if world_size > 1 and hasattr(model, 'module'):
+                    best_model_state = model.module.state_dict()
+                else:
+                    best_model_state = model.state_dict()
                 logger.info(f"New best validation loss: {best_val_loss:.6f}")
                 
                 # Log the best model so far
@@ -943,7 +959,9 @@ def train_multimodal_model(train_dataset=None,
                          max_lr=5e-4,
                          pct_start=0.3,
                          div_factor=25.0,
-                         final_div_factor=1e4):
+                         final_div_factor=1e4,
+                         dscrm_lr_ratio=10.0):
+
     """
     Unified training entry point for the multimodal model with shard caching.
     """
@@ -985,7 +1003,6 @@ def train_multimodal_model(train_dataset=None,
     
     # Check if cached shards exist and should be used
     cached_shards_exist = all(os.path.exists(p) for p in train_cache_paths + val_cache_paths)
-    
     if use_cached_shards and cached_shards_exist:
         print(f"Using cached shards with key: {cache_key}")
         train_shard_paths = train_cache_paths
@@ -1086,25 +1103,26 @@ def train_multimodal_model(train_dataset=None,
             p = torch.multiprocessing.Process(
                 target=_train_multimodal_worker,
                 args=(rank, world_size,
-                      train_shard_paths[rank],
-                      val_shard_paths[rank],
-                      full_model_name,
-                      batch_size,
-                      checkpoint_dir,
-                      model_config,
-                      port,
-                      num_epochs,
-                      log_file,
-                      early_stopping_patience,
-                      tensorboard_log_dir,
-                      enable_debug,
-                      accumulation_steps,
-                      visualize_samples,
-                      lr_scheduler_type,    # New parameter
-                      max_lr,               # New parameter
-                      pct_start,            # New parameter
-                      div_factor,           # New parameter
-                      final_div_factor)     # New parameter
+                    train_shard_paths[rank],
+                    val_shard_paths[rank],
+                    full_model_name,
+                    batch_size,
+                    checkpoint_dir,
+                    model_config,
+                    port,
+                    num_epochs,
+                    log_file,
+                    early_stopping_patience,
+                    tensorboard_log_dir,
+                    enable_debug,
+                    accumulation_steps,
+                    visualize_samples,
+                    lr_scheduler_type,    
+                    max_lr,               
+                    pct_start,            
+                    div_factor,           
+                    final_div_factor,
+                    dscrm_lr_ratio)    
             )
             p.start()
             processes.append(p)
@@ -1143,7 +1161,8 @@ def train_multimodal_model(train_dataset=None,
             max_lr=max_lr,
             pct_start=pct_start,
             div_factor=div_factor,
-            final_div_factor=final_div_factor
+            final_div_factor=final_div_factor,
+            dscrm_lr_ratio=dscrm_lr_ratio  
         )
     
     # Clean up temporary shards directory if it was created
@@ -1162,7 +1181,9 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
                        enable_debug=False, use_cached_shards=False,
                        shard_cache_dir="data/output/cached_shards",
                        lr_scheduler_type="onecycle", max_lr=5e-4, pct_start=0.3, 
-                       div_factor=25.0, final_div_factor=1e4):
+                       div_factor=25.0, final_div_factor=1e4,
+                       temp_dir_root="data/output/tmp_shards",
+                       dscrm_lr_ratio=10.0):  # Add this parameter
     """
     Run ablation studies with different modality combinations.
     
@@ -1171,25 +1192,191 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
         val_dataset: Validation dataset (optional if val_data_path provided)
         train_data_paths: List of paths to training data files
         val_data_path: Path to validation data file
-        [other parameters remain the same]
+        base_config: Base configuration to use for all ablation studies
+        checkpoint_dir: Base directory for checkpoints
+        model_name: Base name for the model
+        batch_size: Batch size for training
+        epochs: Number of epochs to train for
+        enable_debug: Whether to enable debugging features
+        use_cached_shards: Whether to use cached shards if available
+        shard_cache_dir: Directory for cached shards
+        lr_scheduler_type: Type of learning rate scheduler ("plateau" or "onecycle")
+        max_lr: Maximum learning rate
+        pct_start: Percentage of total steps for warmup phase
+        div_factor: Division factor for initial learning rate
+        final_div_factor: Final division factor for learning rate
+        dscrm_lr_ratio: Ratio for discriminative learning rates (default: 10.0)
     """
     import os
     import time
+    import shutil
+    import json
+    import torch
     from dataclasses import asdict
+    import torch.distributed as dist
     
     # Import here to ensure we're using the same class reference
     from src.models.multimodal_model import MultimodalModelConfig
     
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     
+    # Create a common directory for all final models
+    all_final_models_dir = os.path.join(checkpoint_dir, f"all_ablation_results_{timestamp}")
+    os.makedirs(all_final_models_dir, exist_ok=True)
+    
     # Log scheduler information
     print(f"Using {lr_scheduler_type} learning rate scheduler for all runs")
     if lr_scheduler_type == "onecycle":
         print(f"OneCycleLR parameters: max_lr={max_lr}, pct_start={pct_start}, "
               f"div_factor={div_factor}, final_div_factor={final_div_factor}")
+        print(f"Using discriminative learning rate ratio: {dscrm_lr_ratio}")
     
-
-      # 1. Baseline (3DEP Only)
+    results = {}
+    
+    # Define a function to copy the final model to the common directory
+    def copy_final_model(src_dir, ablation_type):
+        """Copy the final best model from a specific ablation run to the common directory."""
+        full_model_name = f"{model_name}_{ablation_type}"
+        src_path = os.path.join(src_dir, "final_best", f"{full_model_name}_final_best.pth")
+        if os.path.exists(src_path):
+            dst_path = os.path.join(all_final_models_dir, f"{full_model_name}_final_best.pth")
+            shutil.copy(src_path, dst_path)
+            print(f"Copied final model for {ablation_type} to {dst_path}")
+            
+            # Also copy the best loss file
+            loss_src = os.path.join(src_dir, "final_best", f"{full_model_name}_best_loss.json")
+            if os.path.exists(loss_src):
+                loss_dst = os.path.join(all_final_models_dir, f"{full_model_name}_best_loss.json")
+                shutil.copy(loss_src, loss_dst)
+                print(f"Copied best loss info for {ablation_type} to {loss_dst}")
+                
+            return dst_path
+        else:
+            print(f"Warning: Final model for {ablation_type} not found at {src_path}")
+            return None
+    
+    # Function to evaluate a pre-trained model without training
+    def evaluate_pretrained_model(model_config, val_shard_path, result_dir, model_name_suffix):
+        """
+        Evaluate a pre-trained model on validation data without training.
+        
+        Args:
+            model_config: Model configuration
+            val_shard_path: Path to validation data shard
+            result_dir: Directory to save results
+            model_name_suffix: Suffix for model name
+        
+        Returns:
+            Validation loss
+        """
+        from torch.utils.data import DataLoader
+        import torch.nn as nn
+        import torch.optim as optim
+        
+        # Set up device
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        
+        # Load the validation dataset
+        val_dataset = ShardedMultimodalPointCloudDataset(
+            val_shard_path,
+            model_config.k,
+            use_naip=model_config.use_naip,
+            use_uavsar=model_config.use_uavsar
+        )
+        
+        # Create data loader
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=multimodal_variable_size_collate
+        )
+        
+        # Create the model and load weights
+        model = create_multimodal_model(device, model_config)
+        model.eval()
+        
+        # Evaluate the model
+        val_loss_total = 0.0
+        batch_count = 0
+        
+        # Helper function to convert tensors in a batch to float32
+        def convert_batch_to_float32(batch):
+            dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list, tile_id_list = batch
+            
+            # Convert point cloud tensors to float32
+            dep_list_float32 = [dep.float() for dep in dep_list]
+            uav_list_float32 = [uav.float() for uav in uav_list]
+            edge_list_float32 = [edge.long() for edge in edge_list]  # Keep edge_index as long
+            
+            # Convert attributes if not None
+            attr_list_float32 = [attr.float() if attr is not None else None for attr in attr_list]
+            
+            # Convert center and scale if not None
+            center_list_float32 = [center.float() if center is not None else None for center in center_list]
+            scale_list_float32 = [scale.float() if scale is not None else None for scale in scale_list]
+            bbox_list_float32 = [bbox.float() if bbox is not None else None for bbox in bbox_list]
+            
+            # Convert image data if available
+            naip_list_float32 = []
+            for naip_data in naip_list:
+                if naip_data is not None:
+                    naip_float32 = {}
+                    for k, v in naip_data.items():
+                        if k == 'images' and v is not None:
+                            naip_float32[k] = v.float()
+                        else:
+                            naip_float32[k] = v
+                    naip_list_float32.append(naip_float32)
+                else:
+                    naip_list_float32.append(None)
+                    
+            uavsar_list_float32 = []
+            for uavsar_data in uavsar_list:
+                if uavsar_data is not None:
+                    uavsar_float32 = {}
+                    for k, v in uavsar_data.items():
+                        if k == 'images' and v is not None:
+                            uavsar_float32[k] = v.float()
+                        else:
+                            uavsar_float32[k] = v
+                    uavsar_list_float32.append(uavsar_float32)
+                else:
+                    uavsar_list_float32.append(None)
+            
+            return (dep_list_float32, uav_list_float32, edge_list_float32, attr_list_float32, 
+                    naip_list_float32, uavsar_list_float32, center_list_float32, 
+                    scale_list_float32, bbox_list_float32, tile_id_list)
+        
+        with torch.no_grad():
+            for batch in val_loader:
+                # Convert batch to float32 before processing
+                batch_float32 = convert_batch_to_float32(batch)
+                batch_loss = process_multimodal_batch(model, batch_float32, device)
+                val_loss_total += batch_loss.item()
+                batch_count += 1
+        
+        avg_val_loss = val_loss_total / batch_count if batch_count > 0 else float('inf')
+        
+        # Save the model and results
+        os.makedirs(os.path.join(result_dir, "final_best"), exist_ok=True)
+        full_model_name = f"{model_name}_{model_name_suffix}"
+        
+        # Save the model state
+        final_model_path = os.path.join(result_dir, "final_best", f"{full_model_name}_final_best.pth")
+        torch.save(model.state_dict(), final_model_path)
+        
+        # Save the validation loss
+        best_loss_file = os.path.join(result_dir, "final_best", f"{full_model_name}_best_loss.json")
+        with open(best_loss_file, 'w') as f:
+            json.dump({'best_val_loss': avg_val_loss}, f)
+        
+        print(f"Evaluated pre-trained model with validation loss: {avg_val_loss:.6f}")
+        print(f"Saved model state to: {final_model_path}")
+        
+        return avg_val_loss
+    
+    # 1. Baseline (3DEP Only)
     print("\n\n========== Running Baseline (3DEP Only) ==========\n")
     baseline_config_dict = {k: v for k, v in asdict(base_config).items()}
     baseline_config_dict['use_naip'] = False
@@ -1200,61 +1387,82 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
     baseline_dir = os.path.join(checkpoint_dir, f"baseline_{timestamp}")
     os.makedirs(baseline_dir, exist_ok=True)
     
-    train_multimodal_model(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        train_data_paths=train_data_paths,
-        val_data_path=val_data_path,
-        model_name=model_name,
-        batch_size=batch_size,
-        checkpoint_dir=baseline_dir,
-        model_config=baseline_config,
-        num_epochs=epochs,
-        enable_debug=enable_debug,
-        visualize_samples=enable_debug,
-        use_cached_shards=use_cached_shards,
-        shard_cache_dir=shard_cache_dir,
-        lr_scheduler_type=lr_scheduler_type,
-        max_lr=max_lr,
-        pct_start=pct_start,
-        div_factor=div_factor,
-        final_div_factor=final_div_factor
-    )
+    # Use a specific model name for this ablation
+    baseline_model_name = "baseline"
+    
+    # Check if we have a pre-trained model for baseline
+    has_pretrained_baseline = (hasattr(base_config, 'checkpoint_path') and 
+                               base_config.checkpoint_path is not None and 
+                               base_config.checkpoint_path != '')
+    
+    if has_pretrained_baseline:
+        print(f"Using pre-trained baseline model from: {base_config.checkpoint_path}")
+        
+        # Generate validation shard
+        timestamp_temp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_dir = os.path.join(temp_dir_root, f"multimodal_shards_{timestamp_temp}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Load val dataset if needed
+        if val_dataset is None and val_data_path is not None:
+            print(f"Loading validation data from {val_data_path}...")
+            val_dataset = torch.load(val_data_path, weights_only=False)
+        
+        # Create validation shard
+        print("Creating validation data shard for pre-trained model evaluation...")
+        val_shard_paths = create_multimodal_shards(
+            val_dataset, 1, temp_dir, "val", 
+            use_naip=baseline_config.use_naip, 
+            use_uavsar=baseline_config.use_uavsar
+        )
+        
+        # Evaluate the pre-trained model
+        baseline_val_loss = evaluate_pretrained_model(
+            baseline_config, 
+            val_shard_paths[0], 
+            baseline_dir, 
+            baseline_model_name
+        )
+        
+        # Clean up temp directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+    else:
+        # Train the baseline model as usual
+        baseline_val_loss = train_multimodal_model(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            train_data_paths=train_data_paths,
+            val_data_path=val_data_path,
+            model_name=f"{model_name}_{baseline_model_name}",
+            batch_size=batch_size,
+            checkpoint_dir=baseline_dir,
+            model_config=baseline_config,
+            num_epochs=epochs,
+            enable_debug=enable_debug,
+            visualize_samples=enable_debug,
+            use_cached_shards=use_cached_shards,
+            shard_cache_dir=shard_cache_dir,
+            lr_scheduler_type=lr_scheduler_type,
+            max_lr=max_lr,
+            pct_start=pct_start,
+            div_factor=div_factor,
+            final_div_factor=final_div_factor,
+            dscrm_lr_ratio=dscrm_lr_ratio
+        )
+    
+    # Print GPU memory usage
+    allocated_memory = torch.cuda.memory_allocated() / (1024 ** 2)  # Convert to MB
+    reserved_memory = torch.cuda.memory_reserved() / (1024 ** 2)  # Convert to MB
+    print(f"GPU Memory Usage: Allocated: {allocated_memory:.2f} MB, Reserved: {reserved_memory:.2f} MB")
 
+    # Clear GPU memory
+    torch.cuda.empty_cache()
+    gc.collect()
 
-    # 4. Both SAR & Optical
-    print("\n\n========== Running Combined (SAR & Optical) ==========\n")
-    combined_config_dict = {k: v for k, v in asdict(base_config).items()}
-    combined_config_dict['use_naip'] = True
-    combined_config_dict['use_uavsar'] = True
-    combined_config = MultimodalModelConfig(**combined_config_dict)
-    
-    # Make a unique directory for this run
-    combined_dir = os.path.join(checkpoint_dir, f"combined_{timestamp}")
-    os.makedirs(combined_dir, exist_ok=True)
-    
-    train_multimodal_model(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        train_data_paths=train_data_paths,
-        val_data_path=val_data_path,
-        model_name=model_name,
-        batch_size=batch_size,
-        checkpoint_dir=combined_dir,
-        model_config=combined_config,
-        num_epochs=epochs,
-        enable_debug=enable_debug,
-        visualize_samples=enable_debug,
-        use_cached_shards=use_cached_shards,
-        shard_cache_dir=shard_cache_dir,
-        lr_scheduler_type=lr_scheduler_type,
-        max_lr=max_lr,
-        pct_start=pct_start,
-        div_factor=div_factor,
-        final_div_factor=final_div_factor
-    )
-    
-  
+    # Copy the final model to the common directory
+    baseline_model_path = copy_final_model(baseline_dir, baseline_model_name)
+    results["baseline"] = {"val_loss": baseline_val_loss, "model_path": baseline_model_path}
     
     # 2. SAR-Only
     print("\n\n========== Running SAR-Only ==========\n")
@@ -1267,12 +1475,15 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
     sar_dir = os.path.join(checkpoint_dir, f"sar_only_{timestamp}")
     os.makedirs(sar_dir, exist_ok=True)
     
-    train_multimodal_model(
+    # Use a specific model name for this ablation
+    sar_model_name = "sar_only"
+    
+    sar_val_loss = train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         train_data_paths=train_data_paths,
         val_data_path=val_data_path,
-        model_name=model_name,
+        model_name=f"{model_name}_{sar_model_name}",
         batch_size=batch_size,
         checkpoint_dir=sar_dir,
         model_config=sar_config,
@@ -1285,8 +1496,13 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
         max_lr=max_lr,
         pct_start=pct_start,
         div_factor=div_factor,
-        final_div_factor=final_div_factor
+        final_div_factor=final_div_factor,
+        dscrm_lr_ratio=dscrm_lr_ratio
     )
+    
+    # Copy the final model to the common directory
+    sar_model_path = copy_final_model(sar_dir, sar_model_name)
+    results["sar_only"] = {"val_loss": sar_val_loss, "model_path": sar_model_path}
     
     # 3. Optical-Only
     print("\n\n========== Running Optical-Only ==========\n")
@@ -1299,12 +1515,15 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
     optical_dir = os.path.join(checkpoint_dir, f"optical_only_{timestamp}")
     os.makedirs(optical_dir, exist_ok=True)
     
-    train_multimodal_model(
+    # Use a specific model name for this ablation
+    optical_model_name = "optical_only"
+    
+    optical_val_loss = train_multimodal_model(
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         train_data_paths=train_data_paths,
         val_data_path=val_data_path,
-        model_name=model_name,
+        model_name=f"{model_name}_{optical_model_name}",
         batch_size=batch_size,
         checkpoint_dir=optical_dir,
         model_config=optical_config,
@@ -1317,7 +1536,296 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
         max_lr=max_lr,
         pct_start=pct_start,
         div_factor=div_factor,
-        final_div_factor=final_div_factor
+        final_div_factor=final_div_factor,
+        dscrm_lr_ratio=dscrm_lr_ratio
     )
     
-    print("\nAll ablation studies completed.")
+    # Copy the final model to the common directory
+    optical_model_path = copy_final_model(optical_dir, optical_model_name)
+    results["optical_only"] = {"val_loss": optical_val_loss, "model_path": optical_model_path}
+    
+    # 4. Both SAR & Optical
+    print("\n\n========== Running Combined (SAR & Optical) ==========\n")
+    combined_config_dict = {k: v for k, v in asdict(base_config).items()}
+    combined_config_dict['use_naip'] = True
+    combined_config_dict['use_uavsar'] = True
+    combined_config = MultimodalModelConfig(**combined_config_dict)
+    
+    # Make a unique directory for this run
+    combined_dir = os.path.join(checkpoint_dir, f"combined_{timestamp}")
+    os.makedirs(combined_dir, exist_ok=True)
+    
+    # Use a specific model name for this ablation
+    combined_model_name = "combined"
+    
+    combined_val_loss = train_multimodal_model(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        train_data_paths=train_data_paths,
+        val_data_path=val_data_path,
+        model_name=f"{model_name}_{combined_model_name}",
+        batch_size=batch_size,
+        checkpoint_dir=combined_dir,
+        model_config=combined_config,
+        num_epochs=epochs,
+        enable_debug=enable_debug,
+        visualize_samples=enable_debug,
+        use_cached_shards=use_cached_shards,
+        shard_cache_dir=shard_cache_dir,
+        lr_scheduler_type=lr_scheduler_type,
+        max_lr=max_lr,
+        pct_start=pct_start,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor,
+        dscrm_lr_ratio=dscrm_lr_ratio
+    )
+    
+    # Copy the final model to the common directory
+    combined_model_path = copy_final_model(combined_dir, combined_model_name)
+    results["combined"] = {"val_loss": combined_val_loss, "model_path": combined_model_path}
+    
+    # Create a detailed summary file with results and configuration for publication
+    summary_path = os.path.join(all_final_models_dir, "ablation_results_summary.txt")
+    with open(summary_path, 'w') as f:
+        # Header and basic info
+        f.write(f"Point Cloud Upsampling Multimodal Ablation Study Results ({timestamp})\n")
+        f.write("=" * 80 + "\n\n")
+        
+        # Study metadata
+        f.write("STUDY METADATA\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Date/Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Study ID: {timestamp}\n")
+        f.write(f"Base checkpoint directory: {checkpoint_dir}\n")
+        f.write(f"Results directory: {all_final_models_dir}\n\n")
+        
+        # Model architecture
+        f.write("MODEL ARCHITECTURE\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Base model name: {model_name}\n")
+        f.write(f"Point feature dimension: {base_config.feature_dim}\n")
+
+        # Training parameters
+        f.write("TRAINING PARAMETERS\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Batch size: {batch_size}\n")
+        f.write(f"Number of epochs: {epochs}\n")
+        f.write(f"Optimizer: Adam\n")
+        f.write(f"Learning rate scheduler: {lr_scheduler_type}\n")
+        f.write(f"Maximum learning rate: {max_lr}\n")
+        f.write(f"Warmup percentage: {pct_start}\n")
+        f.write(f"Initial LR division factor: {div_factor}\n")
+        f.write(f"Final LR division factor: {final_div_factor}\n")
+        f.write(f"Mixed precision training: Enabled\n")
+        f.write(f"Gradient clipping max norm: 3.0\n\n")
+        
+        # Hardware configuration
+        gpu_count = torch.cuda.device_count()
+        f.write("HARDWARE CONFIGURATION\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Number of GPUs: {gpu_count}\n")
+        for i in range(gpu_count):
+            if torch.cuda.is_available():
+                f.write(f"GPU {i}: {torch.cuda.get_device_name(i)}\n")
+        f.write("\n")
+        
+        # Dataset information
+        f.write("DATASET INFORMATION\n")
+        f.write("-" * 80 + "\n")
+        if train_dataset is not None and val_dataset is not None:
+            f.write(f"Training samples: {len(train_dataset)}\n")
+            f.write(f"Validation samples: {len(val_dataset)}\n")
+        elif isinstance(train_data_paths, list):
+            f.write(f"Training data paths: {', '.join(train_data_paths)}\n")
+            f.write(f"Validation data path: {val_data_path}\n")
+        else:
+            f.write(f"Training data path: {train_data_paths}\n")
+            f.write(f"Validation data path: {val_data_path}\n")
+        f.write(f"Using cached shards: {use_cached_shards}\n")
+        f.write(f"Shard cache directory: {shard_cache_dir}\n\n")
+        
+        # Results section
+        f.write("ABLATION STUDY RESULTS\n")
+        f.write("-" * 80 + "\n")
+        
+        # Find the best model for reference
+        best_modality = min(results.items(), key=lambda x: x[1]["val_loss"] if x[1]["val_loss"] is not None else float('inf'))
+        best_loss = best_modality[1]["val_loss"] if best_modality[1]["val_loss"] is not None else float('inf')
+        
+        # Create a sorted list of modalities by performance
+        sorted_modalities = sorted(results.items(), key=lambda x: x[1]["val_loss"] if x[1]["val_loss"] is not None else float('inf'))
+        
+        # Summary table header
+        f.write("Summary Table (sorted by performance):\n")
+        f.write(f"{'Rank':<5}{'Modality':<15}{'Val Loss':<15}{'Rel. Improvement':<20}{'Final Model':<40}\n")
+        f.write("-" * 80 + "\n")
+        
+        # Add each modality to the summary table
+        for i, (modality, data) in enumerate(sorted_modalities):
+            val_loss = data["val_loss"]
+            model_path = data["model_path"]
+            
+            # Calculate relative improvement compared to baseline (assuming baseline is the worst)
+            baseline_loss = sorted_modalities[-1][1]["val_loss"]
+            rel_improvement = ((baseline_loss - val_loss) / baseline_loss) * 100 if baseline_loss and val_loss else 0
+            
+            # Format model filename
+            model_file = os.path.basename(model_path) if model_path else "Not found"
+            
+            # Write the table row
+            f.write(f"{i+1:<5}{modality:<15}{val_loss:.6f}{rel_improvement:>15.2f}%{model_file:<40}\n")
+        
+        f.write("\n\nDetailed Results by Modality:\n")
+        f.write("-" * 80 + "\n")
+        
+        for modality, data in sorted_modalities:
+            val_loss = data["val_loss"]
+            model_path = data["model_path"]
+            best_marker = " (BEST)" if modality == best_modality[0] else ""
+            
+            # Calculate improvement against baseline
+            baseline_loss = sorted_modalities[-1][1]["val_loss"]
+            improvement = ((baseline_loss - val_loss) / baseline_loss) * 100 if baseline_loss and val_loss else 0
+            
+            f.write(f"Modality: {modality}{best_marker}\n")
+            f.write(f"  Validation Loss: {val_loss:.6f}\n")
+            if modality != sorted_modalities[-1][0]:  # Not the baseline
+                f.write(f"  Improvement over baseline: {improvement:.2f}%\n")
+            if best_modality[0] != modality and modality != sorted_modalities[-1][0]:
+                best_vs_current = ((val_loss - best_loss) / best_loss) * 100
+                f.write(f"  Gap to best model: {best_vs_current:.2f}%\n")
+            
+            # Add configuration details specific to this modality
+            f.write("  Configuration:\n")
+            
+            if modality == "baseline":
+                f.write("    - 3DEP point cloud data only\n")
+                f.write("    - No additional modalities\n")
+                if has_pretrained_baseline:
+                    f.write(f"    - Pre-trained model: {base_config.checkpoint_path}\n")
+            elif modality == "sar_only":
+                f.write("    - 3DEP point cloud data\n")
+                f.write("    - UAVSAR imagery\n")
+                f.write("    - No optical imagery\n")
+            elif modality == "optical_only":
+                f.write("    - 3DEP point cloud data\n")
+                f.write("    - NAIP optical imagery\n")
+                f.write("    - No SAR imagery\n")
+            elif modality == "combined":
+                f.write("    - 3DEP point cloud data\n")
+                f.write("    - NAIP optical imagery\n")
+                f.write("    - UAVSAR imagery\n")
+            
+            f.write(f"  Model path: {model_path if model_path else 'Not found'}\n\n")
+        
+        # Conclusions section
+        f.write("CONCLUSIONS\n")
+        f.write("-" * 80 + "\n")
+        f.write(f"Best performing model: {best_modality[0]} (Validation Loss: {best_modality[1]['val_loss']:.6f})\n")
+        
+        # Rank modalities by performance
+        f.write("Performance ranking (best to worst):\n")
+        for i, (modality, data) in enumerate(sorted_modalities):
+            f.write(f"{i+1}. {modality}: {data['val_loss']:.6f}\n")
+        
+        # Add recommended model for inference
+        f.write(f"\nRecommended model for inference: {best_modality[0]}\n")
+        f.write(f"Model file: {os.path.basename(best_modality[1]['model_path']) if best_modality[1]['model_path'] else 'Not found'}\n")
+
+    # Save results as JSON for easier programmatic access and analysis
+    json_summary_path = os.path.join(all_final_models_dir, "ablation_results.json")
+    with open(json_summary_path, 'w') as f:
+        # Create a detailed JSON structure with all configurations
+        json_results = {
+            "metadata": {
+                "timestamp": timestamp,
+                "date": time.strftime('%Y-%m-%d %H:%M:%S'),
+                "checkpoint_dir": checkpoint_dir,
+                "results_dir": all_final_models_dir,
+                "baseline_pretrained": has_pretrained_baseline
+            },
+            "model_config": {
+                "base_model_name": model_name,
+                "feature_dim": base_config.feature_dim,
+                "k_value": base_config.k,
+                "checkpoint_path": base_config.checkpoint_path if hasattr(base_config, 'checkpoint_path') else None
+            },
+            "training_config": {
+                "batch_size": batch_size,
+                "epochs": epochs,
+                "optimizer": "Adam",
+                "lr_scheduler_type": lr_scheduler_type,
+                "max_lr": max_lr,
+                "pct_start": pct_start,
+                "div_factor": div_factor,
+                "final_div_factor": final_div_factor,
+                "gradient_clipping": 3.0
+            },
+            "hardware": {
+                "num_gpus": gpu_count,
+                "gpu_types": [torch.cuda.get_device_name(i) for i in range(gpu_count)] if torch.cuda.is_available() else ["Unknown"]
+            },
+            "results": {
+                m: {
+                    "val_loss": d["val_loss"],
+                    "model_file": os.path.basename(d["model_path"]) if d["model_path"] else None,
+                    "full_path": d["model_path"],
+                    "rank": i + 1,
+                    "relative_improvement": ((sorted_modalities[-1][1]["val_loss"] - d["val_loss"]) / sorted_modalities[-1][1]["val_loss"]) * 100 
+                        if sorted_modalities[-1][1]["val_loss"] and d["val_loss"] else 0
+                } for i, (m, d) in enumerate(sorted_modalities)
+            },
+            "best_model": best_modality[0]
+        }
+        
+        # Add modality-specific configurations
+        json_results["modality_configs"] = {
+            "baseline": {"use_naip": False, "use_uavsar": False, "pretrained": has_pretrained_baseline},
+            "sar_only": {"use_naip": False, "use_uavsar": True},
+            "optical_only": {"use_naip": True, "use_uavsar": False},
+            "combined": {"use_naip": True, "use_uavsar": True}
+        }
+        
+        json.dump(json_results, f, indent=2)
+
+    # Create a publication-ready LaTeX table
+    latex_summary_path = os.path.join(all_final_models_dir, "ablation_results_table.tex")
+    with open(latex_summary_path, 'w') as f:
+        f.write("% LaTeX table for publication\n")
+        f.write("\\begin{table}[htbp]\n")
+        f.write("\\centering\n")
+        f.write("\\caption{Point Cloud Upsampling Ablation Study Results}\n")
+        f.write("\\label{tab:ablation_results}\n")
+        f.write("\\begin{tabular}{lccc}\n")
+        f.write("\\toprule\n")
+        f.write("Modality & Validation Loss & Rel. Improvement (\\%) & Rank \\\\\n")
+        f.write("\\midrule\n")
+        
+        for i, (modality, data) in enumerate(sorted_modalities):
+            val_loss = data["val_loss"]
+            # Calculate relative improvement compared to baseline
+            baseline_loss = sorted_modalities[-1][1]["val_loss"]
+            rel_improvement = ((baseline_loss - val_loss) / baseline_loss) * 100 if baseline_loss and val_loss else 0
+            
+            # Format modality name for LaTeX
+            mod_name = modality.replace("_", "\\_")
+            if modality == "baseline" and has_pretrained_baseline:
+                mod_name = mod_name + "$^*$"  # Add asterisk for pre-trained model
+            if modality == best_modality[0]:
+                mod_name = "\\textbf{" + mod_name + "}"
+            
+            f.write(f"{mod_name} & {val_loss:.6f} & {rel_improvement:.2f} & {i+1} \\\\\n")
+        
+        f.write("\\bottomrule\n")
+        if has_pretrained_baseline:
+            f.write("\\multicolumn{4}{l}{$^*$Pre-trained model evaluation only (no training)} \\\\\n")
+        f.write("\\end{tabular}\n")
+        f.write("\\end{table}\n")
+
+    print(f"\nAll ablation studies completed.")
+    print(f"Final models saved in: {all_final_models_dir}")
+    print(f"Results summary saved to: {summary_path}")
+    print(f"JSON results saved to: {json_summary_path}")
+    print(f"LaTeX table saved to: {latex_summary_path}")
+
+    return all_final_models_dir

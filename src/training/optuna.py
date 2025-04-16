@@ -47,28 +47,29 @@ def optuna_objective(trial, train_dataset, val_dataset, model_name, batch_size, 
     from src.training.multimodal_training import train_multimodal_model
     
     # Define hyperparameter search space using Optuna
-    feature_dim = 32 #trial.suggest_int('feature_dim', 64, 256, step=32)
-    up_attn_hds = 1 #trial.suggest_int('up_attn_hds', 1, 2)
-    up_dropout = .005 #trial.suggest_float('up_dropout', 0.0, 0.03)
-    fnl_attn_hds = 2 #trial.suggest_int('fnl_attn_hds', 2, 3)
-    img_embed_dim = 16#trial.suggest_int('img_embed_dim', 32, 64, step=32)
+    feature_dim = 256 #trial.suggest_int('feature_dim', 64, 256, step=32)
+    up_attn_hds = 4 #trial.suggest_int('up_attn_hds', 1, 2)
+    fnl_attn_hds = 4 #trial.suggest_int('fnl_attn_hds', 2, 3)
+    img_embed_dim = 64 #trial.suggest_int('img_embed_dim', 64, 128, step=32)
     
     # SpatialFusion hyperparameters
     temperature = 0.01 #trial.suggest_float('temperature', 0.01, 0.5, log=True)
     max_dist_ratio = 1.5 #trial.suggest_categorical("max_dist_ratio", [1.3,1.5,1.7, 10]) 
-    
+    num_lcl_heads = trial.suggest_int('num_lcl_heads', 2, 8, step=2)  # Local attention heads (for MultiHeadPointTransformerConv)
+    num_glbl_heads = trial.suggest_int('num_glbl_heads', 2, 8, step=2)  # Global attention heads (for PosAwareGlobalFlashAttention)
+    pt_attn_dropout = trial.suggest_float('fusion_dropout', 0.0, 0.1, step = 0.05)
 
     
     # Encoder dropout parameters
-    naip_dropout = 0.1 #trial.suggest_float('naip_dropout', 0.0, 0.3, step=0.1)
-    uavsar_dropout = 0.1 #trial.suggest_float('uavsar_dropout', 0.1, 0.3, step=0.1)
+    naip_dropout = 0.05 #trial.suggest_float('naip_dropout', 0.0, 0.3, step=0.1)
+    uavsar_dropout = 0.05 #trial.suggest_float('uavsar_dropout', 0.1, 0.3, step=0.1)
 
-    temporal_encoder ='transformer'# trial.suggest_categorical("temporal_encoder", ['gru', 'transformer']) 
-    fusion = 'cross_attention' #trial.suggest_categorical("fusion", ['spatial', 'cross_attention']) 
-    fusion_dropout = 0.10 #trial.suggest_float('fusion_dropout', 0.05, 0., step = 0.05)
+    temporal_encoder ='gru'#trial.suggest_categorical("temporal_encoder", ['gru', 'transformer']) 
+    fusion = 'transformer'#trial.suggest_categorical("fusion", ['spatial', 'cross_attention']) 
+    fusion_dropout = 0.05 #trial.suggest_float('fusion_dropout', 0.05, 0., step = 0.05)
     
     fusion_num_heads = 2 #trial.suggest_int('fusion_num_heads', 2, 6, step=2)
-    position_encoding_dim = 12 #trial.suggest_int('position_encoding_dim', 12, 24, step=12)
+    position_encoding_dim = 24 #trial.suggest_int('position_encoding_dim', 12, 24, step=12)
     
     
     # Print trial information to console
@@ -78,7 +79,6 @@ def optuna_objective(trial, train_dataset, val_dataset, model_name, batch_size, 
     print("Parameters:")
     print(f"  feature_dim: {feature_dim}")
     print(f"  up_attn_hds: {up_attn_hds}")
-    print(f"  up_dropout: {up_dropout:.4f}")
     print(f"  fnl_attn_hds: {fnl_attn_hds}")
     print(f"  img_embed_dim: {img_embed_dim}")
     print(f"  temperature: {temperature:.4f}")
@@ -86,6 +86,9 @@ def optuna_objective(trial, train_dataset, val_dataset, model_name, batch_size, 
     print(f"  naip_dropout: {naip_dropout:.4f}")
     print(f"  uavsar_dropout: {uavsar_dropout:.4f}")
     print(f"  temporal_encoder: {temporal_encoder}")
+    print(f"  num_lcl_heads: {num_lcl_heads}")
+    print(f"  pt_attn_dropout: {pt_attn_dropout}")
+    print(f"  num_glbl_heads: {num_glbl_heads}")
 
     print(f"  fusion: {fusion}")
     print(f"  fusion_dropout: {fusion_dropout}")
@@ -101,8 +104,6 @@ def optuna_objective(trial, train_dataset, val_dataset, model_name, batch_size, 
     # Create model config with trial-suggested parameters
     config = MultimodalModelConfig(
         feature_dim=feature_dim,
-        up_attn_hds=up_attn_hds,
-        up_dropout=up_dropout,
         fnl_attn_hds=fnl_attn_hds,
         img_embed_dim=img_embed_dim,
         # Include the additional parameters
@@ -121,7 +122,17 @@ def optuna_objective(trial, train_dataset, val_dataset, model_name, batch_size, 
         fusion_type = fusion,
         fusion_dropout = fusion_dropout,
         fusion_num_heads = fusion_num_heads,
-        position_encoding_dim = position_encoding_dim
+        position_encoding_dim = position_encoding_dim,
+        
+        # Point Transformer parameters
+        num_lcl_heads = num_lcl_heads,  # Local attention heads (for MultiHeadPointTransformerConv)
+        num_glbl_heads = num_glbl_heads,  # Global attention heads (for PosAwareGlobalFlashAttention)
+        pt_attn_dropout = pt_attn_dropout,
+        # checkpoint_path="data/output/checkpoints/baseline_20250402-073326/0402_baseline_k15_f256_b5_e30.pth",
+        # checkpoint_path= "/home/jovyan/geoai_veg_map/data/output/checkpoints/0404_huber2m_3DEP_baseline_baseline_k15_f256_b6_e80.pth",
+        pos_mlp_hdn = 16
+        # layers_to_load=["feature_extractor.pt_conv1.convs.0.weight", "feature_extractor.pt_conv2.convs.0.weight"],
+        # layers_to_freeze=["feature_extractor.pt_conv1.convs.0.weight"]  # Freeze a subset of loaded layers
     )
     
     # Create a unique checkpoint directory for this trial
@@ -212,8 +223,8 @@ def find_unique_study_name(base_name, storage):
 def run_optuna_study(train_dataset, val_dataset, model_name, batch_size, checkpoint_dir,
                     num_epochs=30, log_file="logs/optuna_study.log", early_stopping_patience=10,
                     temp_dir_root="data/output/tmp_shards", tensorboard_log_dir="data/output/tensorboard_logs",
-                    enable_debug=False, accumulation_steps=3, visualize_samples=False,
-                    lr_scheduler_type="onecycle", max_lr=5e-4, pct_start=0.3, div_factor=25.0, final_div_factor=1e4,
+                    enable_debug=False, accumulation_steps=1, visualize_samples=False,
+                    lr_scheduler_type="onecycle", max_lr=5e-4, pct_start=0.2, div_factor=25.0, final_div_factor=1e2,
                     use_naip=False, use_uavsar=False, k=15, attr_dim=3, n_trials=50, timeout=None,
                     study_name=None, storage=None):
     """

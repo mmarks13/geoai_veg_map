@@ -701,7 +701,7 @@ def generate_sample_page(pdf, sample, index, sample_type, dpi=150, naip_norm_sta
 
 if __name__ == "__main__":
     # Define paths
-    model_path = "/home/jovyan/geoai_veg_map/data/output/checkpoints/0412_LGPA_3e4_256ft_b5_e40_heads_8-4-8-4-4-4_naip_uavsar_k15_f256_b5_e40.pth"
+    model_path = "/home/jovyan/geoai_veg_map/data/output/checkpoints/0414_LGPA_final_baseline_k15_f256_b8_e40.pth"
     validation_data_path = "data/processed/model_data/precomputed_validation_tiles.pt"
     output_dir = "data/output/reports"
     
@@ -731,8 +731,8 @@ if __name__ == "__main__":
         up_beta=False,        # Legacy parameter
         
         # Modality flags
-        use_naip=True,
-        use_uavsar=True,
+        use_naip=False,
+        use_uavsar=False,
         
         # Imagery encoder parameters
         img_embed_dim=128,    # Dimension of patch embeddings
@@ -759,15 +759,16 @@ if __name__ == "__main__":
         # layers_to_load=["feature_extractor.pt_conv1.convs.0.weight", "feature_extractor.pt_conv2.convs.0.weight"],
         # layers_to_freeze=["feature_extractor.pt_conv1.convs.0.weight"]  # Freeze a subset of loaded layers
     )
+
     # Generate the report
     generate_model_report(
         model_path=model_path,
         validation_data_path=validation_data_path,
         output_dir=output_dir,
-        n_high_loss_samples=80,
-        n_low_improvement_samples=80,
-        n_high_improvement_samples=80,
-        n_random_samples=80,
+        n_high_loss_samples=50,
+        n_low_improvement_samples=50,
+        n_high_improvement_samples=50,
+        n_random_samples=50,
         dpi=150,
         model_config=custom_config  
     )

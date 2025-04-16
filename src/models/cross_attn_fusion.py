@@ -67,7 +67,7 @@ class CrossAttentionFusion(nn.Module):
         # Linear layers for feature extraction and projection
         self.linear1 = nn.Linear(concat_dim, concat_dim)
         self.linear2 = nn.Linear(concat_dim, point_dim)
-        self.act = nn.ReLU()  # ReLU activation between linear layers
+        self.act = nn.GELU()  # GELU activation between linear layers
        
         # Add layer normalization for post-processing
         self.norm2 = nn.LayerNorm(point_dim)
@@ -328,8 +328,10 @@ class CrossAttentionFusion(nn.Module):
         # Apply linear layers for feature extraction and projection 
         concatenated = self.act(self.linear1(concatenated))  # [N, concat_dim or D_p]
         fused_features = self.linear2(concatenated)  # [N, D_p]
-        
-        # Apply normalization to the output features
+
+        # Apply residual connection and normalization to the output features
+        fused_features = point_features + fused_features  # Residual connection [N, D_p]
         fused_features = self.norm2(fused_features)  # [N, D_p]
+
         
         return fused_features
