@@ -63,6 +63,22 @@ import pandas as pd
 import copy
 import h5py
 
+
+import requests_cache
+requests_cache.install_cache("pc_stac_cache", expire_after=86400)  # 1‑day cache
+
+
+from functools import lru_cache
+@lru_cache(maxsize=None)
+def get_catalog(path):
+    return pystac.read_file(path)
+
+CLIENT = Client.open(
+    "https://planetarycomputer.microsoft.com/api/stac/v1",
+    modifier=planetary_computer.sign_inplace
+)
+
+
 # Configure environment
 os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'  # Helps with network filesystems
 
@@ -91,6 +107,36 @@ def bboxes_intersect(bbox1, bbox2):
     
     # If neither of the above is true, the boxes must intersect
     return True
+
+from shapely.geometry import box
+
+# Your study‑area bboxes
+AREA_A_BBOX = (-116.625141,33.100581,-116.565760,33.145949)  # Volcan
+AREA_B_BBOX = (-120.126713,34.652576,-120.026485,34.752211)  # Sedgwick
+
+# Choose which area a tile belongs to
+def choose_area_bbox(tile_bbox):
+    cx = (tile_bbox[0] + tile_bbox[2]) / 2
+    cy = (tile_bbox[1] + tile_bbox[3]) / 2
+    if AREA_A_BBOX[0] <= cx <= AREA_A_BBOX[2] and AREA_A_BBOX[1] <= cy <= AREA_A_BBOX[3]:
+        return AREA_A_BBOX
+    else:
+        return AREA_B_BBOX
+
+# Cache for one search per area
+CACHED_3DEP_ITEMS = {}
+
+def _get_3dep_pool(client, area_bbox, date_range):
+    key = (tuple(area_bbox), date_range)
+    if key not in CACHED_3DEP_ITEMS:
+        search = client.search(
+            collections=["3dep-lidar-copc"],
+            bbox=area_bbox,
+            datetime=date_range
+        )
+        CACHED_3DEP_ITEMS[key] = list(search.items())
+    return CACHED_3DEP_ITEMS[key]
+
 
 
 def create_stac_stack(bbox, start_date, end_date, stac_source, 
@@ -136,7 +182,8 @@ def create_stac_stack(bbox, start_date, end_date, stac_source,
     catalog = None
     items = []
     item_metadata = []
-    
+    if verbose:
+        print(f"create_stac_stack for bbox {bbox}")
     try:
         # -- Common preprocessing steps --
         
@@ -156,7 +203,7 @@ def create_stac_stack(bbox, start_date, end_date, stac_source,
         # 2. Read the local STAC catalog
         if verbose:
             print("Opening local STAC catalog...")
-        catalog = pystac.read_file(stac_source)
+        catalog = get_catalog(stac_source)
         
         # 3. Filter items by date and spatial intersection
         for item in catalog.get_all_items():
@@ -612,7 +659,7 @@ def create_pointcloud_stack(bbox, start_date, end_date, stac_source, threads=8,
     item_metadata = []  # Add collection for item metadata
 
     try:
-        catalog = pystac.read_file(stac_source)
+        catalog = get_catalog(stac_source)
 
         def bboxes_intersect(bbox1, bbox2):
             # Return True if bbox1 intersects bbox2 (both in [xmin, ymin, xmax, ymax] format)
@@ -763,14 +810,15 @@ def create_pointcloud_stack(bbox, start_date, end_date, stac_source, threads=8,
             
         gc.collect()
 
+from shapely.geometry import box
 
-def create_3dep_stack(bbox, start_date, end_date, threads=8, target_crs=None):
+def create_3dep_stack(tile_bbox, start_date, end_date, area_bbox, threads=8, target_crs=None):
     """
     Create a stack of point clouds from 3DEP STAC items.
     
     Parameters
     ----------
-    bbox : list
+    tile_bbox : list
         Bounding box in the format [xmin, ymin, xmax, ymax]
     start_date : str
         Start date for filtering
@@ -780,6 +828,8 @@ def create_3dep_stack(bbox, start_date, end_date, threads=8, target_crs=None):
         Number of threads for processing
     target_crs : str
         Target coordinate reference system for reprojection
+    area_bbox  : list
+        one coarse bbox that wraps the whole study area containing this tile
         
     Returns
     -------
@@ -787,29 +837,40 @@ def create_3dep_stack(bbox, start_date, end_date, threads=8, target_crs=None):
         - list of filtered point clouds
         - metadata dictionary
     """
-    client = None
-    search = None
+
     items = []
     point_clouds = []
     item_metadata = []
     
     try:
-        client = Client.open(
-            "https://planetarycomputer.microsoft.com/api/stac/v1",
-            modifier=planetary_computer.sign_inplace
-        )
+        # build the POINT CLOUD‐API date range once
+        date_range = f"{start_date}/{end_date}"
 
-        search = client.search(
-            collections=["3dep-lidar-copc"],
-            bbox=bbox,
-            datetime=f"{start_date}/{end_date}"
-        )
-        items = list(search.items())
+        # grab the cached list for this area
+        pool = _get_3dep_pool(CLIENT, area_bbox, date_range)
+
+        # fast in‑memory filter
+        tile_geom = box(*tile_bbox)
+
+        # Extract only the XY from the STAC item.bbox
+        def item_xy_bbox(it):
+            b = it.bbox
+            # STAC sometimes gives [minx, miny, minz, maxx, maxy, maxz]
+            if len(b) == 6:
+                return (b[0], b[1], b[3], b[4])
+            else:
+                return (b[0], b[1], b[2], b[3])
+
+        items = [
+            it for it in pool
+            if tile_geom.intersects(box(*item_xy_bbox(it)))
+        ]
         if not items:
             raise ValueError("No items found for the specified parameters.")
         
-        polygon = bounding_box_to_geojson(bbox)
-        
+        polygon = bounding_box_to_geojson(tile_bbox)
+
+
         for tile in items:
             pipeline = None
             try:
@@ -824,8 +885,8 @@ def create_3dep_stack(bbox, start_date, end_date, threads=8, target_crs=None):
                             "type": "readers.copc",
                             "filename": url,
                             "polygon": polygon,
-                            "requests": 4,
-                            "keep_alive": 30
+                            "requests": 8,
+                            "keep_alive": 100
                         }
                     ]
                 }
@@ -921,11 +982,6 @@ def create_3dep_stack(bbox, start_date, end_date, threads=8, target_crs=None):
         if items:
             del items
             
-        if client:
-            del client
-            
-        if search:
-            del search
             
         gc.collect()
 
@@ -1079,7 +1135,7 @@ import numpy as np
 
 
 
-def anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list, vertical_ratio=0.3):
+def anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list, vertical_ratio=0.2):
     """
     Creates boolean masks for anisotropic voxel grid downsampling for each value in max_points_list.
     Uses different voxel sizes in horizontal (x,y) vs vertical (z) directions.
@@ -1088,7 +1144,7 @@ def anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points
         points (np.ndarray): (N, 3) array of point coordinates in meters.
         initial_voxel_size_cm (float): The starting voxel size in centimeters for horizontal dimensions.
         max_points_list (List[int]): A list of maximum allowed number of points for the downsampled cloud.
-        vertical_ratio (float): Ratio of vertical to horizontal voxel size (default 0.3).
+        vertical_ratio (float): Ratio of vertical to horizontal voxel size (default 0.2).
                                Lower values preserve more vertical detail.
     
     Returns:
@@ -1274,7 +1330,8 @@ def process_bbox(args):
     naip_stac_source = args[13] if len(args) > 13 else None
     initial_voxel_size_cm = args[14] if len(args) > 14 else 5.0
     max_points_list = args[15] if len(args) > 15 else [20000, 30000, 40000]
-    
+    min_uav_points = args[16] if len(args) > 16 else 10000
+
     # Calculate the overall tile number for progress reporting
     overall_tile_index = current_tile_index + i
     
@@ -1310,8 +1367,12 @@ def process_bbox(args):
             return None
 
         # Extract x,y,z values from the UAV point cloud
-        xyz_uav = np.array([(p['X'], p['Y'], p['Z']) for p in uav_pc[0]], dtype=np.float32)
-        
+        xyz_uav = np.array([(p['X'], p['Y'], p['Z']) for p in uav_pc[0]], dtype=np.float64)
+
+        if xyz_uav.shape[0] < min_uav_points:
+            print(f"Skipping tile {tile_id}: only {xyz_uav.shape[0]} UAV points < min {min_uav_points}")
+            return None
+            
         # Extract and combine point attributes
         uav_pnt_attr = np.column_stack((
             np.array([p['Intensity'] for p in uav_pc[0]], dtype=np.float32),
@@ -1339,16 +1400,20 @@ def process_bbox(args):
         dep_pc = None
         dep_meta = None
         attempt = 0
-        
+
+        area_bbox = choose_area_bbox(bbox_wgs84)   
+
         while attempt < max_retries and dep_pc is None:
             try:
                 if attempt > 0 and verbose:
                     print(f"3DEP data retrieval retry attempt {attempt}/{max_retries} for tile {tile_id}")
-                
+
+                 
                 dep_pc, dep_meta = create_3dep_stack(
-                    bbox=bbox_wgs84,
+                    tile_bbox=bbox_wgs84,         # the tile’s bbox in EPSG:4326
                     start_date=start_date,
                     end_date=end_date,
+                    area_bbox=area_bbox,          # the cached‑area bbox
                     threads=8,
                     target_crs="EPSG:32611"
                 )
@@ -1358,7 +1423,7 @@ def process_bbox(args):
                     
             except Exception as e:
                 last_exception = e
-                
+                print(f"Error retrieving 3DEP data for tile {tile_id}: {e}")
                 if attempt < max_retries - 1:
                     sleep_time = initial_delay * (2 ** attempt)
                     time.sleep(sleep_time)
@@ -1372,7 +1437,7 @@ def process_bbox(args):
             return None
         
         # For the 3DEP data, we concatenate the returned arrays
-        xyz_dep = np.vstack([np.column_stack((p['X'], p['Y'], p['Z'])) for p in dep_pc]).astype(np.float32)
+        xyz_dep = np.vstack([np.column_stack((p['X'], p['Y'], p['Z'])) for p in dep_pc]).astype(np.float64)
         
         # Combine point attributes for 3DEP data
         dep_pnt_attr = np.vstack([
@@ -1572,7 +1637,8 @@ def process_chunk(
     uavsar_stac_source=None,
     naip_stac_source=None,
     initial_voxel_size_cm=5.0,
-    max_points_list=[20000, 30000, 40000]
+    max_points_list=[20000, 30000, 40000],
+    min_uav_points = 1000
 ):
     """
     Process a single chunk of tiles and save results as HDF5 files.
@@ -1584,7 +1650,7 @@ def process_chunk(
     # Prepare arguments for parallel processing, including voxel downsampling parameters
     args_list = [
         (i, tile_id, bbox, start_date, end_date, lidar_stac_source, bbox_crs, max_api_retries, initial_retry_delay,
-         current_tile_index + i, total_tiles, verbose, uavsar_stac_source, naip_stac_source, initial_voxel_size_cm, max_points_list)
+         current_tile_index + i, total_tiles, verbose, uavsar_stac_source, naip_stac_source, initial_voxel_size_cm, max_points_list, min_uav_points)
         for i, (tile_id, bbox) in enumerate(chunk, start=1)
     ]
     
@@ -1824,7 +1890,8 @@ def process_tiles_from_geojson(
     uavsar_stac_source=None,
     naip_stac_source=None,
     initial_voxel_size_cm=5.0,
-    max_points_list=None
+    max_points_list=None,
+    min_uav_points=1000
 ):
     """
     Process LiDAR and imagery data using pre-defined tiles from a GeoJSON file.
@@ -1938,7 +2005,8 @@ def process_tiles_from_geojson(
             uavsar_stac_source,
             naip_stac_source,
             initial_voxel_size_cm,
-            max_points_list
+            max_points_list,
+            min_uav_points
         )
         
         # Give the system a moment to recover between chunks
@@ -2184,7 +2252,14 @@ if __name__ == "__main__":
         default=[20000, 30000, 40000],
         help="Maximum point thresholds for downsampling (default: 5000 10000 20000)"
     )
-    
+
+    parser.add_argument(
+        "--min-uav-points",
+        type=int,
+        default=1000,
+        help="Skip any tile whose UAV point-count is below this threshold"
+    )
+
     args = parser.parse_args()
 
     # Call processing function with the given tiles and other parameters
@@ -2205,5 +2280,6 @@ if __name__ == "__main__":
         uavsar_stac_source=args.uavsar_stac_source,
         naip_stac_source=args.naip_stac_source,
         initial_voxel_size_cm=args.initial_voxel_size_cm,
-        max_points_list=args.max_points
+        max_points_list=args.max_points,
+        min_uav_points = args.min_uav_points
     )

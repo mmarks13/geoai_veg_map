@@ -1304,7 +1304,7 @@ if __name__ == "__main__":
     import torch
     print("Beginning data augmentation...  ")
     print("Loading training tiles...")
-    training_tiles = torch.load('data/processed/model_data/precomputed_training_tiles.pt', weights_only=False)
+    training_tiles = torch.load('data/processed/model_data/precomputed_training_tiles_32bit.pt', weights_only=False)
 
 
     ### Calculate sampling probabilities based on standard deviations of point clouds ###
@@ -1324,7 +1324,7 @@ if __name__ == "__main__":
     percentile_95 = np.percentile(std_devs, 95)
     std_devs = np.clip(std_devs, None, percentile_95)
 
-    temperature = 4  # Increase the temperature for a more gradual change
+    temperature = 5  # Increase the temperature for a more gradual change
     scaled_probs = np.exp(std_devs / temperature) / np.sum(np.exp(std_devs / temperature))
 
     # Print the top 10 and bottom 10 values of scaled_probs
@@ -1337,19 +1337,19 @@ if __name__ == "__main__":
         # Basic transformations
         'rotate_probability': 1,
         'reflect_probability': 0.5,
-        'jitter_probability':1,
+        'jitter_probability':0.3,
         
         # Point cloud modifications
-        'add_points_probability': 0.0,
-        'remove_points_probability': 0.2,
-        'mask_points_probability': 0.2,
-        'remove_horizontal_slice_probability': 0.2,  
+        'add_points_probability': 0,
+        'remove_points_probability': 0.3,
+        'mask_points_probability': 0.3,
+        'remove_horizontal_slice_probability': 0.3,  
         
         # Imagery and attributes
-        'temporal_shift_probability': 0.5,
+        'temporal_shift_probability': 0,
         'attribute_augment_probability': 0,
-        'spectral_band_probability': 0.3,
-        'sensor_effects_probability': 0.3,
+        'spectral_band_probability': 0,
+        'sensor_effects_probability': 0,
         
         # Parameters
         'max_shift_days': 60,
@@ -1358,8 +1358,8 @@ if __name__ == "__main__":
         'attribute_scale_range': (0.9, 1.1),
         'attribute_shift_range': (-0.1, 0.1),
         'band_scale_range': (0.9, 1.1),
-        'add_points_ratio': 0.2,
-        'add_points_max_distance': 0.01,
+        'add_points_ratio': 0.1,
+        'add_points_max_distance': 0.005,
         'remove_points_ratio': 0.1,
         'mask_min_radius': 0.10,
         'mask_max_radius': 0.5,
@@ -1376,7 +1376,7 @@ if __name__ == "__main__":
 
     
     print("Augmenting dataset...")
-    desired_total_tiles = 30000
+    desired_total_tiles = 40000
     
     total_augmentations = desired_total_tiles - len(training_tiles) 
     augmented_tiles = augment_dataset(training_tiles, n_augmentations=1, config=config, prob_vector=scaled_probs, total_augmentations=total_augmentations)
@@ -1384,4 +1384,4 @@ if __name__ == "__main__":
     # augmented_training_tiles = training_tiles + augmented_tiles
     # Save the augmented dataset
     print("Saving augmented dataset...")
-    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_12k.pt')
+    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_32bit.pt')

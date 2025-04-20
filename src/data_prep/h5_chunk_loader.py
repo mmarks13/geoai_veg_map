@@ -25,7 +25,7 @@ import argparse
 import time
 from tqdm import tqdm
 
-def combine_h5_files(input_dir, max_files=None, max_tiles_per_file=None, convert_float32=True, verbose=False):
+def combine_h5_files(input_dir, max_files=None, max_tiles_per_file=None, convert_float32=False, verbose=False):
     """
     Combines multiple H5 files into a single dataset.
     Optimized for flattened data structure where all data is at the top level.
@@ -48,6 +48,7 @@ def combine_h5_files(input_dir, max_files=None, max_tiles_per_file=None, convert
     list
         List of dictionaries, one per tile
     """
+
     combined_data = []
     
     # Get list of H5 files
@@ -276,7 +277,8 @@ def main():
         input_dir=args.input_dir,
         max_files=args.max_files,
         max_tiles_per_file=args.max_tiles,
-        convert_float32=not args.no_convert_float32,
+        # convert_float32=not args.no_convert_float32,
+        convert_float32=False, #not args.no_convert_float32, #hacky solution to ensure float64 is not converted to float32
         verbose=args.verbose
     )
     
