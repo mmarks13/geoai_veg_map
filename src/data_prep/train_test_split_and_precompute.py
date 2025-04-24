@@ -46,9 +46,15 @@ import argparse
 import logging
 import torch.serialization
 torch.serialization.add_safe_globals({'dict': dict, 'list': list, 'tensor': torch.Tensor})
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 
 import warnings
-
+import sys
+# Force immediate output flushing
+sys.stdout = open(sys.stdout.fileno(), mode='w', buffering=1)
+sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 
 
 def check_point_cloud_coverage(points, bbox, grid_size=1.0, min_points_per_cell=1, min_coverage_pct=80):
@@ -295,7 +301,7 @@ def split_dataset(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=FutureWarning, 
                                 message="You are using `torch.load` with `weights_only=False`")
-        tiles = torch.load(pt_file_path)
+        tiles = torch.load(pt_file_path, map_location='cpu', mmap=True)
     logging.info(f"Loaded {len(tiles)} tiles from the PyTorch file.")
     
     # Check for and remove duplicate tile_ids if requested
@@ -666,6 +672,7 @@ def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime,
                           naip_means=None, naip_stds=None, dtype: torch.dtype = torch.float16) -> Dict[str, Any]:
     """
     Preprocess NAIP imagery from the flattened data structure.
+    Rescales uint8 values from [0, 255] to [0, 1] range.
     Handles NA, NaN, and Inf values by setting them to 0 after normalization.
     Converts normalized values to specified precision for memory efficiency.
     
@@ -676,8 +683,8 @@ def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime,
          - 'naip_ids': List of image IDs
          - 'naip_img_bbox': NAIP imagery bounding box [minx, miny, maxx, maxy]
       reference_date: UAV LiDAR acquisition date used to compute relative dates.
-      naip_means: Optional tensor of shape [n_bands] with mean values for each band.
-      naip_stds: Optional tensor of shape [n_bands] with standard deviation values for each band.
+      naip_means: Not used for this normalization method.
+      naip_stds: Not used for this normalization method.
       dtype: PyTorch dtype to use for the output tensors.
       
     Returns:
@@ -692,28 +699,14 @@ def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime,
     # Identify invalid values before normalization
     invalid_mask = torch.isnan(images) | torch.isinf(images)
     
-    # Normalize imagery if statistics are provided
-    if naip_means is not None and naip_stds is not None:
-        # Set invalid values to means temporarily for normalization
-        # This ensures they become 0 after normalization
-        for band_idx in range(images.shape[1]):
-            band_invalid_mask = invalid_mask[:, band_idx, :, :]
-            if band_invalid_mask.any():
-                images[:, band_idx, :, :][band_invalid_mask] = naip_means[band_idx].to(images.dtype)
-        
-        # Ensure means and stds have the right shape for broadcasting
-        means = naip_means.view(1, -1, 1, 1).to(images.dtype)
-        stds = naip_stds.view(1, -1, 1, 1).to(images.dtype)
-        
-        # Normalize
-        images = (images - means) / stds
-        
-        # Set any new invalid values (that might appear after normalization) to 0
-        # which is the mean in normalized space
-        images[invalid_mask] = 0.0  # Reuse the mask 
-        
-        # Convert to specified dtype for memory efficiency
-        images = images.to(dtype)
+    # Simple rescaling from [0, 255] to [0, 1]
+    images = images.float() / 255.0
+    
+    # Set any invalid values to 0
+    images[invalid_mask] = 0.0
+    
+    # Convert to specified dtype for memory efficiency
+    images = images.to(dtype)
     
     # Get dates and compute relative dates
     dates = tile['naip_dates']
@@ -728,13 +721,15 @@ def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime,
         'bands': tile['naip_bands']        # Band information
     }
 
+
+
 def preprocess_uavsar_imagery(tile: Dict[str, Any], reference_date: datetime, 
-                             uavsar_means=None, uavsar_stds=None, dtype: torch.dtype = torch.float16) -> Dict[str, Any]:
+                             uavsar_means=None, uavsar_stds=None, dtype: torch.dtype = torch.float32,
+                             max_images_per_group: int = 8) -> Dict[str, Any]:
     """
-    Preprocess UAVSAR imagery from the flattened data structure.
-    Handles NA, NaN, and Inf values by setting them to 0 after normalization.
-    Converts normalized values to specified precision for memory efficiency.
-    Removes images that have all invalid values across all pixels and bands.
+    Preprocess UAVSAR imagery from the flattened data structure, handling variable numbers of images
+    associated with distinct acquisition events (where events can span consecutive days).
+    Only keeps acquisition events with two or more images.
     
     Inputs:
       tile: Dictionary containing flattened tile data with keys:
@@ -746,81 +741,182 @@ def preprocess_uavsar_imagery(tile: Dict[str, Any], reference_date: datetime,
       uavsar_means: Optional tensor of shape [n_bands] with mean values for each band.
       uavsar_stds: Optional tensor of shape [n_bands] with standard deviation values for each band.
       dtype: PyTorch dtype to use for the output tensors.
+      max_images_per_group: Maximum number of images to keep per acquisition event (G_max).
       
     Returns:
       A dictionary with:
-         - 'images': The normalized UAVSAR imagery tensor in specified dtype format
-         - 'relative_dates': Tensor of shape [n_images, 1] with relative dates (in days)
+         - 'images': Padded tensor of shape [T, G_max, n_bands, h, w]
+         - 'attention_mask': Boolean mask of shape [T, G_max]
+         - 'relative_dates': Tensor of shape [T, 1] with relative dates
+         - 'dates': List of T representative dates
+         - 'ids': List of lists containing image IDs
+         - 'invalid_mask': Boolean mask of shape [T, G_max, n_bands, h, w]
          - 'img_bbox': The UAVSAR imagery bounding box
+         - 'bands': Band information
     """
     # Get UAVSAR imagery tensor
     images = tile['uavsar_imgs'].clone()  # Tensor: [n_images, n_bands, h, w]
-    dates = tile['uavsar_dates']
+    dates_str = tile['uavsar_dates']
     ids = tile['uavsar_ids']
     
-    # Create a mask to identify images that have at least some valid pixels
+    # Step 1: Filter out images with all invalid pixels
     n_images = images.shape[0]
     valid_image_mask = torch.zeros(n_images, dtype=torch.bool, device=images.device)
     
-    # Check each image for any valid pixels
     for img_idx in range(n_images):
         img = images[img_idx]  # Shape: [n_bands, h, w]
-        # If ANY value in the image is valid, keep the image
         valid_image_mask[img_idx] = not (torch.isnan(img) | torch.isinf(img)).all()
     
-    # Count and report invalid images
     invalid_count = n_images - valid_image_mask.sum().item()
-    # if invalid_count > 0:
-        # print(f"Removing {invalid_count} UAVSAR images with all invalid values.")
+    if invalid_count > 0:
+        print(f"Removing {invalid_count} UAVSAR images with all invalid values.")
     
-    # Return early if all images are invalid
     if valid_image_mask.sum() == 0:
         print("WARNING: All UAVSAR images have invalid values only!")
         return None
     
-    # Filter images and corresponding metadata
+    # Apply filtering
     images = images[valid_image_mask]
-    dates = [date for i, date in enumerate(dates) if valid_image_mask[i]]
+    dates_str = [date for i, date in enumerate(dates_str) if valid_image_mask[i]]
     ids = [id for i, id in enumerate(ids) if valid_image_mask[i]]
     
-    # Identify remaining invalid values before normalization
-    invalid_mask = torch.isnan(images) | torch.isinf(images)
+    # Step 2: Parse dates and sort chronologically
+    parsed_dates = []
+    for date_str in dates_str:
+        parsed_date = parse_date(date_str).date()  # Convert to date object (ignore time)
+        parsed_dates.append(parsed_date)
     
-    # Normalize imagery if statistics are provided
-    if uavsar_means is not None and uavsar_stds is not None:
-        # Set invalid values to means temporarily for normalization
-        # This ensures they become 0 after normalization
-        for band_idx in range(images.shape[1]):
-            band_invalid_mask = invalid_mask[:, band_idx, :, :]
-            if band_invalid_mask.any():
-                images[:, band_idx, :, :][band_invalid_mask] = uavsar_means[band_idx].to(images.dtype)
+    # Create tuples of (image, date, id) and sort by date
+    sorted_data = sorted(zip(images, parsed_dates, ids, dates_str), key=lambda x: x[1])
+    
+    # Unpack sorted data
+    sorted_images = [item[0] for item in sorted_data]
+    sorted_dates = [item[1] for item in sorted_data]
+    sorted_ids = [item[2] for item in sorted_data]
+    sorted_date_strs = [item[3] for item in sorted_data]
+    
+    # Step 3: Group by consecutive dates (acquisition events)
+    groups = []
+    current_group = {'images': [], 'dates': [], 'ids': [], 'date_strs': []}
+    
+    for i, (img, date, id_, date_str) in enumerate(zip(sorted_images, sorted_dates, sorted_ids, sorted_date_strs)):
+        if i == 0:  # First image always starts a group
+            current_group['images'].append(img)
+            current_group['dates'].append(date)
+            current_group['ids'].append(id_)
+            current_group['date_strs'].append(date_str)
+        else:
+            # Check if current date is more than 1 day after the last date in the current group
+            days_diff = (date - current_group['dates'][-1]).days
+            if days_diff > 1:
+                # Start a new group
+                groups.append(current_group)
+                current_group = {'images': [img], 'dates': [date], 'ids': [id_], 'date_strs': [date_str]}
+            else:
+                # Add to current group
+                current_group['images'].append(img)
+                current_group['dates'].append(date)
+                current_group['ids'].append(id_)
+                current_group['date_strs'].append(date_str)
+    
+    # Add the last group if it's not empty
+    if current_group['images']:
+        groups.append(current_group)
+    
+    # Step 4: Filter groups to keep only those with two or more images
+    original_group_count = len(groups)
+    groups = [group for group in groups if len(group['images']) >= 2]
+    filtered_count = original_group_count - len(groups)
+    
+    # if filtered_count > 0:
+    #     print(f"Filtered out {filtered_count} acquisition events with fewer than 2 images.")
+    
+    if len(groups) == 0:
+        print("WARNING: No valid UAVSAR acquisition events with 2+ images found after filtering!")
+        return None
+    
+    # Get tensor dimensions
+    n_bands, h, w = images[0].shape
+    T = len(groups)  # Number of acquisition events
+    G_max = max_images_per_group  # Maximum images per event
+    
+    # Initialize padded tensors and masks
+    device = images[0].device
+    padded_images = torch.zeros((T, G_max, n_bands, h, w), dtype=images[0].dtype, device=device)
+    attention_mask = torch.zeros((T, G_max), dtype=torch.bool, device=device)
+    invalid_mask = torch.zeros((T, G_max, n_bands, h, w), dtype=torch.bool, device=device)
+    
+    # Lists for metadata
+    group_dates = []  # Representative date for each group
+    group_date_strs = []  # String representation of representative dates
+    group_ids = []  # IDs for each group
+    
+    # Step 5: Populate padded tensors
+    for t, group in enumerate(groups):
+        actual_count = len(group['images'])
+        count_to_pad = min(actual_count, G_max)
         
-        # Ensure means and stds have the right shape for broadcasting
-        means = uavsar_means.view(1, -1, 1, 1).to(images.dtype)
-        stds = uavsar_stds.view(1, -1, 1, 1).to(images.dtype)
+        if actual_count > G_max:
+            print(f"WARNING: Group {t} has {actual_count} images, but only {G_max} will be used (truncating).")
+        
+        # Copy images into padded tensor
+        for i in range(count_to_pad):
+            padded_images[t, i] = group['images'][i]
+            attention_mask[t, i] = True
+            
+            # Mark invalid pixels in the original images
+            invalid_mask[t, i] = torch.isnan(group['images'][i]) | torch.isinf(group['images'][i])
+        
+        # Store representative date (first date in group) and IDs
+        group_dates.append(group['dates'][0])
+        group_date_strs.append(group['date_strs'][0])
+        group_ids.append(group['ids'][:count_to_pad])  # Truncate if necessary
+    
+    # Step 6: Normalize the padded images
+    if uavsar_means is not None and uavsar_stds is not None:
+        # Create copies of the original tensors as we'll modify them
+        padded_images_normalized = padded_images.clone()
+        
+        # Set invalid values to means temporarily for normalization
+        for band_idx in range(n_bands):
+            band_invalid_mask = invalid_mask[..., band_idx, :, :]
+            if band_invalid_mask.any():
+                padded_images_normalized[..., band_idx, :, :][band_invalid_mask] = uavsar_means[band_idx].to(padded_images.dtype)
+        
+        # Reshape means and stds for broadcasting: [1, 1, C, 1, 1]
+        means = uavsar_means.view(1, 1, -1, 1, 1).to(padded_images.dtype)
+        stds = uavsar_stds.view(1, 1, -1, 1, 1).to(padded_images.dtype)
         
         # Normalize
-        images = (images - means) / stds
+        padded_images_normalized = (padded_images_normalized - means) / stds
         
-        # Set any new invalid values (that might appear after normalization) to 0
-        # which is the mean in normalized space
-        images[torch.isnan(images) | torch.isinf(images)] = 0.0
+        # Find any new invalid values created during normalization
+        new_invalid_mask = torch.isnan(padded_images_normalized) | torch.isinf(padded_images_normalized)
+        padded_images_normalized[new_invalid_mask] = 0.0
         
-        # Convert to specified dtype for memory efficiency
-        images = images.to(dtype)
+        # Update the invalid mask
+        invalid_mask = invalid_mask | new_invalid_mask
+        
+        # Zero out padded positions using the attention mask
+        float_attention_mask = attention_mask.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).float()
+        padded_images_normalized = padded_images_normalized * float_attention_mask
+        
+        # Convert to specified dtype
+        padded_images = padded_images_normalized.to(dtype)
     
-    # Compute relative dates for the filtered dates
-    relative_dates = compute_relative_dates(dates, reference_date)
+    # Step 7: Compute relative dates for representative dates
+    relative_dates = compute_relative_dates(group_date_strs, reference_date)
     
     return {
-        'images': images,                     # Normalized image tensor: [n_valid_images, n_bands, h, w] in specified dtype
-        'ids': ids,                           # Filtered list of image IDs
-        'dates': dates,                       # Filtered list of dates
-        'relative_dates': relative_dates,     # Tensor: [n_valid_images, 1]
-        'img_bbox': tile['uavsar_img_bbox'],  # Bounding box
-        'bands': tile['uavsar_bands']         # Band information
+        'images': padded_images,                # Shape: [T, G_max, n_bands, h, w]
+        'attention_mask': attention_mask,       # Shape: [T, G_max]
+        'relative_dates': relative_dates,       # Shape: [T, 1]
+        'dates': group_date_strs,               # List of T representative dates
+        'ids': group_ids,                       # List of lists: [[ids for group 0], [ids for group 1], ...]
+        'invalid_mask': invalid_mask,           # Shape: [T, G_max, n_bands, h, w]
+        'img_bbox': tile['uavsar_img_bbox'],    # Bounding box
+        'bands': tile['uavsar_bands']           # Band information
     }
-
 
 ##########################################
 # Point Cloud and Attribute Normalization Functions
@@ -1320,6 +1416,7 @@ def anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points
             - voxel_sizes: List of horizontal voxel sizes (in centimeters) used for each mask.
               Note: vertical voxel size = horizontal_size * vertical_ratio
     """
+    # print("Using anisotropic voxel downsampling with vertical ratio:", vertical_ratio)
     # Precompute values that remain constant for all iterations
     min_coords = np.min(points, axis=0)
     points_shifted = points - min_coords  # Precompute shifted points
@@ -1480,217 +1577,514 @@ def anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points
     
     return masks, voxel_sizes
 
+# Define these helper functions at the module level (outside any other function)
+def compute_anisotropic_voxel_mask(horizontal_voxel_size_cm, points, points_shifted, vertical_ratio):
+    """Compute anisotropic voxel mask for a given horizontal voxel size."""
+    # print("Computing anisotropic voxel mask with horizontal voxel size:", horizontal_voxel_size_cm)
+    # Convert to meters
+    horizontal_voxel_size = horizontal_voxel_size_cm / 100.0
+    vertical_voxel_size = horizontal_voxel_size * vertical_ratio
+    
+    # Create anisotropic voxel size array [x_size, y_size, z_size]
+    voxel_sizes = np.array([horizontal_voxel_size, horizontal_voxel_size, vertical_voxel_size])
+    
+    # Compute voxel indices with different scales for each dimension
+    voxel_indices = np.floor(points_shifted / voxel_sizes).astype(int)
+    
+    # Dictionary-based approach for better memory performance
+    voxel_dict = {}
+    for idx, voxel_idx in enumerate(voxel_indices):
+        voxel_key = tuple(voxel_idx)
+        if voxel_key not in voxel_dict:
+            voxel_dict[voxel_key] = []
+        voxel_dict[voxel_key].append(idx)
+    
+    # Create mask
+    mask = np.zeros(len(points_shifted), dtype=bool)
+    for indices in voxel_dict.values():
+        if not indices:
+            continue
+        # Compute centroid of points in this voxel
+        voxel_points = points[indices]
+        centroid = np.mean(voxel_points, axis=0)
+        # Use squared distance (faster than np.linalg.norm)
+        distances = np.sum((voxel_points - centroid)**2, axis=1)
+        closest_idx = indices[np.argmin(distances)]
+        mask[closest_idx] = True
+    
+    return mask, np.sum(mask)
+
+
+def process_one_max_points_aniso(args):
+    """Process one max_points threshold for anisotropic voxel downsampling."""
+    max_points, points, points_shifted, initial_voxel_size_cm, vertical_ratio = args
+    
+    # Use binary search to find optimal voxel size
+    min_voxel_size = initial_voxel_size_cm
+    max_voxel_size = initial_voxel_size_cm * 10  # Reasonable upper bound
+    
+    best_mask = None
+    best_voxel_size = None
+    best_count = float('inf')
+    
+    iterations = 0
+    max_iterations = 10  # Prevent infinite loops
+    
+    while max_voxel_size - min_voxel_size > 0.5 and iterations < max_iterations:
+        iterations += 1
+        current_voxel_size_cm = (min_voxel_size + max_voxel_size) / 2
+        
+        mask, point_count = compute_anisotropic_voxel_mask(
+            current_voxel_size_cm, points, points_shifted, vertical_ratio
+        )
+        # print(f"Current voxel size: {current_voxel_size_cm} cm, Point count: {point_count}, Best count: {best_count}")
+        if point_count <= max_points:
+            # This voxel size works, try a smaller size
+            if point_count > best_count or best_count > max_points:
+                best_mask = mask
+                best_voxel_size = current_voxel_size_cm
+                best_count = point_count
+            max_voxel_size = current_voxel_size_cm
+        else:
+            # Too many points, try a larger voxel size
+            min_voxel_size = current_voxel_size_cm
+    
+    # print("Best mask found, point count:", best_count)
+    # If binary search didn't converge, use linear increase as fallback
+    if best_mask is None or best_count > max_points:
+        current_voxel_size_cm = min_voxel_size
+        # print(f"Using linear increase for voxel size {current_voxel_size_cm}")
+        # Start with small step sizes and gradually increase if needed
+        step_factor = 0.5
+        max_step = 5.0
+        
+        while True:
+            mask, point_count = compute_anisotropic_voxel_mask(
+                current_voxel_size_cm, points, points_shifted, vertical_ratio
+            )
+            
+            if point_count <= max_points:
+                best_mask = mask
+                best_voxel_size = current_voxel_size_cm
+                break
+                
+            # Adaptive increment to converge faster
+            step_size = min(max_step, step_factor * (point_count / max_points))
+            current_voxel_size_cm += step_size
+            step_factor *= 1.2  # Gradually increase step factor
+    
+    return max_points, best_mask, best_voxel_size
+
+# Similar function for regular voxel downsampling
+def compute_voxel_mask(voxel_size_cm, points, points_shifted):
+    """Compute voxel mask for a given voxel size."""
+    voxel_size = voxel_size_cm / 100.0  # Convert to meters
+    
+    # Compute voxel indices for each point
+    voxel_indices = np.floor(points_shifted / voxel_size).astype(int)
+    
+    # Dictionary-based approach for better memory performance
+    voxel_dict = {}
+    for i, voxel_idx in enumerate(voxel_indices):
+        voxel_key = tuple(voxel_idx)
+        if voxel_key not in voxel_dict:
+            voxel_dict[voxel_key] = []
+        voxel_dict[voxel_key].append(i)
+    
+    # Create mask
+    mask = np.zeros(len(points_shifted), dtype=bool)
+    for indices in voxel_dict.values():
+        if not indices:
+            continue
+        # Compute centroid of points in this voxel
+        voxel_points = points[indices]
+        centroid = np.mean(voxel_points, axis=0)
+        # Use squared distance (faster than np.linalg.norm)
+        distances = np.sum((voxel_points - centroid)**2, axis=1)
+        closest_idx = indices[np.argmin(distances)]
+        mask[closest_idx] = True
+    
+    return mask, np.sum(mask)
+
+def process_one_max_points_voxel(args):
+    """Process one max_points threshold for regular voxel downsampling."""
+    max_points, points, points_shifted, initial_voxel_size_cm = args
+    
+    # Use binary search to find optimal voxel size
+    min_voxel_size = initial_voxel_size_cm
+    max_voxel_size = initial_voxel_size_cm * 10  # Reasonable upper bound
+    
+    best_mask = None
+    best_voxel_size = None
+    best_count = float('inf')
+    
+    iterations = 0
+    max_iterations = 10  # Prevent infinite loops
+    
+    while max_voxel_size - min_voxel_size > 0.5 and iterations < max_iterations:
+        iterations += 1
+        current_voxel_size_cm = (min_voxel_size + max_voxel_size) / 2
+        
+        mask, point_count = compute_voxel_mask(
+            current_voxel_size_cm, points, points_shifted
+        )
+        
+        if point_count <= max_points:
+            # This voxel size works, try a smaller size
+            if point_count > best_count or best_count > max_points:
+                best_mask = mask
+                best_voxel_size = current_voxel_size_cm
+                best_count = point_count
+            max_voxel_size = current_voxel_size_cm
+        else:
+            # Too many points, try a larger voxel size
+            min_voxel_size = current_voxel_size_cm
+    
+    # If binary search didn't converge, use linear increase as fallback
+    if best_mask is None or best_count > max_points:
+        current_voxel_size_cm = min_voxel_size
+        while True:
+            mask, point_count = compute_voxel_mask(
+                current_voxel_size_cm, points, points_shifted
+            )
+            if point_count <= max_points:
+                best_mask = mask
+                best_voxel_size = current_voxel_size_cm
+                break
+            # Adaptive increment to converge faster
+            current_voxel_size_cm += 2 * (point_count / max_points)
+    
+    return max_points, best_mask, best_voxel_size
+
+def parallel_anisotropic_voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list, vertical_ratio=0.2):
+    """
+    Parallel version of anisotropic_voxel_downsample_masks using all available CPUs.
+    """
+    print()
+    # Precompute values that remain constant for all iterations
+    min_coords = np.min(points, axis=0)
+    points_shifted = points - min_coords  # Precompute shifted points
+    
+    # Create result arrays with the same length as max_points_list
+    masks = [None] * len(max_points_list)
+    voxel_sizes = [None] * len(max_points_list)
+    
+    # Use ProcessPoolExecutor for parallelization
+    num_cores = multiprocessing.cpu_count()
+    print(f"Using {num_cores} CPU cores for parallel anisotropic voxel downsampling")
+    
+    # Prepare arguments for parallel processing - CRITICAL CHANGE HERE
+    args_list = [
+        (max_points, points, points_shifted, initial_voxel_size_cm, vertical_ratio)
+        for max_points in max_points_list
+    ]
+    
+    # Process in parallel
+    with ProcessPoolExecutor(max_workers=num_cores) as executor:
+        results = list(executor.map(process_one_max_points_aniso, args_list))
+        
+    # Process results
+    for i, (max_points, mask, voxel_size) in enumerate(results):
+        # Find the corresponding index in the original list
+        idx = max_points_list.index(max_points)
+        masks[idx] = mask
+        voxel_sizes[idx] = voxel_size
+    
+    return masks, voxel_sizes
+
+def parallel_voxel_downsample_masks(points, initial_voxel_size_cm, max_points_list):
+    """
+    Parallel version of voxel_downsample_masks using all available CPUs.
+    """
+    # Precompute values that remain constant for all iterations
+    min_coords = np.min(points, axis=0)
+    points_shifted = points - min_coords  # Precompute shifted points
+    
+    # Create result arrays with the same length as max_points_list
+    masks = [None] * len(max_points_list)
+    voxel_sizes = [None] * len(max_points_list)
+    
+    # Use ProcessPoolExecutor for parallelization
+    num_cores = multiprocessing.cpu_count()
+    print(f"Using {num_cores} CPU cores for parallel voxel downsampling")
+    
+    # Prepare arguments for parallel processing - CRITICAL CHANGE HERE
+    args_list = [
+        (max_points, points, points_shifted, initial_voxel_size_cm)
+        for max_points in max_points_list
+    ]
+    
+    # Process in parallel
+    with ProcessPoolExecutor(max_workers=num_cores) as executor:
+        results = list(executor.map(process_one_max_points_voxel, args_list))
+        
+    # Process results
+    for i, (max_points, mask, voxel_size) in enumerate(results):
+        # Find the corresponding index in the original list
+        idx = max_points_list.index(max_points)
+        masks[idx] = mask
+        voxel_sizes[idx] = voxel_size
+    
+    return masks, voxel_sizes
+
 
 ##########################################
 # Precomputation Function
 ##########################################
 
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+def process_single_tile(sample, naip_means=None, naip_stds=None, uavsar_means=None, uavsar_stds=None,
+                       point_attr_means=None, point_attr_stds=None, normalization_type='bbox',
+                       max_dep_points=10000, precision=32, downsample_method='voxel',
+                       initial_voxel_size_cm=5, max_uav_points=100000, vertical_ratio=0.2,
+                       use_existing_masks=True):
+    """Process a single tile - this function will be run in parallel."""
+    # Get PyTorch dtype
+    print(f"Processing tile {sample['tile_id']}")
+    dtype = get_torch_dtype(precision)
+    k_values = [16]
+    
+    # Extract data
+    dep_points = sample['dep_points']
+    dep_pnt_attr = sample['dep_pnt_attr']
+    uav_points = sample['uav_points']
+    bbox = sample['bbox']
+    tile_id = sample.get('tile_id', 'unknown')
+    
+    # Limit the number of 3DEP points if max_dep_points is specified
+    if max_dep_points is not None and len(dep_points) > max_dep_points:
+        indices = torch.randperm(len(dep_points))[:max_dep_points]
+        dep_points = dep_points[indices]
+        if dep_pnt_attr is not None:
+            dep_pnt_attr = dep_pnt_attr[indices]
+    # print(f"Tile {tile_id}: 3DEP points: {len(dep_points)}, UAV points: {len(uav_points)}")
+    # Downsample UAV points - always use SERIAL method
+    if downsample_method != 'none':
+        mask = None
+        # print(f"Tile {tile_id}: Downsampling UAV points with {downsample_method} method")
+        # Only check for existing masks if use_existing_masks is True
+        if use_existing_masks:
+            if 'uav_downsample_mask' in sample and sample['uav_downsample_mask'] is not None:
+                mask = sample['uav_downsample_mask']
+                if mask.dtype != torch.bool:
+                    mask = mask.bool()
+                mask_source = "'uav_downsample_mask'"
+            elif 'uav_downsample_masks' in sample and len(sample['uav_downsample_masks']) > 0:
+                mask = sample['uav_downsample_masks'][0]
+                if mask.dtype != torch.bool:
+                    mask = mask.bool()
+                mask_source = "'uav_downsample_masks[0]'"
+        
+        # Generate a new mask if we don't have one - ALWAYS SERIAL PROCESSING HERE
+        if mask is None:
+            # Convert points to numpy for the voxel downsampling functions
+            uav_points_np = uav_points.detach().cpu().numpy()
+            
+            # Apply different downsampling methods - always use serial version
+            if downsample_method == 'voxel':
+                masks, voxel_sizes = voxel_downsample_masks(
+                    uav_points_np, initial_voxel_size_cm, [max_uav_points]
+                )
+                mask = masks[0]
+                voxel_info = f"voxel size: {voxel_sizes[0]:.2f} cm"
+            elif downsample_method == 'anisotropic_voxel':
+                masks, voxel_sizes = anisotropic_voxel_downsample_masks(
+                    uav_points_np, initial_voxel_size_cm, [max_uav_points], vertical_ratio
+                )
+                mask = masks[0]
+                voxel_info = f"horizontal voxel size: {voxel_sizes[0]:.2f} cm, vertical size: {voxel_sizes[0] * vertical_ratio:.2f} cm"
+            
+            # Convert numpy mask to torch
+            mask = torch.from_numpy(mask).to(uav_points.device)
+            mask_source = f"new {downsample_method} mask"
+        
+        # Apply the mask
+        if mask is not None:
+            original_count = len(uav_points)
+            uav_points = uav_points[mask]
+            
+            # Log output will be captured in the process output
+            processing_info = f"Tile {tile_id}: Using {mask_source}, {voxel_info if 'voxel_info' in locals() else ''}, downsampled from {len(sample['uav_points'])} to {len(uav_points)} points ({len(uav_points)/original_count*100:.1f}%)"
+
+    # print("Normalizing point clouds...")
+    # Normalize point clouds
+    dep_points_norm, uav_points_norm, center, scale = normalize_point_clouds_with_bbox(
+        dep_points, uav_points, bbox, dtype=dtype
+    )
+    
+    # Normalize point attributes if statistics are provided
+    dep_points_attr_norm = None
+    if dep_pnt_attr is not None and point_attr_means is not None and point_attr_stds is not None:
+        # Create a copy to avoid modifying the original
+        dep_points_attr_norm = dep_pnt_attr.clone()
+        
+        # Handle invalid values
+        invalid_mask = torch.isnan(dep_points_attr_norm) | torch.isinf(dep_points_attr_norm)
+        
+        # Apply normalization
+        if invalid_mask.any():
+            # Set invalid values to means temporarily
+            for attr_idx in range(dep_points_attr_norm.shape[1]):
+                attr_invalid_mask = invalid_mask[:, attr_idx]
+                if attr_invalid_mask.any():
+                    dep_points_attr_norm[:, attr_idx][attr_invalid_mask] = point_attr_means[attr_idx].to(dep_points_attr_norm.dtype)
+        
+        # Normalize using global stats
+        means = point_attr_means.to(dep_points_attr_norm.dtype)
+        stds = point_attr_stds.to(dep_points_attr_norm.dtype)
+        dep_points_attr_norm = (dep_points_attr_norm - means) / stds
+        
+        # Set any remaining invalid values to 0 (normalized mean)
+        dep_points_attr_norm[torch.isnan(dep_points_attr_norm) | torch.isinf(dep_points_attr_norm)] = 0.0
+        
+        # Convert to torch.float16 for memory usage
+        dep_points_attr_norm = dep_points_attr_norm.to(torch.float16)
+
+    # print("calculating KNN edge indices...")
+    # --- KNN Edge Indices Computation ---
+    knn_edge_indices = {}
+    for k in k_values:
+        edge_index_k = knn_graph(dep_points_norm, k=k, loop=False)
+        edge_index_k = to_undirected(edge_index_k, num_nodes=dep_points_norm.size(0))
+        knn_edge_indices[k] = edge_index_k
+    
+    # Filter z values greater than 95m for UAV points
+    z_filter_mask = uav_points_norm[:, 2] <= 95
+    if z_filter_mask.sum() < len(uav_points_norm):
+        filter_info = f"Filtered {len(uav_points_norm) - z_filter_mask.sum()} UAV points with z > 95m"            
+        if z_filter_mask.sum() < 0.8 * len(uav_points_norm):
+            return None  # Skip this tile
+        uav_points_norm = uav_points_norm[z_filter_mask]    
+
+    # --- Imagery Preprocessing ---
+    ref_date_str = sample['uav_meta']['datetime']
+    ref_date = parse_date(ref_date_str)
+    
+    # print("Preprocessing imagery...")
+    # Process NAIP and UAVSAR imagery if available
+    naip_preprocessed = None
+    uavsar_preprocessed = None
+    
+    if sample.get('has_naip', False) and 'naip_imgs' in sample:
+        naip_preprocessed = preprocess_naip_imagery(sample, ref_date, naip_means, naip_stds, dtype=dtype)
+        
+    if sample.get('has_uavsar', False) and 'uavsar_imgs' in sample:
+        uavsar_preprocessed = preprocess_uavsar_imagery(sample, ref_date, uavsar_means, uavsar_stds, dtype=dtype)
+    
+    # Create unified precomputed sample
+    precomputed_sample = {
+        'dep_points_norm': dep_points_norm,
+        'uav_points_norm': uav_points_norm,
+        'dep_points_attr_norm': dep_points_attr_norm,
+        'center': center,
+        'scale': scale,
+        'knn_edge_indices': knn_edge_indices,
+        'naip': naip_preprocessed,
+        'uavsar': uavsar_preprocessed,
+        'tile_id': sample.get('tile_id', None),
+        'processing_info': processing_info if 'processing_info' in locals() else "",
+        'filter_info': filter_info if 'filter_info' in locals() else ""
+    }
+    
+    return precomputed_sample, tile_id
+
+
 def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=None, uavsar_stds=None, 
                       point_attr_means=None, point_attr_stds=None, normalization_type: str = 'bbox',
                       max_dep_points=10000, precision: int = 32,
                       downsample_method='voxel', initial_voxel_size_cm=5, max_uav_points=100000,
-                      vertical_ratio=0.2, use_existing_masks=True):
+                      vertical_ratio=0.2, use_existing_masks=True, use_parallel=False, num_workers=None):
     """
-    Precompute all necessary features for each tile in the dataset.
-    This function is updated to work with the flattened data structure.
+    Precompute all necessary features for each tile in the dataset in parallel.
+    For downsampling within each tile, serial processing is used.
     
-    For each sample (tile), this function performs:
-      - Downsampling of UAV points using the first available downsample mask.
-      - If max_dep_points is specified, randomly sample 3DEP points to that limit.
-      - Normalization of 3DEP (dep_points) and downsampled UAV points to a common coordinate system,
-        using the provided 2D bounding box.
-      - Normalization of point attributes using global mean and standard deviation.
-      - Parsing of the UAV acquisition date and preprocessing of NAIP and UAVSAR imagery,
-        including temporal sorting, computing relative acquisition dates, and band normalization.
-      - Computation of KNN edge indices for 3DEP points for each k in the list.
+    Parameters:
+        data_list: List of sample dictionaries.
+        ...
+        use_parallel: Whether to use parallel processing (backward compatibility)
+        num_workers: Number of parallel workers. If None, uses all available cores.
     
-    Inputs:
-      data_list: List of sample dictionaries.
-      naip_means: Optional tensor of shape [n_bands] with mean values for NAIP bands.
-      naip_stds: Optional tensor of shape [n_bands] with standard deviation values for NAIP bands.
-      uavsar_means: Optional tensor of shape [n_bands] with mean values for UAVSAR bands.
-      uavsar_stds: Optional tensor of shape [n_bands] with standard deviation values for UAVSAR bands.
-      point_attr_means: Optional tensor of shape [n_attr] with mean values for point attributes.
-      point_attr_stds: Optional tensor of shape [n_attr] with standard deviation values for point attributes.
-      normalization_type: 'mean_std' or 'bbox'. 'bbox' normalizes x,y using bbox and z using data stats.
-      max_dep_points: If specified, randomly sample 3DEP points to this maximum number.
-      precision: Integer specifying numerical precision (16, 32, or 64).
-      downsample_method: Method to use for downsampling ('voxel' or 'anisotropic_voxel' or 'none')
-      initial_voxel_size_cm: Starting voxel size in centimeters
-      max_uav_points: Maximum number of UAV points to keep after downsampling
-      vertical_ratio: Ratio of vertical to horizontal voxel size (for anisotropic voxel downsampling)
-      , use_existing_masks=True
-      
     Returns:
-      precomputed_data_list: List of dictionaries with keys:
-         - 'dep_points_norm': [N_dep, 3] normalized 3DEP points in specified dtype.
-         - 'uav_points_norm': [N_uav, 3] downsampled & normalized UAV points in specified dtype.
-         - 'dep_points_attr_norm': [N_dep, n_attr] normalized point attributes in specified dtype.
-         - 'center': [1, 3] normalization center.
-         - 'scale': Scalar normalization factor.
-         - 'knn_edge_indices': Dict mapping k to KNN edge index tensors of shape [2, E] for 3DEP points.
-         - 'naip': Preprocessed and normalized NAIP imagery data in specified dtype.
-         - 'uavsar': Preprocessed and normalized UAVSAR imagery data in specified dtype.
-         - 'tile_id': Optional tile identifier.
+        precomputed_data_list: List of processed dictionaries.
     """
-    # Convert precision to PyTorch dtype
-    dtype = get_torch_dtype(precision)
+    print(use_parallel)
+    # Determine number of workers - support both parameter styles
+    if num_workers is None:
+        if use_parallel:
+            num_workers = multiprocessing.cpu_count()-1  # Leave one core free
+        else:
+            num_workers = 1  # No parallelism
     
-    precomputed_data_list = []
-    # Define list of k values for KNN computation.
-    # k_values = [10, 15]
-    k_values = [16]
+    print(f"Processing {len(data_list)} tiles in parallel using {num_workers} workers")
     
+    # If no parallelism is requested, process serially
+    if num_workers == 1:
+        print("Using serial processing for tiles")
+        precomputed_data_list = []
+        for idx, sample in enumerate(data_list):
+            try:
+                result, tile_id = process_single_tile(
+                    sample, naip_means, naip_stds, uavsar_means, uavsar_stds,
+                    point_attr_means, point_attr_stds, normalization_type,
+                    max_dep_points, precision, downsample_method,
+                    initial_voxel_size_cm, max_uav_points, vertical_ratio,
+                    use_existing_masks
+                )
+                if result is not None:
+                    precomputed_data_list.append(result)
+                    print(f"[{idx+1}/{len(data_list)}] {result['processing_info']}")
+                    if result.get('filter_info'):
+                        print(f"  {result['filter_info']}")
+                else:
+                    print(f"[{idx+1}/{len(data_list)}] Tile {tile_id}: Skipped due to filtering criteria")
+            except Exception as e:
+                print(f"[{idx+1}/{len(data_list)}] Error processing tile at index {idx}: {str(e)}")
+        return precomputed_data_list
+    
+    # Prepare arguments for each tile
+    tile_args = []
     for sample in data_list:
-        # --- Point Cloud Preprocessing ---
-        dep_points = sample['dep_points']       # [N_dep, 3] (3DEP points)
-        dep_pnt_attr = sample['dep_pnt_attr']   # [N_dep, n_attr] (3DEP point attributes)
-        uav_points = sample['uav_points']       # [N_uav, 3] (UAV points)
-        bbox = sample['bbox']                   # (xmin, ymin, xmax, ymax)
-        
-       # Limit the number of 3DEP points if max_dep_points is specified
-        if max_dep_points is not None and len(dep_points) > max_dep_points:
-            # Generate random indices for sampling
-            indices = torch.randperm(len(dep_points))[:max_dep_points]
-            # Sample the points
-            dep_points = dep_points[indices]
-            # Sample the point attributes if they exist
-            if dep_pnt_attr is not None:
-                dep_pnt_attr = dep_pnt_attr[indices]
-        
-        # Downsample UAV points
-        if downsample_method != 'none':
-            mask = None
-            
-            # Only check for existing masks if use_existing_masks is True
-            if use_existing_masks:
-                if 'uav_downsample_mask' in sample and sample['uav_downsample_mask'] is not None:
-                    mask = sample['uav_downsample_mask']
-                    if mask.dtype != torch.bool:
-                        mask = mask.bool()
-                    print(f"Tile {sample.get('tile_id', 'unknown')}: Using existing downsample mask from 'uav_downsample_mask'")
-                elif 'uav_downsample_masks' in sample and len(sample['uav_downsample_masks']) > 0:
-                    mask = sample['uav_downsample_masks'][0]
-                    if mask.dtype != torch.bool:
-                        mask = mask.bool()
-                    print(f"Tile {sample.get('tile_id', 'unknown')}: Using existing downsample mask from 'uav_downsample_masks[0]'")
-            
-            # Generate a new mask if we don't have one (either because use_existing_masks is False
-            # or because no existing mask was found)
-            if mask is None:
-                # Convert points to numpy for the voxel downsampling functions
-                uav_points_np = uav_points.detach().cpu().numpy()
-                
-                print(f"Tile {sample.get('tile_id', 'unknown')}: Generating new {downsample_method} downsample mask")
-                
-                # Apply different downsampling methods
-                if downsample_method == 'voxel':
-                    masks, voxel_sizes = voxel_downsample_masks(
-                        uav_points_np, initial_voxel_size_cm, [max_uav_points]
-                    )
-                    mask = masks[0]
-                    print(f"Tile {sample.get('tile_id', 'unknown')}: Used voxel size: {voxel_sizes[0]:.2f} cm")
-                elif downsample_method == 'anisotropic_voxel':
-                    masks, voxel_sizes = anisotropic_voxel_downsample_masks(
-                        uav_points_np, initial_voxel_size_cm, [max_uav_points], vertical_ratio
-                    )
-                    mask = masks[0]
-                    print(f"Tile {sample.get('tile_id', 'unknown')}: Used horizontal voxel size: {voxel_sizes[0]:.2f} cm, vertical size: {voxel_sizes[0] * vertical_ratio:.2f} cm")
-                
-                # Convert numpy mask to torch
-                mask = torch.from_numpy(mask).to(uav_points.device)
-            
-            # Apply the mask
-            if mask is not None:
-                original_count = len(uav_points)
-                uav_points = uav_points[mask]
-                
-                # Log the downsampling results
-                print(f"Tile {sample.get('tile_id', 'unknown')}: Downsampled UAV points from {len(sample['uav_points'])} to {len(uav_points)} points ({len(uav_points)/original_count*100:.1f}%)")
-
-        # Normalize point clouds
-        dep_points_norm, uav_points_norm, center, scale = normalize_point_clouds_with_bbox(
-            dep_points, uav_points, bbox, dtype=dtype
-        )
-        # Normalize point attributes if statistics are provided
-        dep_points_attr_norm = None
-        if dep_pnt_attr is not None and point_attr_means is not None and point_attr_stds is not None:
-            # Create a copy to avoid modifying the original
-            dep_points_attr_norm = dep_pnt_attr.clone()
-            
-            # Handle invalid values
-            invalid_mask = torch.isnan(dep_points_attr_norm) | torch.isinf(dep_points_attr_norm)
-            
-            # Apply normalization
-            if invalid_mask.any():
-                # Set invalid values to means temporarily
-                for attr_idx in range(dep_points_attr_norm.shape[1]):
-                    attr_invalid_mask = invalid_mask[:, attr_idx]
-                    if attr_invalid_mask.any():
-                        dep_points_attr_norm[:, attr_idx][attr_invalid_mask] = point_attr_means[attr_idx].to(dep_points_attr_norm.dtype)
-            
-            # Normalize using global stats
-            means = point_attr_means.to(dep_points_attr_norm.dtype)
-            stds = point_attr_stds.to(dep_points_attr_norm.dtype)
-            dep_points_attr_norm = (dep_points_attr_norm - means) / stds
-            
-            # Set any remaining invalid values to 0 (normalized mean)
-            dep_points_attr_norm[torch.isnan(dep_points_attr_norm) | torch.isinf(dep_points_attr_norm)] = 0.0
-            
-            # Convert to torch.float16 for memory usage. We don't need much precision for this data. 
-            dep_points_attr_norm = dep_points_attr_norm.to(torch.float16)
-        
-        # --- KNN Edge Indices Computation ---
-        # Compute KNN graphs for the normalized 3DEP points for each k in k_values.
-        knn_edge_indices = {}
-        for k in k_values:
-            # Compute knn_graph: returns edge_index of shape [2, E]
-            edge_index_k = knn_graph(dep_points_norm, k=k, loop=False)
-            # Make graph undirected.
-            edge_index_k = to_undirected(edge_index_k, num_nodes=dep_points_norm.size(0))
-            
-            knn_edge_indices[k] = edge_index_k
-        
-        #filter z values greater than 95m for UAV points. The drone was flown at ~120m AGL so this should be a safe filter
-        z_filter_mask = uav_points_norm[:, 2] <= 95
-        if z_filter_mask.sum() < len(uav_points_norm):
-            print(f"Filtered {len(uav_points_norm) - z_filter_mask.sum()} UAV points with z > 95m")            
-            if z_filter_mask.sum() < 0.8 * len(uav_points_norm):
-                print(f"Skipping tile due to more than 20% of UAV points being removed")
-                continue
-            uav_points_norm = uav_points_norm[z_filter_mask]    
-
-        # --- Imagery Preprocessing ---
-        # Get reference date from UAV metadata
-        ref_date_str = sample['uav_meta']['datetime']
-        ref_date = parse_date(ref_date_str)
-        
-        # Process NAIP and UAVSAR imagery if available
-        naip_preprocessed = None
-        uavsar_preprocessed = None
-        
-        if sample.get('has_naip', False) and 'naip_imgs' in sample:
-            naip_preprocessed = preprocess_naip_imagery(sample, ref_date, naip_means, naip_stds, dtype=dtype)
-            
-        if sample.get('has_uavsar', False) and 'uavsar_imgs' in sample:
-            uavsar_preprocessed = preprocess_uavsar_imagery(sample, ref_date, uavsar_means, uavsar_stds, dtype=dtype)
-        
-        # Create unified precomputed sample.
-        precomputed_sample = {
-            'dep_points_norm': dep_points_norm,         # [N_dep, 3] in specified dtype
-            'uav_points_norm': uav_points_norm,         # [N_uav_down, 3] in specified dtype
-            'dep_points_attr_norm': dep_points_attr_norm, # [N_dep, n_attr] in specified dtype
-            'center': center,                           # [1, 3]
-            'scale': scale,                             # Scalar
-            'knn_edge_indices': knn_edge_indices,       # Dict: k -> [2, E] edge indices for 3DEP
-            'naip': naip_preprocessed,                  # Preprocessed and normalized NAIP imagery data in specified dtype
-            'uavsar': uavsar_preprocessed,              # Preprocessed and normalized UAVSAR imagery data in specified dtype
-            'tile_id': sample.get('tile_id', None)      # Optional identifier
-        }
-        
-        precomputed_data_list.append(precomputed_sample)
+        args = (sample, naip_means, naip_stds, uavsar_means, uavsar_stds, 
+                point_attr_means, point_attr_stds, normalization_type,
+                max_dep_points, precision, downsample_method, 
+                initial_voxel_size_cm, max_uav_points, vertical_ratio,
+                use_existing_masks)
+        tile_args.append(args)
     
+    # Process tiles in parallel
+    precomputed_data_list = []
+    completed_count = 0
+    # print(f"Using {num_workers} workers for parallel processing")
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all jobs
+        # print("Submitting jobs for parallel processing...")
+        future_to_idx = {executor.submit(process_single_tile, *args): i for i, args in enumerate(tile_args)}
+        # print(f"Submitted {len(future_to_idx)} tasks for processing")
+        # Process results as they complete
+        for future in as_completed(future_to_idx):
+            
+            idx = future_to_idx[future]
+            completed_count += 1
+            
+            try:
+                result, tile_id = future.result()
+                if result is not None:  # Only add valid results
+                    precomputed_data_list.append(result)
+                    # Print processing info with progress indicator
+                    print(f"[{completed_count}/{len(data_list)}] {result['processing_info']}")
+                    if result.get('filter_info'):
+                        print(f"  {result['filter_info']}")
+                else:
+                    print(f"[{completed_count}/{len(data_list)}] Tile {tile_id}: Skipped due to filtering criteria")
+            except Exception as e:
+                print(f"[{completed_count}/{len(data_list)}] Error processing tile at index {idx}: {str(e)}")
+    
+    print(f"Completed processing. Successfully processed {len(precomputed_data_list)} tiles out of {len(data_list)}")
     return precomputed_data_list
+
+
 
 
 
@@ -1740,31 +2134,80 @@ def combined_pipeline():
                         help='Use existing downsampling masks if available (default: True)')
     parser.add_argument('--force-new-masks', action='store_false', dest='use_existing_masks',
                         help='Force generation of new downsampling masks even if existing ones are available')
-       
-    
+    parser.add_argument('--parallel', action='store_true', default=True,
+                      help='Use parallel processing for voxel downsampling (default: True)')
+    parser.add_argument('--no-parallel', action='store_false', dest='parallel',
+                      help='Disable parallel processing for voxel downsampling')       
+    parser.add_argument('--skip-split', action='store_true', default=False,
+                        help='Skip the splitting step and load pre-split data from disk')
     args = parser.parse_args()
-    
-    print("Step 1: Splitting dataset and checking for duplicates...")
-    result = split_dataset(
-        pt_file_path=args.pt_file,
-        geojson_file_path=args.geojson_file,
-        output_dir=args.output_dir,
-        create_val_set=args.create_val_set,
-        test_val_split_ratio=args.test_val_ratio,
-        min_uav_points=args.min_uav_points,
-        min_dep_points=args.min_dep_points,
-        min_uav_coverage_pct=args.min_coverage,
-        min_points_per_cell=args.min_points_per_cell,
-        min_uav_to_dep_ratio=args.min_uav_to_dep_ratio,
-        random_seed=args.random_seed,
-        remove_duplicates=args.remove_duplicates 
-    )
-    
-    # Extract tile data from the result
-    training_tiles = result['training_tiles']
-    test_tiles = result['test_tiles']
-    validation_tiles = result['validation_tiles']
-    stats = result['statistics']
+
+    print("Parsed arguments:")
+    for arg, value in vars(args).items():
+        print(f"  {arg}: {value}")
+
+
+    # Either split the dataset or load pre-split data depending on the --skip-split flag
+    if args.skip_split:
+        print("Skipping split step and loading pre-split data from disk...")
+        # Load training, testing, and validation tiles from disk
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, 
+                            message="You are using `torch.load` with `weights_only=False`")
+            try:
+                training_path = os.path.join(args.output_dir, 'training_tiles.pt')
+                training_tiles = torch.load(training_path, map_location='cpu')
+                print(f"Loaded {len(training_tiles)} training tiles from {training_path}")
+            except FileNotFoundError:
+                print(f"Error: Training file not found at {training_path}")
+                sys.exit(1)
+                
+            try:
+                test_path = os.path.join(args.output_dir, 'test_tiles.pt')
+                test_tiles = torch.load(test_path, map_location='cpu')
+                print(f"Loaded {len(test_tiles)} test tiles from {test_path}")
+            except FileNotFoundError:
+                print(f"Error: Test file not found at {test_path}")
+                sys.exit(1)
+            
+            validation_tiles = []
+            if args.create_val_set:
+                try:
+                    validation_path = os.path.join(args.output_dir, 'validation_tiles.pt')
+                    validation_tiles = torch.load(validation_path, map_location='cpu')
+                    print(f"Loaded {len(validation_tiles)} validation tiles from {validation_path}")
+                except FileNotFoundError:
+                    print(f"Warning: Validation file not found at {validation_path}. Continuing without validation tiles.")
+            
+        # Create stats dictionary for reporting
+        stats = {
+            'total_tiles': len(training_tiles) + len(test_tiles) + len(validation_tiles),
+            'training_tiles': len(training_tiles),
+            'test_tiles': len(test_tiles),
+            'validation_tiles': len(validation_tiles)
+        }
+    else:
+        print("Step 1: Splitting dataset and checking for duplicates...")
+        result = split_dataset(
+            pt_file_path=args.pt_file,
+            geojson_file_path=args.geojson_file,
+            output_dir=args.output_dir,
+            create_val_set=args.create_val_set,
+            test_val_split_ratio=args.test_val_ratio,
+            min_uav_points=args.min_uav_points,
+            min_dep_points=args.min_dep_points,
+            min_uav_coverage_pct=args.min_coverage,
+            min_points_per_cell=args.min_points_per_cell,
+            min_uav_to_dep_ratio=args.min_uav_to_dep_ratio,
+            random_seed=args.random_seed,
+            remove_duplicates=args.remove_duplicates 
+        )
+        
+        # Extract tile data from the result
+        training_tiles = result['training_tiles']
+        test_tiles = result['test_tiles']
+        validation_tiles = result['validation_tiles']
+        stats = result['statistics']
     
     # Print split statistics
     print("\nSplit statistics:")
@@ -1836,7 +2279,8 @@ def combined_pipeline():
         initial_voxel_size_cm=args.initial_voxel_size_cm,
         max_uav_points=args.max_uav_points,
         vertical_ratio=args.vertical_ratio,
-        use_existing_masks=args.use_existing_masks
+        use_existing_masks=args.use_existing_masks,
+        use_parallel=args.parallel
     )
     
     print("Precomputing test dataset...")
@@ -1851,7 +2295,8 @@ def combined_pipeline():
         initial_voxel_size_cm=args.initial_voxel_size_cm,
         max_uav_points=args.max_uav_points,
         vertical_ratio=args.vertical_ratio,
-        use_existing_masks=args.use_existing_masks
+        use_existing_masks=args.use_existing_masks,
+        use_parallel=args.parallel
     )
     
     print("Precomputing training dataset...")
@@ -1866,7 +2311,8 @@ def combined_pipeline():
         initial_voxel_size_cm=args.initial_voxel_size_cm,
         max_uav_points=args.max_uav_points,
         vertical_ratio=args.vertical_ratio,
-        use_existing_masks=args.use_existing_masks
+        use_existing_masks=args.use_existing_masks,
+        use_parallel=args.parallel
     )
     
     # Save all results

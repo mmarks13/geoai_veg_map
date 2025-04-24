@@ -50,143 +50,196 @@ class PositionalEncoding(nn.Module):
             return x + pos_enc  # [n_patches, embed_dim]
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 class PatchEmbedding(nn.Module):
     """
     Convert image patches to embeddings
+    (Shifted-Patch Tokenisation variant)
+
+    Args:
+        in_channels (int):  Number of input image channels
+        patch_size  (int):  Down-sampling factor (e.g. 10 for 40×40 → 4×4)
+        embed_dim   (int):  Output feature dimension per patch
     """
-    def __init__(self, in_channels, patch_size, embed_dim):
+    def __init__(self, in_channels: int, patch_size: int, embed_dim: int):
         super().__init__()
         self.patch_size = patch_size
-        
-        # Linear projection of flattened patches
-        self.proj = nn.Conv2d(
-            in_channels, embed_dim,
-            kernel_size=patch_size, stride=patch_size
-        )
-        
-        # Layer normalization
-        self.norm = nn.LayerNorm(embed_dim)
-        
-    def forward(self, x):
-        """
-        Args:
-            x: Image tensor [B, C, H, W]
-        Returns:
-            patch_embed: Patch embeddings [B, N, embed_dim]
-                where N = (H // patch_size) * (W // patch_size)
-        """
-        # Project patches
-        x = self.proj(x)  # [B, embed_dim, H', W'] where H' = H//patch_size, W' = W//patch_size
-        
-        # Rearrange to [B, H'*W', embed_dim]
-        B, C, H, W = x.shape  # C is now embed_dim
-        x = x.flatten(2).transpose(1, 2)  # [B, H'*W', embed_dim]
-        
-        # Apply normalization
-        x = self.norm(x)  # [B, H'*W', embed_dim]
-        
-        return x
 
-
-class TransformerEncoderBlock(nn.Module):
-    """
-    Transformer encoder block with single-headed self-attention
-    """
-    def __init__(self, dim, dropout=0.1):
-        super().__init__()
-        # Layer normalization for attention
-        self.norm1 = nn.LayerNorm(dim)
-        # Self-attention layer 
-        self.attn = nn.MultiheadAttention(dim, num_heads=4, dropout=dropout, batch_first=True)
-        # Layer normalization for feed-forward
-        self.norm2 = nn.LayerNorm(dim)
-        # Feed-forward network
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, dim * 4),
+        # --- Local “stem” with stride-1 convolutions -----------------------
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, embed_dim // 2, kernel_size=3, stride=1, padding=1),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim)
+            nn.Conv2d(embed_dim // 2, embed_dim,       kernel_size=3, stride=1, padding=1),
         )
-        self.dropout = nn.Dropout(dropout)
 
-    
-    def forward(self, x):
+        # Down-sample to a 4×4 grid (stride = patch_size)
+        self.pool = nn.AvgPool2d(patch_size)
+        # Layer normalization over channel dimension
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Input tensor [N, D] or [B, N, D]
-                N: Number of patches
-                D: Embedding dimension
+            x (Tensor): [B, C, H, W] input image batch
         Returns:
-            out: Transformed tensor with same shape as input
+            patch_embed (Tensor): [B, N, embed_dim] where
+                                  N = (H // patch_size) × (W // patch_size)
         """
-        # Add batch dimension if not present
-        if x.dim() == 2:
-            x = x.unsqueeze(0)  # [1, N, D]
-            single_batch = True
-        else:
-            single_batch = False
-            
-        # Self-attention with residual connection
-        norm_x = self.norm1(x)  # [B, N, D]
-        attn_output, _ = self.attn(norm_x, norm_x, norm_x)  # [B, N, D]
-        x = x + self.dropout(attn_output)  # [B, N, D]
-        
-        # Feed-forward with residual connection
-        norm_x = self.norm2(x)  # [B, N, D]
-        ffn_output = self.ffn(norm_x)  # [B, N, D]
-        x = x + self.dropout(ffn_output)  # [B, N, D]
-        
-        # Remove batch dimension if it was added
-        if single_batch:
-            x = x.squeeze(0)  # [N, D]
-            
+        # Local feature extraction
+        x = self.stem(x)              # [B, embed_dim, H, W]
+        # Spatial down-sampling
+        x = self.pool(x)              # [B, embed_dim, H', W']  (H' = W' = 4)
+        # Flatten patches
+        B, C, H, W = x.shape
+        x = x.flatten(2).transpose(1, 2)  # [B, N, embed_dim] (N = H'×W' = 16)
+        # Per-patch normalization
+        x = self.norm(x)
         return x
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from torchvision.ops import StochasticDepth
+
+
+# ----------------------------------------------------------------------
+# Helper: MLP with depth-wise conv (ConViT trick)
+# ----------------------------------------------------------------------
+class MLPWithDWConv(nn.Module):
+    def __init__(self, dim: int, mlp_ratio: int = 4, dropout: float = 0.0):
+        super().__init__()
+        hidden = dim * mlp_ratio
+        self.fc1   = nn.Linear(dim, hidden)
+        self.act   = nn.GELU()
+        self.dwconv = nn.Conv1d(hidden, hidden, 3, 1, 1, groups=hidden)
+        self.fc2   = nn.Linear(hidden, dim)
+        self.drop  = nn.Dropout(dropout)
+
+    def forward(self, x):                  # x: [B, N, D]
+        x = self.act(self.fc1(x))          # [B, N, hidden]
+        # depth-wise conv over the sequence
+        x = x.transpose(1, 2)              # [B, hidden, N]
+        x = self.dwconv(x)
+        x = x.transpose(1, 2)              # back to [B, N, hidden]
+        x = self.act(x)
+        x = self.fc2(x)
+        return self.drop(x)                # [B, N, D]
+
+
+# ----------------------------------------------------------------------
+# TransformerEncoderBlock
+# ----------------------------------------------------------------------
+class TransformerEncoderBlock(nn.Module):
+    def __init__(self, dim: int, dropout: float = 0.0, drop_path: float = 0.0):
+        super().__init__()
+
+        # 1) Self-attention branch
+        self.norm1  = nn.LayerNorm(dim)
+        self.attn   = nn.MultiheadAttention(dim, num_heads=4,
+                                            dropout=dropout, batch_first=True)
+        self.gamma1 = nn.Parameter(1e-5 * torch.ones(dim))
+        self.drop1  = StochasticDepth(drop_path, mode="row")
+
+        # 2) Feed-forward branch
+        self.norm2 = nn.LayerNorm(dim)
+        self.ffn   = MLPWithDWConv(dim, mlp_ratio=4, dropout=dropout)
+        self.gamma2 = nn.Parameter(1e-5 * torch.ones(dim))
+        self.drop2  = StochasticDepth(drop_path, mode="row")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        single = False
+        if x.dim() == 2:                   # [N, D]  → add batch dim
+            x, single = x.unsqueeze(0), True
+
+        # self-attention + residual
+        a, _ = self.attn(self.norm1(x), self.norm1(x), self.norm1(x),
+                         need_weights=False)
+        x = x + self.drop1(self.gamma1 * a)
+
+        # MLP + residual
+        y = self.ffn(self.norm2(x))
+        x = x + self.drop2(self.gamma2 * y)
+
+        return x.squeeze(0) if single else x
+
+
 
 
 class TemporalGRUEncoder(nn.Module):
     """
-    Simple GRU-based encoder for aggregating temporal information
+    GRU + attention-pool encoder for aggregating temporal information
+
+    The GRU models order; a lightweight attention layer learns
+    which acquisition dates are most informative.
     """
-    def __init__(self, embed_dim, hidden_dim=None):
+    def __init__(self, embed_dim: int, hidden_dim: int | None = None):
         super().__init__()
-        self.embed_dim = embed_dim
+        self.embed_dim  = embed_dim
         self.hidden_dim = hidden_dim if hidden_dim is not None else embed_dim
-        
-        # GRU to process temporal sequences
+
+        # ------------------------------------------------------------------
+        # 1) Bidirectional GRU over the temporal dimension
+        # ------------------------------------------------------------------
         self.gru = nn.GRU(
             input_size=embed_dim,
             hidden_size=self.hidden_dim,
             batch_first=True,
             bidirectional=True
-        )
-        
-        # Project bidirectional GRU output back to embed_dim
+        )                                               # output → [N, T, 2*hidden_dim]
+
+        # ------------------------------------------------------------------
+        # 2) Attention weights α_t  (one scalar per timestep)
+        # ------------------------------------------------------------------
+        self.attn_fc = nn.Linear(self.hidden_dim * 2, 1)  # [N, T, 1]
+
+        # ------------------------------------------------------------------
+        # 3) Final projection back to embed_dim
+        # ------------------------------------------------------------------
         self.projection = nn.Linear(self.hidden_dim * 2, embed_dim)
-        
-    def forward(self, x):
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Patch embeddings across temporal dimension [T, N, D]
-                T: Number of temporal acquisitions
-                N: Number of patches per acquisition
-                D: Embedding dimension
+            x (Tensor): Patch embeddings across time  [T, N, D]
+                T : number of temporal acquisitions
+                N : number of patches
+                D : embedding dimension
         Returns:
-            aggregated: Temporally aggregated patch embeddings [N, D]
+            aggregated (Tensor): Temporally aggregated embeddings [N, D]
         """
-        T, N, D = x.shape  # [T, N, D]
-        
-        # Reshape to process each patch separately through time
-        x = x.permute(1, 0, 2)  # [N, T, D]
-        
-        # Apply GRU to each patch's temporal sequence
-        output, _ = self.gru(x)  # output: [N, T, hidden_dim*2]
-        
-        # Take the final timestep's output
-        final_output = output[:, -1, :]  # [N, hidden_dim*2]
-        
+        T, N, D = x.shape                                 # [T, N, D]
+
+        # --------------------------------------------------------------
+        # Re-arrange so each patch’s time series is processed together
+        # --------------------------------------------------------------
+        x = x.permute(1, 0, 2)                            # [N, T, D]
+
+        # --------------------------------------------------------------
+        # Pass through bi-GRU
+        # --------------------------------------------------------------
+        h, _ = self.gru(x)                                # [N, T, 2*hidden_dim]
+
+        # --------------------------------------------------------------
+        # Compute attention weights and apply softmax over the T dimension
+        # --------------------------------------------------------------
+        alpha = F.softmax(self.attn_fc(h), dim=1)         # [N, T, 1]
+
+        # --------------------------------------------------------------
+        # Weighted temporal average
+        # --------------------------------------------------------------
+        context = (alpha * h).sum(dim=1)                  # [N, 2*hidden_dim]
+
+        # --------------------------------------------------------------
         # Project back to embed_dim
-        aggregated = self.projection(final_output)  # [N, D]
-        
+        # --------------------------------------------------------------
+        aggregated = self.projection(context)             # [N, D]
+
         return aggregated
 
 
@@ -606,10 +659,15 @@ class UAVSAREncoder(nn.Module):
         else:
             raise ValueError(f"Unsupported temporal encoder type: {temporal_encoder_type}. Use 'gru' or 'transformer'.")
     
-    def forward(self, x, img_bbox=None, relative_dates=None):
+    def forward(self, x, attention_mask=None, img_bbox=None, relative_dates=None):
         """
         Args:
-            x: UAVSAR images [T, C, H, W] where T is the number of temporal acquisitions
+            x: UAVSAR images [T, G_max, C, H, W] where:
+            - T is the number of UAVSAR acquisition events
+            - G_max is the maximum number of images per event (includes padding)
+            - C is number of channels (polarization bands)
+            - H, W are spatial dimensions
+            attention_mask: Boolean mask [T, G_max] indicating valid (non-padded) images
             img_bbox: Bounding box information for spatial alignment
             relative_dates: Relative days from UAV acquisition date [T, 1]
         Returns:
@@ -620,42 +678,64 @@ class UAVSAREncoder(nn.Module):
         if x is None or x.shape[0] == 0:
             # Return zero embeddings if no UAVSAR data is provided
             return torch.zeros(self.num_patches, self.embed_dim, device=device)  # [num_patches, embed_dim]
-            
-        T, C, H, W = x.shape  # [T, C, H, W]
-
         
-        # Process each temporal acquisition
-        patch_embeds = []
-        for t in range(T):
-            # Apply initial embedding
-            patches = self.patch_embed(x[t].unsqueeze(0))  # [1, embed_dim, H, W]
-            
-            # Reshape to [1, H*W, embed_dim]
-            patches = patches.flatten(2).transpose(1, 2)  # [1, H*W, embed_dim]
-            
-            # Apply normalization
-            patches = self.norm(patches)  # [1, H*W, embed_dim]
-            patches = patches.squeeze(0)  # [H*W, embed_dim] = [n_patches, embed_dim]
-            
-            
-            # Add positional encoding
-            patches = self.pos_encoding(patches)  # [n_patches, embed_dim]
-            
-            # Apply transformer
-            patches = self.transformer_block(patches)  # [n_patches, embed_dim]
-            
-            patch_embeds.append(patches)
+        T, G_max, C, H, W = x.shape  # [T, G_max, C, H, W]
         
-        # Stack along temporal dimension
-        patch_embeds = torch.stack(patch_embeds)  # [T, n_patches, embed_dim]
+        # If no attention mask provided, assume all images are valid
+        if attention_mask is None:
+            attention_mask = torch.ones((T, G_max), dtype=torch.bool, device=x.device)
         
-        # Aggregate across temporal dimension, using dates if available
+        # Reshape for batch processing through spatial encoder
+        x_reshaped = x.view(T * G_max, C, H, W)  # [T*G_max, C, H, W]
+        
+        # Apply initial embedding
+        patches = self.patch_embed(x_reshaped)  # [T*G_max, embed_dim, H, W]
+        
+        # Reshape to [T*G_max, H*W, embed_dim]
+        patches = patches.flatten(2).transpose(1, 2)  # [T*G_max, H*W, embed_dim]
+        
+        # Apply normalization
+        patches = self.norm(patches)  # [T*G_max, H*W, embed_dim]
+        
+        # Apply positional encoding efficiently using broadcasting
+        n_patches = H * W
+        # Get positional encoding once (doesn't depend on the batch content)
+        pos_encoding = self.pos_encoding(None, n_patches)  # [n_patches, embed_dim]
+        
+        # Apply to all elements in batch via broadcasting
+        # Reshape patches to [T*G_max, n_patches, embed_dim]
+        patches = patches + pos_encoding.unsqueeze(0)  # Broadcasting adds to each item in batch
+        
+        # Apply transformer block
+        patches = self.transformer_block(patches)  # [T*G_max, H*W, embed_dim]
+        
+        # Reshape back to [T, G_max, n_patches, embed_dim]
+        spatial_embeddings = patches.view(T, G_max, n_patches, self.embed_dim)
+        
+        # Perform masked averaging across G_max dimension
+        # First, create a float mask for arithmetic operations
+        float_mask = attention_mask.float().unsqueeze(-1).unsqueeze(-1)  # [T, G_max, 1, 1]
+        
+        # Zero out embeddings where mask is False
+        masked_embeddings = spatial_embeddings * float_mask  # [T, G_max, n_patches, embed_dim]
+        
+        # Sum across G_max dimension
+        summed_embeddings = masked_embeddings.sum(dim=1)  # [T, n_patches, embed_dim]
+        
+        # Count number of True values in mask per timestep
+        # Add small epsilon to avoid division by zero
+        counts = attention_mask.sum(dim=1).float().clamp(min=1.0).unsqueeze(-1).unsqueeze(-1)  # [T, 1, 1]
+        
+        # Divide sum by count to get average
+        avg_embeddings = summed_embeddings / counts  # [T, n_patches, embed_dim]
+        
+        # Aggregate across temporal dimension using temporal encoder
         if isinstance(self.temporal_encoder, TemporalTransformerEncoder) and relative_dates is not None:
-            aggregated = self.temporal_encoder(patch_embeds, relative_dates)
+            aggregated = self.temporal_encoder(avg_embeddings, relative_dates)
         else:
-            aggregated = self.temporal_encoder(patch_embeds)
+            aggregated = self.temporal_encoder(avg_embeddings)
         
         # Normalize features
         aggregated = F.normalize(aggregated, p=2, dim=1)
         
-        return aggregated
+        return aggregated 

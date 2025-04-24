@@ -17,11 +17,11 @@ class CrossAttentionFusion(nn.Module):
         use_naip=False,         # Whether to use NAIP features
         use_uavsar=False,       # Whether to use UAVSAR features
         num_patches=16,         # Number of patch embeddings per modality
-        max_dist_ratio=1.5,     # Maximum distance ratio for masking attention
+        max_dist_ratio=3,     # Maximum distance ratio for masking attention
         num_heads=4,            # Number of attention heads
         attention_dropout=0.1,  # Dropout probability for attention
         position_encoding_dim=24, # Dimension for positional encodings, must be divisible by both 4 and 6 
-        use_distance_mask=False  # Whether to use distance-based attention masking
+        use_distance_mask=True  # Whether to use distance-based attention masking
     ):
         super().__init__()
         self.point_dim = point_dim

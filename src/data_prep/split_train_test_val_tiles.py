@@ -54,7 +54,7 @@ import warnings
 def check_point_cloud_coverage(points, bbox, grid_size=1.0, min_points_per_cell=1, min_coverage_pct=80):
     """
     Check if a point cloud has sufficient coverage across a grid.
-    
+
     Parameters:
     -----------
     points : torch.Tensor
@@ -67,7 +67,7 @@ def check_point_cloud_coverage(points, bbox, grid_size=1.0, min_points_per_cell=
         Minimum number of points required in a cell to consider it "covered"
     min_coverage_pct : float
         Minimum percentage of cells that must be covered for the point cloud to be considered complete
-        
+
     Returns:
     --------
     bool, dict
@@ -77,57 +77,67 @@ def check_point_cloud_coverage(points, bbox, grid_size=1.0, min_points_per_cell=
     # Extract x and y coordinates from the point cloud
     x = points[:, 0]
     y = points[:, 1]
-    
+
     # Use the provided bbox instead of calculating from points
     x_min, y_min, x_max, y_max = bbox
-    
+
     # Calculate the number of cells in each dimension
     # Add a small epsilon to ensure upper bound is included
-    x_cells = int((x_max - x_min) / grid_size + 1e-6) + 1
-    y_cells = int((y_max - y_min) / grid_size + 1e-6) + 1
-    
+    x_cells = int((x_max - x_min) / grid_size + 1e-6) # NECESSARY CHANGE: Removed + 1
+    y_cells = int((y_max - y_min) / grid_size + 1e-6) # NECESSARY CHANGE: Removed + 1
+
     # Handle the case of empty or near-point point clouds
-    if x_cells <= 1 or y_cells <= 1:
+    if x_cells <= 1 or y_cells <= 1: # Note: Condition changed slightly by removing +1, x_cells/y_cells can now be 0 or 1. Original handles <=1.
+        # Original structure returned this specific dict for <=1 case
         return False, {
             "total_cells": 0,
             "covered_cells": 0,
             "coverage_pct": 0,
-            "avg_points_per_covered_cell": 0
+            "avg_points_per_covered_cell": 0 # Match original return type (likely float)
         }
-    
+
     # Compute which cell each point belongs to
     # This is a fast vectorized operation that assigns each point to a grid cell
     x_bin = ((x - x_min) / grid_size).long()
     y_bin = ((y - y_min) / grid_size).long()
-    
+
+    # NECESSARY CHANGE: Clamp bin indices to the valid range [0, cells-1]
+    # Ensures bins calculated as 10 (e.g., float32) are mapped to 9 when x_cells is 10.
+    x_bin = torch.clamp(x_bin, 0, x_cells - 1)
+    y_bin = torch.clamp(y_bin, 0, y_cells - 1)
+    # END NECESSARY CHANGE
+
     # Create a unique ID for each cell (row-major order)
     cell_ids = y_bin * x_cells + x_bin
-    
+
     # Count the number of points in each cell using bincount
     # This is much faster than using a loop or groupby operations
     unique_cell_ids, cell_counts = torch.unique(cell_ids, return_counts=True)
-    
+
     # Count cells with sufficient points
     cells_with_min_points = (cell_counts >= min_points_per_cell).sum().item()
-    
+
     # Calculate total possible cells in the grid
-    total_cells = x_cells * y_cells
-    
+    total_cells = x_cells * y_cells # Value is now 100 for 10x10m grid
+
     # Calculate coverage percentage
-    coverage_pct = (cells_with_min_points / total_cells) * 100
-    
+    coverage_pct = (cells_with_min_points / total_cells) * 100 # Value now calculated using total_cells=100
+
     # Check if coverage meets the threshold
     is_complete = coverage_pct >= min_coverage_pct
-    
+
     # Gather statistics for reporting
     stats = {
         "total_cells": total_cells,
         "covered_cells": cells_with_min_points,
         "coverage_pct": coverage_pct,
+        # Original calculation - potential edge case if cell_counts is empty remains as per original code
         "avg_points_per_covered_cell": cell_counts.float().mean().item()
     }
-    
+
     return is_complete, stats
+
+
     
 def validate_tile(tile, min_uav_points=10000, min_dep_points=500, 
                  min_uav_coverage_pct=80, min_points_per_cell=1,
@@ -231,7 +241,8 @@ def split_dataset(
     min_uav_coverage_pct=80,
     min_points_per_cell=1,
     min_uav_to_dep_ratio=None,
-    random_seed=42
+    random_seed=42,
+    remove_duplicates=True  # New parameter to control duplicate removal
 ):
     """
     Split a dataset of geospatial tiles into training, validation, and test sets 
@@ -262,6 +273,8 @@ def split_dataset(
         greater than the number of DEP points.
     random_seed : int
         Random seed for reproducibility.
+    remove_duplicates : bool
+        Whether to check for and remove duplicate tile_ids.
     """
     # Set random seed for reproducibility
     random.seed(random_seed)
@@ -284,6 +297,40 @@ def split_dataset(
                                 message="You are using `torch.load` with `weights_only=False`")
         tiles = torch.load(pt_file_path)
     logging.info(f"Loaded {len(tiles)} tiles from the PyTorch file.")
+    
+    # Check for and remove duplicate tile_ids if requested
+    duplicate_count = 0
+    if remove_duplicates:
+        logging.info("Checking for duplicate tile_ids...")
+        unique_tiles = []
+        seen_tile_ids = set()
+        duplicate_ids = {}
+        
+        for tile in tiles:
+            # Make sure tile_id exists in the tile dictionary
+            if 'tile_id' not in tile:
+                logging.warning(f"Tile without 'tile_id' field found. Keeping it as is.")
+                unique_tiles.append(tile)
+                continue
+                
+            tile_id = tile['tile_id']
+            
+            if tile_id in seen_tile_ids:
+                duplicate_count += 1
+                if tile_id not in duplicate_ids:
+                    duplicate_ids[tile_id] = 1
+                else:
+                    duplicate_ids[tile_id] += 1
+            else:
+                seen_tile_ids.add(tile_id)
+                unique_tiles.append(tile)
+        
+        if duplicate_count > 0:
+            logging.info(f"Found {duplicate_count} duplicate tiles with {len(duplicate_ids)} unique duplicate tile_ids.")
+            for tile_id, count in duplicate_ids.items():
+                logging.info(f"  - Tile ID {tile_id} appeared {count + 1} times")
+            tiles = unique_tiles
+            logging.info(f"Dataset now contains {len(tiles)} unique tiles after removing duplicates.")
     
     # Load the GeoJSON file containing the test/validation polygons
     logging.info("Loading the GeoJSON file...")
@@ -418,6 +465,7 @@ def split_dataset(
     # Return statistics
     return {
         'total_tiles': len(tiles),
+        'duplicate_tiles_removed': duplicate_count if remove_duplicates else 0,
         'valid_tiles': len(valid_tiles),
         'invalid_tiles': len(invalid_tiles),
         'invalid_reasons': invalid_reasons,
@@ -451,8 +499,11 @@ if __name__ == "__main__":
                         help='Minimum points per grid cell to consider it covered.') 
     parser.add_argument('--min-uav-to-dep-ratio', type=float, default=None,
                         help='If provided, validates that the number of UAV points is at least this many times greater than the number of DEP points.')
-
-    
+    parser.add_argument('--remove-duplicates', action='store_true', default=True,
+                        help='Check for and remove duplicate tile_ids (default: True)')
+    parser.add_argument('--keep-duplicates', action='store_false', dest='remove_duplicates',
+                        help='Keep duplicate tile_ids instead of removing them')
+        
     # Parse arguments
     args = parser.parse_args()
     
@@ -468,5 +519,6 @@ if __name__ == "__main__":
         min_uav_coverage_pct=args.min_coverage,
         min_points_per_cell=args.min_points_per_cell,
         min_uav_to_dep_ratio=args.min_uav_to_dep_ratio,
-        random_seed=args.random_seed
+        random_seed=args.random_seed,
+        remove_duplicates=args.remove_duplicates 
     )

@@ -300,22 +300,65 @@ def process_multimodal_batch(model, batch, device):
         pred_length = torch.tensor([pred_points.shape[0]], device=device)
         uav_length = torch.tensor([uav_points.shape[0]], device=device)
 
-        # Calculate Chamfer distance loss
-        from src.utils.chamfer_distance import chamfer_distance
-        chamfer_loss, _ = chamfer_distance(
-            pred_points_batch, 
-            uav_points_batch,
+        # # Calculate Chamfer distance loss
+        # from src.utils.chamfer_distance import chamfer_distance
+        # sample_loss, _ = chamfer_distance(
+        #     pred_points_batch, 
+        #     uav_points_batch,
+        #     x_lengths=pred_length,
+        #     y_lengths=uav_length
+        # )
+
+        from src.utils.infocd import info_cd_loss, repulsion_loss
+        from pytorch3d.ops import knn_points
+
+        
+        # --- InfoCD ---  (τ=0.8 is a good starting point)
+        infocd = info_cd_loss(
+            pred_points_batch, uav_points_batch,
             x_lengths=pred_length,
-            y_lengths=uav_length
+            y_lengths=uav_length,
+            tau=0.8,        # temperature
+            lam=None        # use default 1/|cloud|
         )
 
-        if torch.isnan(chamfer_loss):
+
+        # 2) compute dynamic repulsion radius h
+        #    (a) do a 2‑NN on pred→pred
+        knn = knn_points(
+            pred_points_batch, pred_points_batch,
+            lengths1=pred_length,
+            lengths2=pred_length,
+            K=2
+        )
+        #    (b) take the 2nd‑nearest distances, sqrt them
+        nn_dists = torch.sqrt(knn.dists[..., 1].clamp(min=1e-12))
+
+        #    (c) median per sample, then mean → scalar
+        d_med = nn_dists.median(dim=1).values.mean()
+
+        #    (d) scale by 1.8 and clamp to [0.15, 0.40] m
+        h = (1.8 * d_med).clamp(0.15, 0.40)
+
+
+        # --- Repulsion --- 
+        repl = repulsion_loss(
+            pred_points_batch,
+            lengths=pred_length,
+            k=8,
+            h=h 
+        )
+
+        # Combine with a small weight on repulsion
+        sample_loss = infocd + 0.02 * repl
+
+        if torch.isnan(sample_loss):
             print(f"WARNING: Loss for a sample is NaN! {tile_id_list[i]}")
 
-        if torch.isinf(chamfer_loss):
+        if torch.isinf(sample_loss):
             print(f"WARNING: Loss for a sample is Inf! {tile_id_list[i]}")
             
-        total_loss += chamfer_loss
+        total_loss += sample_loss
         sample_count += 1
     
     return total_loss / sample_count if sample_count > 0 else total_loss
@@ -506,7 +549,7 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
         current_step = global_step + batch_idx
         
         # Forward pass with mixed precision
-        with autocast(device_type='cuda', dtype=torch.float16):
+        with autocast(device_type='cuda', dtype=torch.bfloat16):
             batch_loss = process_batch_fn(model, batch, device)
             # Scale loss by accumulation steps to maintain correct gradient magnitude
             scaled_loss = batch_loss / accumulation_steps
@@ -540,7 +583,7 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
             scaler.unscale_(optimizer)
             
             # Clip gradients to prevent explosion
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=4)
             
             # Update weights
             scaler.step(optimizer)
@@ -599,7 +642,7 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
         for batch_idx, batch in enumerate(val_loader):
             current_step = global_step + batch_idx
             
-            with autocast(device_type='cuda', dtype=torch.float16):
+            with autocast(device_type='cuda', dtype=torch.bfloat16):
                 batch_loss = process_batch_fn(model, batch, device)
             
             # Check if we should log for this batch
@@ -752,8 +795,7 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
         {'params': new_params, 'lr': base_lr if lr_scheduler_type == "plateau" else base_lr/div_factor}
     ]
     
-    # Initialize optimizer with parameter groups
-    optimizer = optim.Adam(param_groups)
+    optimizer = optim.AdamW(param_groups, weight_decay=5e-3)
 
     # wrap the model in DDP after setting up the optimizer
     if world_size > 1:
@@ -971,7 +1013,6 @@ def train_multimodal_model(train_dataset=None,
     os.makedirs(temp_dir_root, exist_ok=True)
     os.makedirs(shard_cache_dir, exist_ok=True)
     
-    # [Setup code remains the same...]
     
     world_size = torch.cuda.device_count()
     print(f"Using {world_size} GPU(s) for training.")
@@ -1045,13 +1086,21 @@ def train_multimodal_model(train_dataset=None,
             use_naip=model_config.use_naip, 
             use_uavsar=model_config.use_uavsar
         )
-        
+        # Free memory immediately
+        del train_dataset
+        gc.collect()
+        torch.cuda.empty_cache()
+
         print("Creating validation data shards...")
         val_shard_paths = create_multimodal_shards(
             val_dataset, world_size, temp_dir, "val", 
             use_naip=model_config.use_naip, 
             use_uavsar=model_config.use_uavsar
         )
+        # Free memory immediately
+        del val_dataset
+        gc.collect()
+        torch.cuda.empty_cache()
         
         # Cache the shards for future use
         print(f"Caching shards with key: {cache_key}")
@@ -1067,8 +1116,6 @@ def train_multimodal_model(train_dataset=None,
             val_shard_paths[i] = cached_val_path
         
         print("Cleaning up memory...")
-        del train_dataset
-        del val_dataset
         gc.collect()
         torch.cuda.empty_cache()
 

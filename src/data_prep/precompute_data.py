@@ -5,6 +5,19 @@ from typing import Dict, Any, List
 from torch_geometric.nn import knn_graph
 from torch_geometric.utils import to_undirected
 import numpy as np
+import argparse
+import sys
+
+def get_torch_dtype(precision: int) -> torch.dtype:
+    """Convert numerical precision value to PyTorch dtype."""
+    if precision == 16:
+        return torch.float16
+    elif precision == 32:
+        return torch.float32
+    elif precision == 64:
+        return torch.float64
+    else:
+        raise ValueError(f"Unsupported precision: {precision}. Use 16, 32, or 64.")
 
 ##########################################
 # Utility Functions for Date Parsing
@@ -168,11 +181,12 @@ def compute_global_band_statistics(data_list, imagery_type='naip'):
 # Imagery Preprocessing Functions
 ##########################################
 
-def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime, naip_means=None, naip_stds=None) -> Dict[str, Any]:
+def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime, 
+                          naip_means=None, naip_stds=None, dtype: torch.dtype = torch.float16) -> Dict[str, Any]:
     """
     Preprocess NAIP imagery from the flattened data structure.
     Handles NA, NaN, and Inf values by setting them to 0 after normalization.
-    Converts normalized values to float16 for memory efficiency.
+    Converts normalized values to specified precision for memory efficiency.
     
     Inputs:
       tile: Dictionary containing flattened tile data with keys:
@@ -183,10 +197,11 @@ def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime, naip
       reference_date: UAV LiDAR acquisition date used to compute relative dates.
       naip_means: Optional tensor of shape [n_bands] with mean values for each band.
       naip_stds: Optional tensor of shape [n_bands] with standard deviation values for each band.
+      dtype: PyTorch dtype to use for the output tensors.
       
     Returns:
       A dictionary with:
-         - 'images': The normalized NAIP imagery tensor in float16 format
+         - 'images': The normalized NAIP imagery tensor in specified dtype format
          - 'relative_dates': Tensor of shape [n_images, 1] with relative dates (in days)
          - 'img_bbox': The NAIP imagery bounding box
     """
@@ -216,15 +231,15 @@ def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime, naip
         # which is the mean in normalized space
         images[invalid_mask] = 0.0  # Reuse the mask 
         
-        # Convert to float16 for memory efficiency
-        images = images.to(torch.float16)
+        # Convert to specified dtype for memory efficiency
+        images = images.to(dtype)
     
     # Get dates and compute relative dates
     dates = tile['naip_dates']
     relative_dates = compute_relative_dates(dates, reference_date)
     
     return {
-        'images': images,                  # Normalized image tensor: [n_images, 4, h, w] in float16
+        'images': images,                  # Normalized image tensor: [n_images, 4, h, w] in specified dtype
         'ids': tile['naip_ids'],           # List of image IDs
         'dates': dates,
         'relative_dates': relative_dates,  # Tensor: [n_images, 1]
@@ -232,11 +247,12 @@ def preprocess_naip_imagery(tile: Dict[str, Any], reference_date: datetime, naip
         'bands': tile['naip_bands']        # Band information
     }
 
-def preprocess_uavsar_imagery(tile: Dict[str, Any], reference_date: datetime, uavsar_means=None, uavsar_stds=None) -> Dict[str, Any]:
+def preprocess_uavsar_imagery(tile: Dict[str, Any], reference_date: datetime, 
+                             uavsar_means=None, uavsar_stds=None, dtype: torch.dtype = torch.float16) -> Dict[str, Any]:
     """
     Preprocess UAVSAR imagery from the flattened data structure.
     Handles NA, NaN, and Inf values by setting them to 0 after normalization.
-    Converts normalized values to float16 for memory efficiency.
+    Converts normalized values to specified precision for memory efficiency.
     Removes images that have all invalid values across all pixels and bands.
     
     Inputs:
@@ -248,10 +264,11 @@ def preprocess_uavsar_imagery(tile: Dict[str, Any], reference_date: datetime, ua
       reference_date: UAV LiDAR acquisition date used to compute relative dates.
       uavsar_means: Optional tensor of shape [n_bands] with mean values for each band.
       uavsar_stds: Optional tensor of shape [n_bands] with standard deviation values for each band.
+      dtype: PyTorch dtype to use for the output tensors.
       
     Returns:
       A dictionary with:
-         - 'images': The normalized UAVSAR imagery tensor in float16 format
+         - 'images': The normalized UAVSAR imagery tensor in specified dtype format
          - 'relative_dates': Tensor of shape [n_images, 1] with relative dates (in days)
          - 'img_bbox': The UAVSAR imagery bounding box
     """
@@ -308,14 +325,14 @@ def preprocess_uavsar_imagery(tile: Dict[str, Any], reference_date: datetime, ua
         # which is the mean in normalized space
         images[torch.isnan(images) | torch.isinf(images)] = 0.0
         
-        # Convert to float16 for memory efficiency
-        images = images.to(torch.float16)
+        # Convert to specified dtype for memory efficiency
+        images = images.to(dtype)
     
     # Compute relative dates for the filtered dates
     relative_dates = compute_relative_dates(dates, reference_date)
     
     return {
-        'images': images,                     # Normalized image tensor: [n_valid_images, n_bands, h, w] in float16
+        'images': images,                     # Normalized image tensor: [n_valid_images, n_bands, h, w] in specified dtype
         'ids': ids,                           # Filtered list of image IDs
         'dates': dates,                       # Filtered list of dates
         'relative_dates': relative_dates,     # Tensor: [n_valid_images, 1]
@@ -435,10 +452,11 @@ def compute_point_attr_statistics(data_list):
 
 
 
-# 1. Update normalize_point_clouds_with_bbox function to convert point clouds to float16
+# 1. Update normalize_point_clouds_with_bbox function to convert point clouds to specified dtype
 def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
                                      uav_points: torch.Tensor,
-                                     bbox: tuple):
+                                     bbox: tuple,
+                                     dtype: torch.dtype = torch.float16):
     """
     Normalizes 3DEP and UAV point clouds to a common coordinate system where:
     - x,y coordinates range from -5 to 5 (1 unit = 1 meter)
@@ -448,10 +466,11 @@ def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
       dep_points: [N_dep, 3] tensor of 3DEP point coordinates.
       uav_points: [N_uav, 3] tensor of UAV point coordinates.
       bbox: Tuple (xmin, ymin, xmax, ymax) defining the spatial extent.
+      dtype: PyTorch dtype to use for the output tensors.
       
     Returns:
-      dep_points_norm: [N_dep, 3] normalized 3DEP points in float16.
-      uav_points_norm: [N_uav, 3] normalized UAV points in float16.
+      dep_points_norm: [N_dep, 3] normalized 3DEP points in specified dtype.
+      uav_points_norm: [N_uav, 3] normalized UAV points in specified dtype.
       center: [1, 3] tensor representing the normalization center.
       scale: [1, 3] tensor with scale factors for x, y, z.
     """
@@ -496,9 +515,9 @@ def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
     dep_points_norm[:, 2] = dep_points[:, 2] - center[:, 2]  # Just subtract minimum z
     uav_points_norm[:, 2] = uav_points[:, 2] - center[:, 2]  # Just subtract minimum z
     
-    # Convert to float16 for memory efficiency
-    dep_points_norm = dep_points_norm.to(torch.float16)
-    uav_points_norm = uav_points_norm.to(torch.float16)
+    # Convert to specified dtype for memory efficiency
+    dep_points_norm = dep_points_norm.to(dtype)
+    uav_points_norm = uav_points_norm.to(dtype)
     
     return dep_points_norm, uav_points_norm, center, scale
 
@@ -509,7 +528,7 @@ def normalize_point_clouds_with_bbox(dep_points: torch.Tensor,
 
 def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=None, uavsar_stds=None, 
                       point_attr_means=None, point_attr_stds=None, normalization_type: str = 'bbox',
-                      max_dep_points=10000):
+                      max_dep_points=10000, precision: int = 16):
     """
     Precompute all necessary features for each tile in the dataset.
     This function is updated to work with the flattened data structure.
@@ -534,23 +553,27 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
       point_attr_stds: Optional tensor of shape [n_attr] with standard deviation values for point attributes.
       normalization_type: 'mean_std' or 'bbox'. 'bbox' normalizes x,y using bbox and z using data stats.
       max_dep_points: If specified, randomly sample 3DEP points to this maximum number.
+      precision: Integer specifying numerical precision (16, 32, or 64).
       
     Returns:
       precomputed_data_list: List of dictionaries with keys:
-         - 'dep_points_norm': [N_dep, 3] normalized 3DEP points in float16.
-         - 'uav_points_norm': [N_uav, 3] downsampled & normalized UAV points in float16.
-         - 'dep_points_attr_norm': [N_dep, n_attr] normalized point attributes in float16.
+         - 'dep_points_norm': [N_dep, 3] normalized 3DEP points in specified dtype.
+         - 'uav_points_norm': [N_uav, 3] downsampled & normalized UAV points in specified dtype.
+         - 'dep_points_attr_norm': [N_dep, n_attr] normalized point attributes in specified dtype.
          - 'center': [1, 3] normalization center.
          - 'scale': Scalar normalization factor.
          - 'knn_edge_indices': Dict mapping k to KNN edge index tensors of shape [2, E] for 3DEP points.
-         - 'naip': Preprocessed and normalized NAIP imagery data in float16.
-         - 'uavsar': Preprocessed and normalized UAVSAR imagery data in float16.
+         - 'naip': Preprocessed and normalized NAIP imagery data in specified dtype.
+         - 'uavsar': Preprocessed and normalized UAVSAR imagery data in specified dtype.
          - 'tile_id': Optional tile identifier.
     """
+    # Convert precision to PyTorch dtype
+    dtype = get_torch_dtype(precision)
+    
     precomputed_data_list = []
     # Define list of k values for KNN computation.
     # k_values = [10, 15]
-    k_values = [15]
+    k_values = [16]
     
     for sample in data_list:
         # --- Point Cloud Preprocessing ---
@@ -586,7 +609,7 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
 
         # Normalize point clouds
         dep_points_norm, uav_points_norm, center, scale = normalize_point_clouds_with_bbox(
-            dep_points, uav_points, bbox
+            dep_points, uav_points, bbox, dtype=dtype
         )
         
         # Normalize point attributes if statistics are provided
@@ -614,7 +637,7 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
             # Set any remaining invalid values to 0 (normalized mean)
             dep_points_attr_norm[torch.isnan(dep_points_attr_norm) | torch.isinf(dep_points_attr_norm)] = 0.0
             
-            # Convert to float16
+            # Convert to torch.float16 for memory usage. We don't need much precision for this data. 
             dep_points_attr_norm = dep_points_attr_norm.to(torch.float16)
         
         # --- KNN Edge Indices Computation ---
@@ -647,21 +670,21 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
         uavsar_preprocessed = None
         
         if sample.get('has_naip', False) and 'naip_imgs' in sample:
-            naip_preprocessed = preprocess_naip_imagery(sample, ref_date, naip_means, naip_stds)
+            naip_preprocessed = preprocess_naip_imagery(sample, ref_date, naip_means, naip_stds, dtype=dtype)
             
         if sample.get('has_uavsar', False) and 'uavsar_imgs' in sample:
-            uavsar_preprocessed = preprocess_uavsar_imagery(sample, ref_date, uavsar_means, uavsar_stds)
+            uavsar_preprocessed = preprocess_uavsar_imagery(sample, ref_date, uavsar_means, uavsar_stds, dtype=dtype)
         
         # Create unified precomputed sample.
         precomputed_sample = {
-            'dep_points_norm': dep_points_norm,         # [N_dep, 3] in float16
-            'uav_points_norm': uav_points_norm,         # [N_uav_down, 3] in float16
-            'dep_points_attr_norm': dep_points_attr_norm, # [N_dep, n_attr] in float16
+            'dep_points_norm': dep_points_norm,         # [N_dep, 3] in specified dtype
+            'uav_points_norm': uav_points_norm,         # [N_uav_down, 3] in specified dtype
+            'dep_points_attr_norm': dep_points_attr_norm, # [N_dep, n_attr] in specified dtype
             'center': center,                           # [1, 3]
             'scale': scale,                             # Scalar
             'knn_edge_indices': knn_edge_indices,       # Dict: k -> [2, E] edge indices for 3DEP
-            'naip': naip_preprocessed,                  # Preprocessed and normalized NAIP imagery data in float16
-            'uavsar': uavsar_preprocessed,              # Preprocessed and normalized UAVSAR imagery data in float16
+            'naip': naip_preprocessed,                  # Preprocessed and normalized NAIP imagery data in specified dtype
+            'uavsar': uavsar_preprocessed,              # Preprocessed and normalized UAVSAR imagery data in specified dtype
             'tile_id': sample.get('tile_id', None)      # Optional identifier
         }
         
@@ -675,7 +698,7 @@ def precompute_dataset(data_list, naip_means=None, naip_stds=None, uavsar_means=
 
 import warnings
 
-def main():
+def main(precision: int = 32):
     # File paths for the input datasets.
     training_file = 'data/processed/model_data/training_tiles.pt'
     validation_file = 'data/processed/model_data/validation_tiles.pt'
@@ -737,6 +760,9 @@ def main():
     else:
         print("  No point attributes found.")
         
+    # Get corresponding PyTorch dtype
+    dtype = get_torch_dtype(precision)
+    print(f"Using numerical precision: {precision}-bit ({dtype})")
 
     print("Precomputing validation dataset...")
     precomputed_validation = precompute_dataset(
@@ -744,7 +770,8 @@ def main():
         naip_means, naip_stds, 
         uavsar_means, uavsar_stds, 
         point_attr_means, point_attr_stds, 
-        normalization_type='bbox'
+        normalization_type='bbox',
+        precision=precision
     )
     print("Precomputing test dataset...")
     precomputed_test = precompute_dataset(
@@ -752,7 +779,8 @@ def main():
         naip_means, naip_stds, 
         uavsar_means, uavsar_stds, 
         point_attr_means, point_attr_stds, 
-        normalization_type='bbox'
+        normalization_type='bbox',
+        precision=precision
     )
     print("Precomputing training dataset...")
     precomputed_training = precompute_dataset(
@@ -760,13 +788,20 @@ def main():
         naip_means, naip_stds, 
         uavsar_means, uavsar_stds, 
         point_attr_means, point_attr_stds, 
-        normalization_type='bbox'
+        normalization_type='bbox',
+        precision=precision
     )  
 
-    # Save the precomputed datasets.
-    torch.save(precomputed_training, 'data/processed/model_data/precomputed_training_tiles.pt')
-    torch.save(precomputed_validation, 'data/processed/model_data/precomputed_validation_tiles.pt')
-    torch.save(precomputed_test, 'data/processed/model_data/precomputed_test_tiles.pt')
+    # Create output filenames with precision information
+    output_suffix = f"_{precision}bit"
+    training_output = f'data/processed/model_data/precomputed_training_tiles{output_suffix}.pt'
+    validation_output = f'data/processed/model_data/precomputed_validation_tiles{output_suffix}.pt'
+    test_output = f'data/processed/model_data/precomputed_test_tiles{output_suffix}.pt'
+    
+    # Save the precomputed datasets with precision in the filename
+    torch.save(precomputed_training, training_output)
+    torch.save(precomputed_validation, validation_output)
+    torch.save(precomputed_test, test_output)
     
     # Also save the normalization statistics for future use
     if naip_means is not None and naip_stds is not None:
@@ -788,7 +823,16 @@ def main():
             'invalid_counts': point_attr_invalid_counts if point_attr_invalid_counts else None
         }, 'data/processed/model_data/point_attr_normalization_stats.pt')
     
-    print("Precomputation complete. Precomputed files saved.")
+    print(f"Precomputation complete. Precomputed files saved with {precision}-bit precision.")
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Precompute dataset with specified numerical precision')
+    parser.add_argument('--precision', type=int, choices=[16, 32, 64], default=32,
+                        help='Numerical precision to use (16, 32, or 64 bit). Default: 32')
+    args = parser.parse_args()
+    
+    try:
+        main(precision=args.precision)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)

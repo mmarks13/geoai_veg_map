@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import os
 import sys
 from src.utils.chamfer_distance import chamfer_distance
+from src.utils.knn_graph_gpu import knn_edge_index 
 
 # Import the new components we just defined
 from .encoders import NAIPEncoder, UAVSAREncoder
@@ -499,12 +500,8 @@ class LocalGlobalPointAttentionBlock(nn.Module):
         """
         # Build KNN graph if edge_index is not provided and using local attention
         if edge_index is None and self.use_local_attention:
-            edge_index = knn_graph(
-                pos, 
-                k=self.k_neighbors, 
-                batch=None,
-                loop=False, 
-                flow='source_to_target'
+            edge_index = knn_edge_index(
+                pos, k=self.k_neighbors + 1  # +1 because first nn is the point itself
             )
             edge_index = to_undirected(edge_index)  # Make edges bidirectional
             
@@ -724,6 +721,7 @@ class MultimodalPointUpsampler(nn.Module):
         naip_embeddings = None
         uavsar_embeddings = None
         
+        # NAIP feature extraction
         if self.use_naip and naip is not None and 'images' in naip:
             # Make sure NAIP images are on the correct device
             if naip['images'] is not None:
@@ -736,29 +734,38 @@ class MultimodalPointUpsampler(nn.Module):
                 naip['images'],
                 naip.get('img_bbox', None),
                 naip.get('relative_dates', None)
-            )  # [num_patches, embed_dim]
+            )  # [num_patches, img_embed_dim]
         
+        # UAVSAR feature extraction
         if self.use_uavsar and uavsar is not None and 'images' in uavsar:
-            # Make sure UAVSAR images are on the correct device
             if uavsar['images'] is not None:
-                uavsar['images'] = uavsar['images'].to(device)
-                # Also move relative_dates to the same device if present
-                if 'relative_dates' in uavsar and uavsar['relative_dates'] is not None:
-                    uavsar['relative_dates'] = uavsar['relative_dates'].to(device)
-                   
-            uavsar_embeddings = self.uavsar_encoder(
-                uavsar['images'],
-                uavsar.get('img_bbox', None),
-                uavsar.get('relative_dates', None)
-            )  # [num_patches, embed_dim]
+                uavsar_tensor_to_pass = uavsar['images'].to(device)
+
+                # --- Get mask and dates, move to device ---
+                mask = uavsar.get('attention_mask', None) # Get the mask
+                if mask is not None:
+                    mask = mask.to(device) # Move mask to device
+
+                rel_dates = uavsar.get('relative_dates', None)
+                if rel_dates is not None:
+                    rel_dates = rel_dates.to(device) # Move dates to device
+                
+                # --- Pass through encoder ---
+                uavsar_embeddings = self.uavsar_encoder(
+                    uavsar_tensor_to_pass,
+                    attention_mask=mask,
+                    img_bbox=uavsar.get('img_bbox', None), 
+                    relative_dates=rel_dates     
+                )  # [num_patches, img_embed_dim]
         
+
         # ====== 3) Apply Selected Fusion Module ======
         x_fused = self.fusion(
             point_features=x_feat,                                # [N_dep, feat_dim]
             edge_index=edge_index,                                # [2, E]
             point_positions=dep_points,                           # [N_dep, 3]
-            naip_embeddings=naip_embeddings,                      # [num_patches, embed_dim] or None
-            uavsar_embeddings=uavsar_embeddings,                  # [num_patches, embed_dim] or None
+            naip_embeddings=naip_embeddings,                      # [num_patches, img_embed_dim] or None
+            uavsar_embeddings=uavsar_embeddings,                  # [num_patches, img_embed_dim] or None
             main_bbox=bbox,                                       # [xmin, ymin, xmax, ymax]
             naip_bbox=naip.get('img_bbox', None) if naip is not None else None,
             uavsar_bbox=uavsar.get('img_bbox', None) if uavsar is not None else None,

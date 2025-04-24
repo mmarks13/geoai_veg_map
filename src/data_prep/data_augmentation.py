@@ -248,7 +248,7 @@ def augment_attributes(tile, scale_range=(0.9, 1.1), shift_range=(-0.1, 0.1)):
 def rotate_tile(tile, angle_degrees=None):
     """
     Rotate point clouds and imagery by a specified angle.
-    For simplicity with imagery, restricts rotations to 90, 180, or 270 degrees.
+    Updated to handle new UAVSAR imagery structure with 5D tensors.
     
     Parameters:
         tile (dict): The tile dictionary containing point clouds and imagery
@@ -318,28 +318,50 @@ def rotate_tile(tile, angle_degrees=None):
         if rotated_images:
             tile_copy['naip']['images'] = torch.stack(rotated_images)
     
-    # Rotate UAVSAR imagery (same approach)
+    # Rotate UAVSAR imagery - updated for 5D structure [T, G_max, n_bands, h, w]
     if tile_copy.get('uavsar') is not None and 'images' in tile_copy['uavsar']:
-        n_images = tile_copy['uavsar']['images'].shape[0]
-        rotated_images = []
+        # Get the shape to understand our dimensions
+        T, G_max, n_bands, h, w = tile_copy['uavsar']['images'].shape
         
-        for i in range(n_images):
-            img = tile_copy['uavsar']['images'][i]
-            
-            if angle_degrees == 90:
-                rotated = img.permute(0, 2, 1).flip(dims=[2])
-            elif angle_degrees == 180:
-                rotated = img.flip(dims=[1, 2])
-            elif angle_degrees == 270:
-                rotated = img.permute(0, 2, 1).flip(dims=[1])
-            else:
-                # For non-standard angles, keep original (should not happen)
-                rotated = img
+        # We need to rotate each image individually, preserving the time and group dimensions
+        for t in range(T):
+            for g in range(G_max):
+                # Get the current image [n_bands, h, w]
+                img = tile_copy['uavsar']['images'][t, g]
                 
-            rotated_images.append(rotated)
-            
-        if rotated_images:
-            tile_copy['uavsar']['images'] = torch.stack(rotated_images)
+                # Apply rotation based on angle
+                if angle_degrees == 90:
+                    # Permute height and width, then flip along width
+                    rotated = img.permute(0, 2, 1).flip(dims=[2])
+                elif angle_degrees == 180:
+                    # Flip along both height and width
+                    rotated = img.flip(dims=[1, 2])
+                elif angle_degrees == 270:
+                    # Permute height and width, then flip along height
+                    rotated = img.permute(0, 2, 1).flip(dims=[1])
+                else:
+                    # For non-standard angles, keep original (should not happen)
+                    rotated = img
+                
+                # Update the image in-place
+                tile_copy['uavsar']['images'][t, g] = rotated
+        
+        # Also update the invalid_mask if it exists with the same transformations
+        if 'invalid_mask' in tile_copy['uavsar']:
+            for t in range(T):
+                for g in range(G_max):
+                    mask = tile_copy['uavsar']['invalid_mask'][t, g]
+                    
+                    if angle_degrees == 90:
+                        rotated_mask = mask.permute(0, 2, 1).flip(dims=[2])
+                    elif angle_degrees == 180:
+                        rotated_mask = mask.flip(dims=[1, 2])
+                    elif angle_degrees == 270:
+                        rotated_mask = mask.permute(0, 2, 1).flip(dims=[1])
+                    else:
+                        rotated_mask = mask
+                    
+                    tile_copy['uavsar']['invalid_mask'][t, g] = rotated_mask
     
     # Note: KNN indices will be regenerated at the end of the augmentation pipeline
     
@@ -349,6 +371,7 @@ def rotate_tile(tile, angle_degrees=None):
 def reflect_tile(tile, axis='x'):
     """
     Reflect point clouds and imagery across a specified axis.
+    Updated to handle new UAVSAR imagery structure with 5D tensors.
     
     Parameters:
         tile (dict): The tile dictionary containing point clouds and imagery
@@ -411,11 +434,22 @@ def reflect_tile(tile, axis='x'):
         for i in range(n_images):
             tile_copy['naip']['images'][i] = tile_copy['naip']['images'][i].flip(dims=flip_dims)
     
-    # Reflect UAVSAR imagery
+    # Reflect UAVSAR imagery - updated for 5D structure [T, G_max, n_bands, h, w]
     if tile_copy.get('uavsar') is not None and 'images' in tile_copy['uavsar']:
-        n_images = tile_copy['uavsar']['images'].shape[0]
-        for i in range(n_images):
-            tile_copy['uavsar']['images'][i] = tile_copy['uavsar']['images'][i].flip(dims=flip_dims)
+        # Get the shape to understand our dimensions
+        T, G_max, n_bands, h, w = tile_copy['uavsar']['images'].shape
+        
+        # We need to reflect each image individually, preserving the time and group dimensions
+        for t in range(T):
+            for g in range(G_max):
+                # Apply reflection based on flip_dims
+                tile_copy['uavsar']['images'][t, g] = tile_copy['uavsar']['images'][t, g].flip(dims=flip_dims)
+        
+        # Also update the invalid_mask if it exists with the same transformations
+        if 'invalid_mask' in tile_copy['uavsar']:
+            for t in range(T):
+                for g in range(G_max):
+                    tile_copy['uavsar']['invalid_mask'][t, g] = tile_copy['uavsar']['invalid_mask'][t, g].flip(dims=flip_dims)
     
     # Note: KNN indices will be regenerated at the end of the augmentation pipeline
     
@@ -478,6 +512,7 @@ def jitter_points(tile, xy_scale=0.02, z_scale=0.01):
 def augment_spectral_bands(tile, band_scale_range=(0.9, 1.1)):
     """
     Apply band-specific scaling to simulate different spectral responses.
+    Updated to handle new UAVSAR imagery structure with 5D tensors.
     
     Parameters:
         tile (dict): The tile dictionary containing imagery
@@ -501,28 +536,30 @@ def augment_spectral_bands(tile, band_scale_range=(0.9, 1.1)):
             for band_idx in range(n_bands):
                 tile_copy['naip']['images'][img_idx, band_idx] *= band_scales[band_idx]
     
-    # Augment UAVSAR bands
+    # Augment UAVSAR bands - updated for 5D structure [T, G_max, n_bands, h, w]
     if tile_copy.get('uavsar') is not None and 'images' in tile_copy['uavsar']:
-        n_images, n_bands, h, w = tile_copy['uavsar']['images'].shape
+        T, G_max, n_bands, h, w = tile_copy['uavsar']['images'].shape
         
-        for img_idx in range(n_images):
-            # Generate random scaling factors for each band
-            band_scales = torch.FloatTensor(n_bands).uniform_(*band_scale_range)
-            
-            # Apply band-specific scaling
-            for band_idx in range(n_bands):
-                tile_copy['uavsar']['images'][img_idx, band_idx] *= band_scales[band_idx]
+        for t in range(T):
+            for g in range(G_max):
+                # Check attention_mask if it exists to only process valid groups
+                if 'attention_mask' in tile_copy['uavsar'] and not tile_copy['uavsar']['attention_mask'][t, g]:
+                    continue
+                    
+                # Generate random scaling factors for each band
+                band_scales = torch.FloatTensor(n_bands).uniform_(*band_scale_range)
+                
+                # Apply band-specific scaling
+                for band_idx in range(n_bands):
+                    tile_copy['uavsar']['images'][t, g, band_idx] *= band_scales[band_idx]
     
     return tile_copy
-
-
 
 
 def simulate_sensor_effects(tile, effect_strength=0.2, speckle_variance=0.1):
     """
     Simulate sensor effects for both NAIP and UAVSAR imagery.
-    For NAIP: Creates gradient lighting effects simulating different sun angles.
-    For UAVSAR: Adds multiplicative speckle noise.
+    Updated to handle new UAVSAR imagery structure with 5D tensors.
     
     Parameters:
         tile (dict): The tile dictionary containing imagery
@@ -560,37 +597,42 @@ def simulate_sensor_effects(tile, effect_strength=0.2, speckle_variance=0.1):
                 # Multiply directly with the 2D band data
                 tile_copy['naip']['images'][img_idx, band_idx] = tile_copy['naip']['images'][img_idx, band_idx] * gradient * band_effect
     
-    # Simulate UAVSAR sensor effects (speckle noise)
+    # Simulate UAVSAR sensor effects (speckle noise) - updated for 5D structure [T, G_max, n_bands, h, w]
     if tile_copy.get('uavsar') is not None and 'images' in tile_copy['uavsar']:
-        n_images, n_bands, h, w = tile_copy['uavsar']['images'].shape
+        T, G_max, n_bands, h, w = tile_copy['uavsar']['images'].shape
         
-        for img_idx in range(n_images):
-            
-            # Multiplicative speckle noise (Gamma distribution)
-            speckle_mean = 1.0
-            # Add safety check for speckle variance
-            speckle_var = max(speckle_variance, 1e-6)  # Prevent division by zero
-            alpha = speckle_mean**2 / speckle_var
-            beta = speckle_mean / speckle_var
-            
-            # Generate speckle noise using gamma distribution
-            speckle = torch.tensor(
-                np.random.gamma(alpha, 1/beta, (n_bands, h, w)), 
-                dtype=tile_copy['uavsar']['images'].dtype
-            )
-            
-            # Add clamping to prevent extreme values in the speckle noise
-            speckle = torch.clamp(speckle, 0.1, 5.0)
-            
-            # Apply multiplicative noise
-            tile_copy['uavsar']['images'][img_idx] *= speckle
-            
-            # Final clamp to ensure no extreme values after multiplication
-            tile_copy['uavsar']['images'][img_idx] = torch.clamp(tile_copy['uavsar']['images'][img_idx], -500.0, 500.0)
+        # Add safety check for speckle variance
+        speckle_var = max(speckle_variance, 1e-6)  # Prevent division by zero
+        speckle_mean = 1.0
+        alpha = speckle_mean**2 / speckle_var
+        beta = speckle_mean / speckle_var
+        
+        for t in range(T):
+            for g in range(G_max):
+                # Check attention_mask if it exists to only process valid groups
+                if 'attention_mask' in tile_copy['uavsar'] and not tile_copy['uavsar']['attention_mask'][t, g]:
+                    continue
+                
+                # Generate speckle noise using gamma distribution
+                speckle = torch.tensor(
+                    np.random.gamma(alpha, 1/beta, (n_bands, h, w)), 
+                    dtype=tile_copy['uavsar']['images'].dtype
+                )
+                
+                # Add clamping to prevent extreme values in the speckle noise
+                speckle = torch.clamp(speckle, 0.1, 5.0)
+                
+                # Apply multiplicative noise
+                tile_copy['uavsar']['images'][t, g] *= speckle
+                
+                # Final clamp to ensure no extreme values after multiplication
+                tile_copy['uavsar']['images'][t, g] = torch.clamp(tile_copy['uavsar']['images'][t, g], -500.0, 500.0)
     
     return tile_copy
 
-def validate_augmented_tile(original_tile, augmented_tile, max_allowed_value=400.0):
+
+
+def validate_augmented_tile(original_tile, augmented_tile, max_allowed_value=300.0):
     """
     Simplified validation that checks only essential properties of the augmented tile.
     
@@ -1296,63 +1338,281 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
     
     return augmented_tiles
 
+import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 
+# Create analysis and visualization code for probability distribution
+def analyze_probability_distribution(complexity_scores, z_diff_scores, 
+                                    norm_complexity, norm_z_diff, 
+                                    complexity_probs, z_diff_probs,
+                                    scaled_probs, total_augmentations):
+    print("\n=== PROBABILITY DISTRIBUTION ANALYSIS ===")
+    
+    # Compare to uniform distribution
+    uniform_prob = 1.0 / len(scaled_probs)
+    ratio_to_uniform = scaled_probs / uniform_prob
+    
+    print(f"Total samples to be augmented: {total_augmentations}")
+    print(f"Uniform probability: {uniform_prob:.8f}")
+    print(f"Min probability: {np.min(scaled_probs):.8f} ({np.min(ratio_to_uniform):.2f}x uniform)")
+    print(f"Max probability: {np.max(scaled_probs):.8f} ({np.max(ratio_to_uniform):.2f}x uniform)")
+    print(f"Mean probability: {np.mean(scaled_probs):.8f} (should be ~uniform)")
+    
+    # Expected samples for min/max probabilities
+    min_expected = np.min(scaled_probs) * total_augmentations
+    max_expected = np.max(scaled_probs) * total_augmentations
+    print(f"\nExpected samples with min probability: {min_expected:.2f}")
+    print(f"Expected samples with max probability: {max_expected:.2f}")
+    print(f"Max/Min ratio: {max_expected/min_expected:.2f}x")
+    
+    # Calculate percentiles
+    percentiles = [5, 25, 50, 75, 95]
+    percentile_values = np.percentile(scaled_probs, percentiles)
+    
+    print("\nPercentiles:")
+    for p, v in zip(percentiles, percentile_values):
+        expected_samples = v * total_augmentations
+        print(f"{p}th percentile: {v:.8f} ({v/uniform_prob:.2f}x uniform) - Expected samples: {expected_samples:.2f}")
+    
+    # Z-difference analysis
+    # Find indices of top 5% tiles by z-difference
+    z_diff_threshold = np.percentile(z_diff_scores, 95)
+    high_z_diff_indices = np.where(z_diff_scores >= z_diff_threshold)[0]
+    
+    print(f"\n=== ANALYSIS OF HIGH Z-DIFFERENCE TILES (top 5%, n={len(high_z_diff_indices)}) ===")
+    high_z_diff_probs = scaled_probs[high_z_diff_indices]
+    high_z_diff_expected = np.sum(high_z_diff_probs) * total_augmentations
+    high_z_diff_uniform_expected = len(high_z_diff_indices) * uniform_prob * total_augmentations
+    
+    print(f"Mean probability: {np.mean(high_z_diff_probs):.8f} ({np.mean(high_z_diff_probs)/uniform_prob:.2f}x uniform)")
+    print(f"Min probability: {np.min(high_z_diff_probs):.8f}")
+    print(f"Max probability: {np.max(high_z_diff_probs):.8f}")
+    print(f"Expected samples from high z-diff tiles: {high_z_diff_expected:.2f}")
+    print(f"Expected with uniform distribution: {high_z_diff_uniform_expected:.2f}")
+    print(f"Boost factor: {high_z_diff_expected/high_z_diff_uniform_expected:.2f}x")
+    
+    # Visualization
+    plt.figure(figsize=(15, 10))
+    
+    # 1. Probability distribution histogram
+    plt.subplot(2, 2, 1)
+    plt.hist(scaled_probs, bins=50, alpha=0.7)
+    plt.axvline(uniform_prob, color='r', linestyle='--', label=f'Uniform: {uniform_prob:.8f}')
+    plt.xlabel('Probability')
+    plt.ylabel('Count')
+    plt.title('Probability Distribution')
+    plt.legend()
+    
+    # 2. Ratio to uniform distribution
+    plt.subplot(2, 2, 2)
+    plt.hist(ratio_to_uniform, bins=50, alpha=0.7)
+    plt.axvline(1.0, color='r', linestyle='--', label='Uniform Ratio (1.0)')
+    plt.xlabel('Ratio to Uniform')
+    plt.ylabel('Count')
+    plt.title('Ratio to Uniform Distribution')
+    plt.legend()
+    
+    # 3. Scatter plot: complexity vs z-diff
+    plt.subplot(2, 2, 3)
+    sc = plt.scatter(norm_complexity, norm_z_diff, c=scaled_probs, s=5, alpha=0.5, cmap='viridis')
+    plt.colorbar(sc, label='Final Probability')
+    plt.xlabel('Normalized Complexity')
+    plt.ylabel('Normalized Z-Difference')
+    plt.title('Complexity vs Z-Difference')
+    
+    # 4. Component contributions
+    plt.subplot(2, 2, 4)
+    plt.scatter(complexity_probs, z_diff_probs, c=scaled_probs, s=5, alpha=0.5, cmap='viridis')
+    plt.colorbar(label='Final Probability')
+    plt.xlabel('Complexity Probability')
+    plt.ylabel('Z-Difference Probability')
+    plt.title('Component Probabilities')
+    
+    plt.tight_layout()
+    plt.savefig('probability_distribution_analysis.png')
+    print("\nPlot saved as 'probability_distribution_analysis.png'")
+    
+    # Additional visualization for high z-diff tiles
+    plt.figure(figsize=(15, 5))
+    
+    # Compare probabilities of high z-diff tiles vs all tiles
+    plt.subplot(1, 3, 1)
+    plt.hist(scaled_probs, bins=30, alpha=0.5, label='All Tiles')
+    plt.hist(high_z_diff_probs, bins=30, alpha=0.7, label='High Z-Diff Tiles')
+    plt.axvline(uniform_prob, color='r', linestyle='--', label=f'Uniform')
+    plt.xlabel('Probability')
+    plt.ylabel('Count')
+    plt.title('Probabilities: High Z-Diff vs All Tiles')
+    plt.legend()
+    
+    # Compare ratios to uniform
+    plt.subplot(1, 3, 2)
+    high_z_diff_ratios = high_z_diff_probs / uniform_prob
+    plt.hist(ratio_to_uniform, bins=30, alpha=0.5, label='All Tiles')
+    plt.hist(high_z_diff_ratios, bins=30, alpha=0.7, label='High Z-Diff Tiles')
+    plt.axvline(1.0, color='r', linestyle='--', label='Uniform Ratio (1.0)')
+    plt.xlabel('Ratio to Uniform')
+    plt.ylabel('Count')
+    plt.title('Ratio to Uniform: High Z-Diff vs All Tiles')
+    plt.legend()
+    
+    # Expected samples
+    plt.subplot(1, 3, 3)
+    expected_samples = scaled_probs * total_augmentations
+    high_z_diff_expected_samples = high_z_diff_probs * total_augmentations
+    plt.hist(expected_samples, bins=30, alpha=0.5, label='All Tiles')
+    plt.hist(high_z_diff_expected_samples, bins=30, alpha=0.7, label='High Z-Diff Tiles')
+    plt.xlabel('Expected Samples')
+    plt.ylabel('Count')
+    plt.title(f'Expected Samples (total: {total_augmentations})')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig('high_z_diff_analysis.png')
+    print("Plot saved as 'high_z_diff_analysis.png'")
 
 
 if __name__ == "__main__":
     # Load your dataset
     import torch
+    import numpy as np
     print("Beginning data augmentation...  ")
     print("Loading training tiles...")
     training_tiles = torch.load('data/processed/model_data/precomputed_training_tiles_32bit.pt', weights_only=False)
 
+    desired_total_tiles = 40000
+    
+    total_augmentations = desired_total_tiles - len(training_tiles) 
+    
+    ### Calculate sampling probabilities based on both complexity and input-ground truth differences ###
+    print("Calculating sampling probabilities based on point cloud complexity and z-difference...")
 
-    ### Calculate sampling probabilities based on standard deviations of point clouds ###
-    # Calculate the standard deviation for each point cloud
-    std_devs = []
+    # Arrays to store our calculated scores
+    complexity_scores = []
+    z_diff_scores = []
+
+    # Process each tile
     for tile in training_tiles:
-        points = tile['uav_points_norm']  # (N, 3)
-        std_dev = (torch.std(points[:, :2], dim=0).mean() +  torch.std(points[:, 2], dim=0)).item()  # Weight z std dev higher
-        std_devs.append(std_dev)
+        try:
+            # --- Process ground truth point cloud (uav_points_norm) ---
+            uav_points = tile['uav_points_norm']  # (N, 3)
+            
+            # Filter out outliers (z values above 60)
+            uav_valid_mask = uav_points[:, 2] <= 60
+            uav_filtered = uav_points[uav_valid_mask]
+            
+            # --- Process input point cloud (dep_points_norm) ---
+            dep_points = tile['dep_points_norm']  # (N, 3)
+            
+            # Filter out outliers using same threshold
+            dep_valid_mask = dep_points[:, 2] <= 60
+            dep_filtered = dep_points[dep_valid_mask]
+            
+            # Only calculate if we have enough points after filtering
+            if uav_filtered.shape[0] > 10 and dep_filtered.shape[0] > 10:
+                # 1. Calculate complexity score from ground truth (uav) point cloud
+                uav_xy_std = torch.std(uav_filtered[:, :2], dim=0).mean().item()
+                uav_z_std = torch.std(uav_filtered[:, 2], dim=0).item()
+                complexity_score = uav_xy_std + uav_z_std
+                
+                # 2. Calculate z standard deviation for input (dep) point cloud
+                dep_z_std = torch.std(dep_filtered[:, 2], dim=0).item()
+                
+                # 3. Calculate absolute difference in z standard deviation
+                # This captures cases where trees have fallen (significant change in z distribution)
+                z_std_diff = abs(uav_z_std - dep_z_std)
+            else:
+                # Default values if not enough points
+                complexity_score = 0
+                z_std_diff = 0
+        except Exception as e:
+            # If any error occurs, use default values
+            print(f"Error processing tile: {e}")
+            complexity_score = 0
+            z_std_diff = 0
+        
+        # Append scores to our lists
+        complexity_scores.append(complexity_score)
+        z_diff_scores.append(z_std_diff)
 
-    # Convert to a NumPy array for convenience
-    std_devs = np.array(std_devs)
-    # Apply an alternative to softmax: temperature-scaled softmax
+    # Convert to NumPy arrays
+    complexity_scores = np.array(complexity_scores)
+    z_diff_scores = np.array(z_diff_scores)
 
-    print("calculating sampling probabilities based on uav_points_norm standard deviations...")
-    # Clamp the max std_devs to the 95th percentile
-    percentile_95 = np.percentile(std_devs, 95)
-    std_devs = np.clip(std_devs, None, percentile_95)
+    # Normalize both scores to [0, 1] range after clipping outliers
+    def normalize_with_outlier_clipping(scores, clip_percentile=95):
+        """Normalize scores to [0,1] after clipping outliers above percentile threshold"""
+        # Handle the case where all scores are identical
+        if np.max(scores) == np.min(scores):
+            return np.ones_like(scores) / len(scores)  # Uniform distribution
+            
+        # Clip outliers
+        threshold = np.percentile(scores, clip_percentile)
+        clipped_scores = np.clip(scores, None, threshold)
+        
+        # Normalize to [0,1]
+        min_val, max_val = np.min(clipped_scores), np.max(clipped_scores)
+        # Avoid division by zero
+        if max_val == min_val:
+            return np.ones_like(scores) / len(scores)
+        return (clipped_scores - min_val) / (max_val - min_val)
 
-    temperature = 5  # Increase the temperature for a more gradual change
-    scaled_probs = np.exp(std_devs / temperature) / np.sum(np.exp(std_devs / temperature))
+    # Normalize both score arrays
+    norm_complexity = normalize_with_outlier_clipping(complexity_scores)
+    norm_z_diff = normalize_with_outlier_clipping(z_diff_scores, clip_percentile=97)
 
-    # Print the top 10 and bottom 10 values of scaled_probs
-    print("Top 10 scaled probabilities:", np.sort(scaled_probs)[-10:])
-    print("Bottom 10 scaled probabilities:", np.sort(scaled_probs)[:10])
+    # Apply softmax to each score separately with different temperatures
+    complexity_temperature = 0.7  # Lower temperature = more peaked distribution
+    z_diff_temperature = 0.1      # Higher temperature = more uniform distribution
+    epsilon = 1e-10   # Small value to prevent division by zero
+    
+    # Softmax for complexity scores
+    complexity_probs = np.exp(norm_complexity / complexity_temperature) / (np.sum(np.exp(norm_complexity / complexity_temperature)) + epsilon)
+    
+    # Softmax for z-difference scores
+    z_diff_probs = np.exp(norm_z_diff / z_diff_temperature) / (np.sum(np.exp(norm_z_diff / z_diff_temperature)) + epsilon)
 
+    # Combine probabilities with weights
+    complexity_weight = 0.95
+    z_diff_weight = 0.05
+    scaled_probs = complexity_weight * complexity_probs + z_diff_weight * z_diff_probs
+    
+    # Normalize to ensure sum equals 1.0
+    scaled_probs = scaled_probs / np.sum(scaled_probs)
+
+    # Print statistics
+    print("Top 20 scaled probabilities:", np.sort(scaled_probs)[-20:])
+    print("Bottom 20 scaled probabilities:", np.sort(scaled_probs)[:20])
+
+    # Call the analysis function
+    analyze_probability_distribution(complexity_scores, z_diff_scores, 
+                                    norm_complexity, norm_z_diff,
+                                    complexity_probs, z_diff_probs,
+                                    scaled_probs, total_augmentations)
 
     # Configure augmentation parameters
     config = {
         # Basic transformations
         'rotate_probability': 1,
         'reflect_probability': 0.5,
-        'jitter_probability':0.3,
+        'jitter_probability':0.0,
         
         # Point cloud modifications
         'add_points_probability': 0,
-        'remove_points_probability': 0.3,
-        'mask_points_probability': 0.3,
-        'remove_horizontal_slice_probability': 0.3,  
+        'remove_points_probability': 1,
+        'mask_points_probability': 0.0,
+        'remove_horizontal_slice_probability': 0.0,  
         
         # Imagery and attributes
-        'temporal_shift_probability': 0,
-        'attribute_augment_probability': 0,
-        'spectral_band_probability': 0,
-        'sensor_effects_probability': 0,
+        'temporal_shift_probability': 0.0,
+        'attribute_augment_probability': 0.0,
+        'spectral_band_probability': 0.0,
+        'sensor_effects_probability': 0.0,
         
         # Parameters
-        'max_shift_days': 60,
+        'max_shift_days': 90,
         'jitter_xy_scale': 0.01,
         'jitter_z_scale': 0.01,
         'attribute_scale_range': (0.9, 1.1),
@@ -1362,7 +1622,7 @@ if __name__ == "__main__":
         'add_points_max_distance': 0.005,
         'remove_points_ratio': 0.1,
         'mask_min_radius': 0.10,
-        'mask_max_radius': 0.5,
+        'mask_max_radius': 0.75,
         'mask_min_removal_ratio': 0.1, 
         'mask_max_removal_ratio': 0.5,  
         'mask_count': 2,
@@ -1372,16 +1632,12 @@ if __name__ == "__main__":
         'horizontal_slice_max_height': 2,   
         'horizontal_slice_max_position': 0.5, #0.5 is middle of point cloud, 1 is top
         'horizontal_slice_min_removal_ratio': 0.1, 
-        'horizontal_slice_max_removal_ratio': 0.5     }
-
+        'horizontal_slice_max_removal_ratio': 0.5     
+    }
     
     print("Augmenting dataset...")
-    desired_total_tiles = 40000
-    
-    total_augmentations = desired_total_tiles - len(training_tiles) 
     augmented_tiles = augment_dataset(training_tiles, n_augmentations=1, config=config, prob_vector=scaled_probs, total_augmentations=total_augmentations)
 
-    # augmented_training_tiles = training_tiles + augmented_tiles
     # Save the augmented dataset
     print("Saving augmented dataset...")
-    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_32bit.pt')
+    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_32bit_16k.pt')
