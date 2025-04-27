@@ -67,18 +67,68 @@ class SpatialFusion(nn.Module):
             out_channels=point_dim
         )
     
-    def get_patch_positions(self, img_bbox, patches_per_side, center, scale):
+    # def get_patch_positions(self, img_bbox, patches_per_side, center, scale):
+    #     """
+    #     Compute normalized positions of patches within an image bbox
+        
+    #     Args:
+    #         img_bbox: [minx, miny, maxx, maxy] of the image
+    #         patches_per_side: Number of patches per side (e.g., 4 for 4x4 grid)
+    #         center: [1, 3] Center used for point cloud normalization
+    #         scale: Scale used for point cloud normalization
+            
+    #     Returns:
+    #         normalized_positions: [num_patches, 2] tensor with normalized x,y coordinates
+    #     """
+    #     device = img_bbox.device if isinstance(img_bbox, torch.Tensor) else torch.device('cpu')
+        
+    #     # Convert to tensor if needed
+    #     if not isinstance(img_bbox, torch.Tensor):
+    #         img_bbox = torch.tensor(img_bbox, device=device, dtype=torch.float32)  # [4]
+        
+    #     minx, miny, maxx, maxy = img_bbox
+        
+    #     # Calculate patch size
+    #     patch_size_x = (maxx - minx) / patches_per_side
+    #     patch_size_y = (maxy - miny) / patches_per_side
+        
+    #     # Create grid of patch centers
+    #     x_centers = torch.linspace(
+    #         minx + patch_size_x/2, 
+    #         maxx - patch_size_x/2, 
+    #         patches_per_side, 
+    #         device=device
+    #     )  # [patches_per_side]
+        
+    #     y_centers = torch.linspace(
+    #         miny + patch_size_y/2, 
+    #         maxy - patch_size_y/2, 
+    #         patches_per_side, 
+    #         device=device
+    #     )  # [patches_per_side]
+        
+    #     # Create all combinations
+    #     grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing='ij')  # Both [patches_per_side, patches_per_side]
+    #     positions = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=1)  # [patches_per_side^2, 2] = [num_patches, 2]
+        
+    #     # Normalize positions using the same center and scale as the point cloud
+    #     center_xy = center[:, :2].to(device)  # [1, 2]
+    #     normalized_positions = (positions - center_xy) / scale  # [num_patches, 2]
+        
+    #     return normalized_positions
+
+      
+    def get_patch_positions(self, img_bbox, patches_per_side):
         """
-        Compute normalized positions of patches within an image bbox
+        Compute positions of patches within an image bbox where (0,0) is the center
+        and corners are defined by the bounding box dimensions
         
         Args:
             img_bbox: [minx, miny, maxx, maxy] of the image
             patches_per_side: Number of patches per side (e.g., 4 for 4x4 grid)
-            center: [1, 3] Center used for point cloud normalization
-            scale: Scale used for point cloud normalization
-            
+                
         Returns:
-            normalized_positions: [num_patches, 2] tensor with normalized x,y coordinates
+            positions: [num_patches, 2] tensor with x,y coordinates
         """
         device = img_bbox.device if isinstance(img_bbox, torch.Tensor) else torch.device('cpu')
         
@@ -88,21 +138,28 @@ class SpatialFusion(nn.Module):
         
         minx, miny, maxx, maxy = img_bbox
         
-        # Calculate patch size
-        patch_size_x = (maxx - minx) / patches_per_side
-        patch_size_y = (maxy - miny) / patches_per_side
+        # Calculate bbox dimensions
+        width = maxx - minx
+        height = maxy - miny
         
-        # Create grid of patch centers
+        # Calculate patch size
+        patch_size_x = width / patches_per_side
+        patch_size_y = height / patches_per_side
+        
+        # Create grid of patch centers with (0,0) at image center
+        half_width = width / 2
+        half_height = height / 2
+        
         x_centers = torch.linspace(
-            minx + patch_size_x/2, 
-            maxx - patch_size_x/2, 
+            -half_width + patch_size_x/2, 
+            half_width - patch_size_x/2, 
             patches_per_side, 
             device=device
         )  # [patches_per_side]
         
         y_centers = torch.linspace(
-            miny + patch_size_y/2, 
-            maxy - patch_size_y/2, 
+            -half_height + patch_size_y/2, 
+            half_height - patch_size_y/2, 
             patches_per_side, 
             device=device
         )  # [patches_per_side]
@@ -111,13 +168,9 @@ class SpatialFusion(nn.Module):
         grid_y, grid_x = torch.meshgrid(y_centers, x_centers, indexing='ij')  # Both [patches_per_side, patches_per_side]
         positions = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=1)  # [patches_per_side^2, 2] = [num_patches, 2]
         
-        # Normalize positions using the same center and scale as the point cloud
-        center_xy = center[:, :2].to(device)  # [1, 2]
-        normalized_positions = (positions - center_xy) / scale  # [num_patches, 2]
-        
-        return normalized_positions
+        return positions
 
-    
+
     def process_patch_embeddings(self, point_positions, patch_embeddings, patch_bbox, center, scale):
         """
         Process patch embeddings for fusion with point features
@@ -141,9 +194,9 @@ class SpatialFusion(nn.Module):
         patches_per_side = int(math.sqrt(self.num_patches))
         patch_positions = self.get_patch_positions(
             patch_bbox, 
-            patches_per_side,
-            center,
-            scale
+            patches_per_side#,
+            # center,
+            # scale
         ).to(device)  # [P, 2]
         
         # Calculate distances between points and patches

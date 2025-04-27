@@ -1155,7 +1155,7 @@ def check_dtype_consistency(original_tile, augmented_tile):
 
 
 def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None, 
-                prob_vector=None, total_augmentations=None):
+                   prob_vector=None, total_augmentations=None, max_samples_per_tile=None):
     """
     Create augmented versions of tiles in a dataset with flexible sampling strategy.
     Will continue sampling until the desired number of augmentations is met,
@@ -1174,6 +1174,9 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
         total_augmentations (int, optional): If provided, create exactly this many augmentations
                                            by sampling from tiles with replacement.
                                            When specified, overrides n_augmentations.
+        max_samples_per_tile (int, optional): Maximum number of times each tile can be used.
+                                            If None, no limit is applied.
+                                            If 1, equivalent to sampling without replacement.
         
     Returns:
         list: List of augmented tiles (does not include original tiles)
@@ -1199,22 +1202,53 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
     augmentation_failures = 0
     augmentation_stats = {"total_attempted": 0, "successful": 0, "failures": 0}
     
+    # Track how many times each tile has been successfully used
+    tile_usage_counts = [0] * len(sampled_tiles)
+    
+    # For sampling without replacement when max_samples_per_tile is specified
+    available_indices = list(range(len(sampled_tiles)))
+    
     # Determine augmentation strategy based on parameters
     if total_augmentations is not None:
         # Strategy: Sample with replacement until we reach total_augmentations
-        print(f"Creating {total_augmentations} augmentations by sampling tiles with replacement")
+        print(f"Creating {total_augmentations} augmentations by sampling tiles")
+        if max_samples_per_tile is not None:
+            print(f"Limiting to maximum {max_samples_per_tile} samples per tile")
         
         successful_augmentations = 0
         resample_attempts = 0  # Track attempts to resample due to validation failures
         max_resample_attempts = 500  # Cap on resample attempts
         
         while successful_augmentations < total_augmentations and resample_attempts < max_resample_attempts:
-            # Sample a tile based on probability vector
-            if prob_vector is not None:
-                tile_idx = np.random.choice(len(sampled_tiles), p=prob_vector)
-            else:
-                tile_idx = random.randrange(len(sampled_tiles))
+            # Check if we have any tiles available given the max_samples_per_tile constraint
+            if max_samples_per_tile is not None and not any(count < max_samples_per_tile for count in tile_usage_counts):
+                print(f"All tiles have reached the maximum usage limit of {max_samples_per_tile}")
+                break
                 
+            # Sample a tile based on probability vector and usage limits
+            if max_samples_per_tile is not None:
+                # Filter out tiles that have reached their limit
+                valid_indices = [i for i in range(len(sampled_tiles)) if tile_usage_counts[i] < max_samples_per_tile]
+                
+                if not valid_indices:
+                    break  # No valid tiles left
+                
+                if prob_vector is not None:
+                    # Adjust probability vector for available tiles
+                    valid_probs = [prob_vector[i] for i in valid_indices]
+                    valid_probs = np.array(valid_probs) / np.sum(valid_probs)
+                    selected_idx = np.random.choice(len(valid_indices), p=valid_probs)
+                    tile_idx = valid_indices[selected_idx]
+                else:
+                    # Uniform sampling from available tiles
+                    tile_idx = random.choice(valid_indices)
+            else:
+                # Original sampling logic when no max_samples_per_tile is specified
+                if prob_vector is not None:
+                    tile_idx = np.random.choice(len(sampled_tiles), p=prob_vector)
+                else:
+                    tile_idx = random.randrange(len(sampled_tiles))
+                    
             tile = sampled_tiles[tile_idx]
             augmentation_stats["total_attempted"] += 1
             
@@ -1233,6 +1267,7 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
                     augmented_tiles.append(augmented_tile)
                     augmentation_stats["successful"] += 1
                     successful_augmentations += 1
+                    tile_usage_counts[tile_idx] += 1  # Update usage count
                     
                     # Print progress periodically
                     if successful_augmentations % 100 == 0:
@@ -1259,11 +1294,16 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
     
     else:
         # Original strategy: Process each sampled tile n_augmentations times
-        # (keeping the original implementation for this part)
+        # Now with a cap on augmentations per tile if specified
+        effective_n_augmentations = n_augmentations
+        if max_samples_per_tile is not None:
+            effective_n_augmentations = min(n_augmentations, max_samples_per_tile)
+            print(f"Limiting to maximum {max_samples_per_tile} samples per tile (requested: {n_augmentations})")
+        
         for i, tile in enumerate(sampled_tiles):
             tile_failures = 0
             
-            for j in range(n_augmentations):
+            for j in range(effective_n_augmentations):
                 augmentation_stats["total_attempted"] += 1
                 
                 # Apply random augmentations
@@ -1280,6 +1320,7 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
                         
                         augmented_tiles.append(augmented_tile)
                         augmentation_stats["successful"] += 1
+                        tile_usage_counts[i] += 1  # Update usage count
                         
                     except ValueError as e:
                         print(f"Validation failed for tile {i}, augmentation {j+1}: {str(e)}")
@@ -1292,8 +1333,8 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
                     tile_failures += 1
             
             # Print detailed diagnostic if all augmentations of this tile failed
-            if tile_failures == n_augmentations:
-                print(f"WARNING: All {n_augmentations} augmentations failed for tile {i}")
+            if tile_failures == effective_n_augmentations:
+                print(f"WARNING: All {effective_n_augmentations} augmentations failed for tile {i}")
                 
                 # Diagnostic information about the tile
                 try:
@@ -1336,7 +1377,24 @@ def augment_dataset(tiles, n_augmentations=1, config=None, sample_size=None,
     print(f"  Failed augmentations: {augmentation_failures}")
     print(f"  Overall success rate: {success_rate:.2f}%")
     
+    # Print usage distribution information if max_samples_per_tile was specified
+    if max_samples_per_tile is not None:
+        usage_distribution = {}
+        for count in tile_usage_counts:
+            if count in usage_distribution:
+                usage_distribution[count] += 1
+            else:
+                usage_distribution[count] = 1
+                
+        print("Usage distribution (times_used: num_tiles):")
+        for count in sorted(usage_distribution.keys()):
+            print(f"  {count}: {usage_distribution[count]}")
+    
     return augmented_tiles
+
+
+
+
 
 import matplotlib.pyplot as plt
 import matplotlib.pyplot as plt
@@ -1542,7 +1600,7 @@ if __name__ == "__main__":
     z_diff_scores = np.array(z_diff_scores)
 
     # Normalize both scores to [0, 1] range after clipping outliers
-    def normalize_with_outlier_clipping(scores, clip_percentile=95):
+    def normalize_with_outlier_clipping(scores, clip_percentile=99):
         """Normalize scores to [0,1] after clipping outliers above percentile threshold"""
         # Handle the case where all scores are identical
         if np.max(scores) == np.min(scores):
@@ -1564,8 +1622,8 @@ if __name__ == "__main__":
     norm_z_diff = normalize_with_outlier_clipping(z_diff_scores, clip_percentile=97)
 
     # Apply softmax to each score separately with different temperatures
-    complexity_temperature = 0.7  # Lower temperature = more peaked distribution
-    z_diff_temperature = 0.1      # Higher temperature = more uniform distribution
+    complexity_temperature = 0.1  # Lower temperature = more peaked distribution
+    z_diff_temperature = 0.05      # Higher temperature = more uniform distribution
     epsilon = 1e-10   # Small value to prevent division by zero
     
     # Softmax for complexity scores
@@ -1575,8 +1633,8 @@ if __name__ == "__main__":
     z_diff_probs = np.exp(norm_z_diff / z_diff_temperature) / (np.sum(np.exp(norm_z_diff / z_diff_temperature)) + epsilon)
 
     # Combine probabilities with weights
-    complexity_weight = 0.95
-    z_diff_weight = 0.05
+    complexity_weight = 0.9
+    z_diff_weight = 0.10
     scaled_probs = complexity_weight * complexity_probs + z_diff_weight * z_diff_probs
     
     # Normalize to ensure sum equals 1.0
@@ -1597,7 +1655,7 @@ if __name__ == "__main__":
         # Basic transformations
         'rotate_probability': 1,
         'reflect_probability': 0.5,
-        'jitter_probability':0.0,
+        'jitter_probability':0.2,
         
         # Point cloud modifications
         'add_points_probability': 0,
@@ -1636,8 +1694,8 @@ if __name__ == "__main__":
     }
     
     print("Augmenting dataset...")
-    augmented_tiles = augment_dataset(training_tiles, n_augmentations=1, config=config, prob_vector=scaled_probs, total_augmentations=total_augmentations)
+    augmented_tiles = augment_dataset(training_tiles, n_augmentations=1, config=config, prob_vector=scaled_probs, total_augmentations=total_augmentations,max_samples_per_tile = 1)
 
     # Save the augmented dataset
     print("Saving augmented dataset...")
-    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_32bit_16k.pt')
+    torch.save(augmented_tiles, 'data/processed/model_data/augmented_tiles_32bit_16k_no_repl.pt')

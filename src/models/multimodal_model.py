@@ -63,11 +63,11 @@ class MultimodalModelConfig:
     use_uavsar: bool = False
 
     # Imagery encoder parameters
-    img_embed_dim: int = 64
+    img_embed_dim: int = 128
     img_num_patches: int = 16
 
     # Fusion module selection
-    fusion_type: str = "spatial"  # Either "spatial" or "cross_attention"
+    fusion_type: str = "cross_attention"  # Either "spatial" or "cross_attention"
 
     # Common fusion parameters
     temperature: float = 0.1
