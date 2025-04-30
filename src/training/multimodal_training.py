@@ -19,7 +19,7 @@ import time
 import threading
 import logging
 from torch.utils.tensorboard import SummaryWriter
-
+from schedulefree import AdamWScheduleFree 
 
 # Make NCCL more robust to communication issues
 os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
@@ -260,6 +260,8 @@ def process_multimodal_batch(model, batch, device):
     """
     dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list, tile_id_list = batch
     total_loss = 0.0
+    total_infocd_loss = 0.0
+    total_repulsion_loss = 0.0
     sample_count = 0
     
     for i in range(len(dep_list)):
@@ -300,28 +302,21 @@ def process_multimodal_batch(model, batch, device):
         pred_length = torch.tensor([pred_points.shape[0]], device=device)
         uav_length = torch.tensor([uav_points.shape[0]], device=device)
 
-        # # Calculate Chamfer distance loss
-        # from src.utils.chamfer_distance import chamfer_distance
-        # sample_loss, _ = chamfer_distance(
-        #     pred_points_batch, 
-        #     uav_points_batch,
-        #     x_lengths=pred_length,
-        #     y_lengths=uav_length
-        # )
-
         from src.utils.infocd import info_cd_loss, repulsion_loss
         from pytorch3d.ops import knn_points
 
-        
-        # --- InfoCD ---  (τ=0.8 is a good starting point)
+        # λ choice: k / |Y|   (e.g. k = 5 here gives a 5× stronger contrastive term)
+        lam = 3.0 / uav_length.float()  
+
+
+        # --- InfoCD ---  
         infocd = info_cd_loss(
             pred_points_batch, uav_points_batch,
             x_lengths=pred_length,
             y_lengths=uav_length,
-            tau=0.8,        # temperature
-            lam=None        # use default 1/|cloud|
+            tau=0.3,        # temperature
+            lam=lam        
         )
-
 
         # 2) compute dynamic repulsion radius h
         #    (a) do a 2‑NN on pred→pred
@@ -337,9 +332,8 @@ def process_multimodal_batch(model, batch, device):
         #    (c) median per sample, then mean → scalar
         d_med = nn_dists.median(dim=1).values.mean()
 
-        #    (d) scale by 1.8 and clamp to [0.15, 0.40] m
+        #    (d) scale by 1.8 and clamp to [0.15, 0.40] m
         h = (1.8 * d_med).clamp(0.15, 0.40)
-
 
         # --- Repulsion --- 
         repl = repulsion_loss(
@@ -349,8 +343,11 @@ def process_multimodal_batch(model, batch, device):
             h=h 
         )
 
+        # Calculate weighted repulsion loss
+        weighted_repl = 0.45 * repl
+        
         # Combine with a small weight on repulsion
-        sample_loss = infocd + 0.02 * repl
+        sample_loss = infocd + weighted_repl
 
         if torch.isnan(sample_loss):
             print(f"WARNING: Loss for a sample is NaN! {tile_id_list[i]}")
@@ -359,9 +356,20 @@ def process_multimodal_batch(model, batch, device):
             print(f"WARNING: Loss for a sample is Inf! {tile_id_list[i]}")
             
         total_loss += sample_loss
+        total_infocd_loss += infocd
+        total_repulsion_loss += weighted_repl
         sample_count += 1
     
-    return total_loss / sample_count if sample_count > 0 else total_loss
+    avg_loss = total_loss / sample_count if sample_count > 0 else total_loss
+    avg_infocd = total_infocd_loss / sample_count if sample_count > 0 else total_infocd_loss
+    avg_repl = total_repulsion_loss / sample_count if sample_count > 0 else total_repulsion_loss
+    
+    # Return a dictionary with all loss components
+    return {
+        'total': avg_loss,
+        'infocd': avg_infocd,
+        'repulsion': avg_repl
+    }
 
 
 
@@ -526,90 +534,134 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
         enable_debug: Whether to enable debugging features (default: False)
         scheduler: Optional scheduler to update after each batch (for OneCycleLR)
     """
-    model.train()
+    optimizer.train() # Set optimizer to training mode (ScheduleFree specific)
+    model.train() # Set model to training mode
     train_loss_total = 0.0
+    train_infocd_total = 0.0
+    train_repulsion_total = 0.0
     batch_count = 0
     accumulated_batch_count = 0
-    
-    # Use the provided batch processing function or use process_multimodal_batch by default
+
     if process_batch_fn is None:
+        # Ensure this import path is correct relative to where this function is defined
         from src.training.multimodal_training import process_multimodal_batch
         process_batch_fn = process_multimodal_batch
-    
-    # Global step counter for tensorboard logging
-    global_step = epoch * len(train_loader)
-    
-    # Zero gradients at the beginning
+
+    global_step_base = epoch * (len(train_loader) // accumulation_steps) # Base step count for optimizer steps this epoch
+
+    # Zero gradients at the beginning of the epoch
     optimizer.zero_grad()
-    
-    # Batch logging interval - only log if debugging is enabled
+
     batch_log_interval = 10 if enable_debug else 999999
-    
+
+    max_grad_norm = 1.0 # Define the max_norm used for clipping here for logging consistency
+
     for batch_idx, batch in enumerate(train_loader):
-        current_step = global_step + batch_idx
-        
-        # Forward pass with mixed precision
+        current_batch_step = epoch * len(train_loader) + batch_idx
+
         with autocast(device_type='cuda', dtype=torch.bfloat16):
-            batch_loss = process_batch_fn(model, batch, device)
-            # Scale loss by accumulation steps to maintain correct gradient magnitude
+            loss_dict = process_batch_fn(model, batch, device)
+            batch_loss = loss_dict['total']
+            batch_infocd = loss_dict['infocd']
+            batch_repulsion = loss_dict['repulsion']
+
             scaled_loss = batch_loss / accumulation_steps
-        
-        # Backward pass with gradient scaling
+
         scaler.scale(scaled_loss).backward()
-        
-        # Accumulate statistics for reporting
+
         train_loss_total += batch_loss.item()
+        train_infocd_total += batch_infocd.item()
+        train_repulsion_total += batch_repulsion.item()
         batch_count += 1
         accumulated_batch_count += 1
 
-        # Log LR if debugging is enabled
-        if writer is not None and enable_debug:
-            writer.add_scalar('Metrics/learning_rate_batch', optimizer.param_groups[0]['lr'], current_step)
-    
-        # Log batch-level metrics if debugging is enabled
-        should_log_batch = (enable_debug and 
-                          batch_idx % batch_log_interval == 0 and 
+        # Log batch-level metrics if debugging is enabled and writer exists (rank 0 only)
+        should_log_batch = (enable_debug and
+                          batch_idx % batch_log_interval == 0 and
                           writer is not None)
-                          
+
         if should_log_batch:
-            # Log per-batch loss
-            writer.add_scalar('Loss/train_batch', batch_loss.item(), current_step)
-        
-        # Only update weights after accumulating gradients for specified number of steps
-        # or at the end of the epoch to avoid losing the last few batches
+            writer.add_scalar('Loss/train_batch', batch_loss.item(), current_batch_step)
+            writer.add_scalar('Loss/train_infocd_batch', batch_infocd.item(), current_batch_step)
+            writer.add_scalar('Loss/train_repulsion_batch', batch_repulsion.item(), current_batch_step)
+            # Log LR per batch if debugging
+            writer.add_scalar('Metrics/learning_rate_batch', optimizer.param_groups[0]['lr'], current_batch_step)
+
+
         is_last_batch = (batch_idx == len(train_loader) - 1)
         if accumulated_batch_count == accumulation_steps or is_last_batch:
-            # Unscale gradients for clipping
+            # --- OPTIMIZER STEP OCCURS HERE ---
+            current_optimizer_step = global_step_base + (batch_idx // accumulation_steps)
+
+            # Unscale gradients before clipping
             scaler.unscale_(optimizer)
-            
-            # Clip gradients to prevent explosion
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=4)
-            
+
+            # --- GRADIENT CLIPPING & LOGGING ---
+            # Clip gradients and capture the norm *before* clipping
+            # Note: clip_grad_norm_ returns the total norm *before* clipping.
+            grad_norm_before_clip = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=max_grad_norm
+            )
+
+            # # Log the effective gradient norm (capped at max_norm)
+            # if writer is not None:
+            #      # Calculate the effective norm after clipping. If norm was <= max_norm, it's unchanged.
+            #      # If norm was > max_norm, it was scaled down to max_norm.
+            #      effective_grad_norm = min(grad_norm_before_clip.item(), max_grad_norm)
+            #      writer.add_scalar('Gradients/norm_post_clip', effective_grad_norm, current_optimizer_step)
+            #      # Optionally log the pre-clip norm for comparison/debugging
+            #      writer.add_scalar('Gradients/norm_pre_clip', grad_norm_before_clip.item(), current_optimizer_step)
+            # # --- END GRADIENT LOGGING ---
+
             # Update weights
             scaler.step(optimizer)
-            scaler.update()        
+            scaler.update()
 
-            # Update learning rate scheduler if provided (for OneCycleLR)
-            if scheduler is not None:
-                scheduler.step()
-            
-            # Reset gradients
+             # --- WEIGHT LOGGING ---
+            if writer is not None:
+                total_weight_norm = 0.0
+                # Access model.module parameters if using DDP, otherwise model.parameters
+                params_to_log = model.module.parameters() if isinstance(model, DDP) else model.parameters()
+                with torch.no_grad(): # Ensure no gradients are calculated for logging
+                    for p in params_to_log:
+                        if p is not None and p.data is not None:
+                            param_norm = p.data.norm(2)
+                            total_weight_norm += param_norm.item() ** 2
+                    total_weight_norm = total_weight_norm ** 0.5
+                writer.add_scalar('Weights/total_norm_L2', total_weight_norm, current_optimizer_step)
+            # --- END WEIGHT LOGGING ---
+
+            # Reset gradients for the next accumulation cycle
             optimizer.zero_grad()
-            
+
             # Reset accumulation counter
             accumulated_batch_count = 0
     
     # Gather losses from all processes
     world_size = dist.get_world_size()
     train_loss_tensor = torch.tensor(train_loss_total, device=device)
+    train_infocd_tensor = torch.tensor(train_infocd_total, device=device)
+    train_repulsion_tensor = torch.tensor(train_repulsion_total, device=device)
+    
     dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(train_infocd_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(train_repulsion_tensor, op=dist.ReduceOp.SUM)
+    
     avg_train_loss = train_loss_tensor.item() / batch_count / world_size
+    avg_train_infocd = train_infocd_tensor.item() / batch_count / world_size
+    avg_train_repulsion = train_repulsion_tensor.item() / batch_count / world_size
+    
+    # Log epoch-level losses if writer is available
+    if writer is not None and dist.get_rank() == 0:
+        writer.add_scalar('Loss/train_epoch_total', avg_train_loss, epoch)
+        writer.add_scalar('Loss/train_epoch_infocd', avg_train_infocd, epoch)
+        writer.add_scalar('Loss/train_epoch_repulsion', avg_train_repulsion, epoch)
     
     return avg_train_loss
 
 
 def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, process_batch_fn=None,
-                          enable_debug=False, visualize_samples=False):
+                          enable_debug=False, visualize_samples=False, optimizer=None):
     """
     Validate the model for one epoch using DDP with TensorBoard logging.
     
@@ -623,14 +675,23 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
         enable_debug: Whether to enable debugging features (default: False)
         visualize_samples: Whether to visualize sample predictions (default: False)
     """
+    optimizer.eval()
     model.eval()
     val_loss_total = 0.0
+    val_infocd_total = 0.0
+    val_repulsion_total = 0.0
     batch_count = 0
+    
+    # Store chamfer distances for metrics
+    all_chamfer_distances = []
     
     # Use the provided batch processing function or use process_multimodal_batch by default
     if process_batch_fn is None:
         from src.training.multimodal_training import process_multimodal_batch
         process_batch_fn = process_multimodal_batch
+    
+    # Import chamfer distance from pytorch3d
+    from pytorch3d.loss import chamfer_distance
     
     # Global step counter for tensorboard logging
     global_step = epoch * len(val_loader)
@@ -643,7 +704,53 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
             current_step = global_step + batch_idx
             
             with autocast(device_type='cuda', dtype=torch.bfloat16):
-                batch_loss = process_batch_fn(model, batch, device)
+                # Get loss components
+                loss_dict = process_batch_fn(model, batch, device)
+                batch_loss = loss_dict['total']
+                batch_infocd = loss_dict['infocd']
+                batch_repulsion = loss_dict['repulsion']
+                
+                # Also compute chamfer distance for each sample in the batch
+                dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list, tile_id_list = batch
+                
+                for i in range(len(dep_list)):
+                    dep_points = dep_list[i].to(device)
+                    uav_points = uav_list[i].to(device)
+                    e_idx = edge_list[i].to(device)
+                    dep_attr = attr_list[i].to(device) if attr_list[i] is not None else None
+                    
+                    # Get normalization parameters
+                    center = center_list[i].to(device) if center_list[i] is not None else None
+                    scale = scale_list[i].to(device) if scale_list[i] is not None else None
+                    bbox = bbox_list[i].to(device) if bbox_list[i] is not None else None
+                    
+                    # Process imagery data if available
+                    naip_data = naip_list[i]
+                    uavsar_data = uavsar_list[i]
+                    
+                    # Move imagery data to device if available
+                    if naip_data is not None:
+                        if 'images' in naip_data and naip_data['images'] is not None:
+                            naip_data['images'] = naip_data['images'].to(device)
+                    
+                    if uavsar_data is not None:
+                        if 'images' in uavsar_data and uavsar_data['images'] is not None:
+                            uavsar_data['images'] = uavsar_data['images'].to(device)
+                    
+                    # Run the model to get predictions
+                    pred_points = model(
+                        dep_points, e_idx, dep_attr, 
+                        naip_data, uavsar_data,
+                        center, scale, bbox
+                    )
+                    
+                    # Prepare for chamfer distance
+                    pred_points_batch = pred_points.unsqueeze(0)
+                    uav_points_batch = uav_points.unsqueeze(0)
+                    
+                    # Calculate chamfer distance using pytorch3d implementation
+                    cd_loss, _ = chamfer_distance(pred_points_batch, uav_points_batch)
+                    all_chamfer_distances.append(cd_loss.item())
             
             # Check if we should log for this batch
             should_log_batch = (enable_debug and 
@@ -654,18 +761,105 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
             # Log batch-level statistics
             if should_log_batch:
                 writer.add_scalar('Loss/val_batch', batch_loss.item(), current_step)
+                writer.add_scalar('Loss/val_infocd_batch', batch_infocd.item(), current_step)
+                writer.add_scalar('Loss/val_repulsion_batch', batch_repulsion.item(), current_step)
             
             val_loss_total += batch_loss.item()
+            val_infocd_total += batch_infocd.item()
+            val_repulsion_total += batch_repulsion.item()
             batch_count += 1
     
     # Gather losses from all processes
     world_size = dist.get_world_size()
     val_loss_tensor = torch.tensor(val_loss_total, device=device)
-    dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
-    avg_val_loss = val_loss_tensor.item() / batch_count / world_size
+    val_infocd_tensor = torch.tensor(val_infocd_total, device=device)
+    val_repulsion_tensor = torch.tensor(val_repulsion_total, device=device)
     
-    return avg_val_loss
-
+    dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(val_infocd_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(val_repulsion_tensor, op=dist.ReduceOp.SUM)
+    
+    avg_val_loss = val_loss_tensor.item() / batch_count / world_size
+    avg_val_infocd = val_infocd_tensor.item() / batch_count / world_size
+    avg_val_repulsion = val_repulsion_tensor.item() / batch_count / world_size
+    
+    # Initialize chamfer distance metrics with default values
+    cd_mean = cd_median = cd_min = cd_max = cd_p10 = cd_p90 = 0.0
+    
+    # Calculate chamfer distance metrics if we have any distances
+    if len(all_chamfer_distances) > 0:
+        # Convert to tensor for easy calculations
+        local_cd_tensor = torch.tensor(all_chamfer_distances, device=device)
+        
+        # Gather chamfer distances from all processes, handling different sizes
+        # First, get the local size as int64 tensor
+        local_size = torch.tensor([local_cd_tensor.size(0)], dtype=torch.int64, device=device)
+        
+        # Create a list of tensors with matching dtype (int64)
+        all_sizes = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
+        
+        # Gather sizes from all processes
+        dist.all_gather(all_sizes, local_size)
+        
+        # Convert to integers
+        all_sizes = [int(size.item()) for size in all_sizes]
+        max_size = max(all_sizes)
+        
+        # Pad local tensor to max size if needed
+        if local_cd_tensor.size(0) < max_size:
+            padding = torch.full((max_size - local_cd_tensor.size(0),), float('nan'), 
+                                 dtype=local_cd_tensor.dtype, device=device)
+            local_cd_tensor = torch.cat([local_cd_tensor, padding])
+        
+        # Create list of tensors to gather into, with matching dtype
+        all_cd_tensors = [torch.zeros(max_size, dtype=local_cd_tensor.dtype, device=device) 
+                          for _ in range(world_size)]
+        
+        # Gather all chamfer distances
+        dist.all_gather(all_cd_tensors, local_cd_tensor)
+        
+        # Combine tensors and filter out padded values (NaNs)
+        all_cd_values = []
+        for i, tensor in enumerate(all_cd_tensors):
+            valid_size = all_sizes[i]
+            all_cd_values.extend(tensor[:valid_size].tolist())
+        
+        # Convert back to tensor for statistics calculation
+        if len(all_cd_values) > 0:
+            cd_tensor = torch.tensor(all_cd_values, device=device)
+            cd_mean = cd_tensor.mean().item()
+            cd_median = cd_tensor.median().item()
+            cd_min = cd_tensor.min().item()
+            cd_max = cd_tensor.max().item()
+            cd_p10 = torch.quantile(cd_tensor, 0.1).item()  # 10th percentile
+            cd_p90 = torch.quantile(cd_tensor, 0.9).item()  # 90th percentile
+    
+    # Log all metrics to TensorBoard if we're rank 0
+    if writer is not None and dist.get_rank() == 0:
+        writer.add_scalar('Loss/val_epoch_total', avg_val_loss, epoch)
+        writer.add_scalar('Loss/val_epoch_infocd', avg_val_infocd, epoch)
+        writer.add_scalar('Loss/val_epoch_repulsion', avg_val_repulsion, epoch)
+        
+        # Log chamfer distance metrics
+        writer.add_scalar('ChamferDist/mean', cd_mean, epoch)
+        writer.add_scalar('ChamferDist/median', cd_median, epoch)
+        writer.add_scalar('ChamferDist/min', cd_min, epoch)
+        writer.add_scalar('ChamferDist/max', cd_max, epoch)
+        writer.add_scalar('ChamferDist/p10', cd_p10, epoch)
+        writer.add_scalar('ChamferDist/p90', cd_p90, epoch)
+    
+    # Return a dictionary with all metrics
+    return {
+        'loss': avg_val_loss,
+        'infocd': avg_val_infocd,
+        'repulsion': avg_val_repulsion,
+        'cd_mean': cd_mean,
+        'cd_median': cd_median,
+        'cd_min': cd_min,
+        'cd_max': cd_max,
+        'cd_p10': cd_p10,
+        'cd_p90': cd_p90
+    }
 
 def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
                            model_name, batch_size, checkpoint_dir, model_config,
@@ -789,45 +983,61 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
         print(f"  - New parameters: {len(new_params)} parameters with lr={base_lr}")
         print(f"  - Pretrained parameters: {len(pretrained_params)} parameters with lr={pretrained_lr}")
     
-    # Set up parameter groups for the optimizer with different starting LRs
+    # # Set up parameter groups for the optimizer with different starting LRs
+    # param_groups = [
+    #     {'params': pretrained_params, 'lr': pretrained_lr if lr_scheduler_type == "plateau" else pretrained_lr/div_factor},
+    #     {'params': new_params, 'lr': base_lr if lr_scheduler_type == "plateau" else base_lr/div_factor}
+    # ]
+    # Set up parameter groups for the optimizer
     param_groups = [
-        {'params': pretrained_params, 'lr': pretrained_lr if lr_scheduler_type == "plateau" else pretrained_lr/div_factor},
-        {'params': new_params, 'lr': base_lr if lr_scheduler_type == "plateau" else base_lr/div_factor}
+        {'params': pretrained_params, 'lr': pretrained_lr},
+        {'params': new_params, 'lr': base_lr}
     ]
-    
-    optimizer = optim.AdamW(param_groups, weight_decay=5e-3)
+    # optimizer = optim.AdamW(param_groups, weight_decay=5e-3)
 
-    # wrap the model in DDP after setting up the optimizer
-    if world_size > 1:
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     # Calculate total steps for OneCycleLR
     total_steps = (len(train_loader) // accumulation_steps) * num_epochs
-    
-    # Initialize scheduler based on type
-    if lr_scheduler_type == "onecycle":
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=[pretrained_lr, base_lr],  # List of maximum LRs for each param group
-            total_steps=total_steps,
-            pct_start=pct_start,
-            div_factor=div_factor,
-            final_div_factor=final_div_factor
-        )
-        scheduler_batch_update = True
-    else:  # "plateau" with warmup
-        scheduler = WarmupReduceLROnPlateau(
-            optimizer, 
-            max_lr=max_lr,
-            total_epochs=num_epochs,
-            pct_start=pct_start,
-            div_factor=div_factor,
-            mode='min', 
-            factor=0.9, 
-            patience=2, 
-            verbose=(rank==0)
-        )
-        scheduler_batch_update = False  # Flag to indicate epoch-level updates
+    warmup_steps  = int(0.05 * total_steps)           # 5 % linear warm-up
+    optimizer = AdamWScheduleFree(
+        param_groups,
+        lr=1e-3,                 # ignored for groups but required
+        betas=(0.95, 0.999),
+        weight_decay=1e-3,
+        warmup_steps=warmup_steps, # replaces scheduler
+        r=0.0,
+        weight_lr_power=2.0,
+    )
+
+    # mark optimiser as in training mode
+    optimizer.train()
+    # # Initialize scheduler based on type
+    # if lr_scheduler_type == "onecycle":
+    #     scheduler = OneCycleLR(
+    #         optimizer,
+    #         max_lr=[pretrained_lr, base_lr],  # List of maximum LRs for each param group
+    #         total_steps=total_steps,
+    #         pct_start=pct_start,
+    #         div_factor=div_factor,
+    #         final_div_factor=final_div_factor
+    #     )
+    #     scheduler_batch_update = True
+    # else:  # "plateau" with warmup
+    #     scheduler = WarmupReduceLROnPlateau(
+    #         optimizer, 
+    #         max_lr=max_lr,
+    #         total_epochs=num_epochs,
+    #         pct_start=pct_start,
+    #         div_factor=div_factor,
+    #         mode='min', 
+    #         factor=0.9, 
+    #         patience=2, 
+    #         verbose=(rank==0)
+    #     )
+    #     scheduler_batch_update = False  # Flag to indicate epoch-level updates
+    # wrap the model in DDP after setting up the optimizer
+    if world_size > 1:
+        model = DDP(model, device_ids=[rank], find_unused_parameters=False)
 
     scaler = GradScaler()
 
@@ -844,13 +1054,8 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
     best_model_state = None
 
     for epoch in range(num_epochs):
-        # Check if rank 0 is still in the training loop
-        is_running = torch.tensor(1, device=device)
-        dist.broadcast(is_running, src=0)
-        if is_running.item() == 0:
-            print(f"Rank {rank}: Rank 0 has stopped, so stopping too.")
-            break
-            
+
+
         epoch_start_time = time.time()
         if world_size > 1 and train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -860,20 +1065,76 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
             process_batch_fn=process_multimodal_batch,
             accumulation_steps=accumulation_steps,
             enable_debug=enable_debug,
-            scheduler=scheduler if scheduler_batch_update else None  # Pass scheduler if batch update
+            # scheduler=scheduler if scheduler_batch_update else None  # Pass scheduler if batch update
         )
         
         # Validate
-        avg_val_loss = validate_one_epoch_ddp(
+        val_metrics = validate_one_epoch_ddp(
             model, val_loader, device, writer, epoch,
             process_batch_fn=process_multimodal_batch,
             enable_debug=enable_debug,
-            visualize_samples=visualize_samples
+            visualize_samples=visualize_samples,
+            optimizer=optimizer
         )
+        avg_val_loss = val_metrics['loss']
+        cd_mean = val_metrics['cd_mean']
+        cd_median = val_metrics['cd_median']
+        cd_min = val_metrics['cd_min'] 
+        cd_max = val_metrics['cd_max']
+        cd_p10 = val_metrics['cd_p10']
+        cd_p90 = val_metrics['cd_p90']
         
-        # Update scheduler at epoch level only for ReduceLROnPlateau
-        if not scheduler_batch_update:
-            scheduler.step(avg_val_loss)
+        # ───────────────────────────────────────────────────────────────
+        #  update best-loss book-keeping  +  log progress   (rank-0 only)
+        # ───────────────────────────────────────────────────────────────
+        if rank == 0:
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                epochs_without_improvement = 0
+                best_model_state = (
+                    model.module.state_dict() if world_size > 1 else model.state_dict()
+                )
+
+                # ─ logging for a new best ─
+                logger.info(f"New best validation loss: {best_val_loss:.6f}")
+                if writer is not None:
+                    writer.add_scalar("Metrics/best_val_loss", best_val_loss, epoch)
+
+            else:
+                epochs_without_improvement += 1
+                logger.info(
+                    f"No improvement in validation loss for "
+                    f"{epochs_without_improvement} epoch(s)."
+                )
+
+        # ───────────────────────────────────────────────────────────────
+        #  decide whether to stop and tell every rank
+        # ───────────────────────────────────────────────────────────────
+        stop_tensor = torch.tensor(
+            int(rank == 0 and epochs_without_improvement >= early_stopping_patience),
+            device=device,
+        )
+        dist.broadcast(stop_tensor, src=0)
+
+        if stop_tensor.item():
+            if rank == 0:
+                logger.info(
+                    f"Early stopping triggered at epoch {epoch+1} "
+                    f"(no improvement for {early_stopping_patience} epochs)."
+                )
+                if writer is not None:
+                    writer.add_text(
+                        "Training/early_stopping",
+                        f"Stopped at epoch {epoch+1} after "
+                        f"{early_stopping_patience} epochs without validation-loss improvement.",
+                        epoch,
+                    )
+            break
+
+        
+        # # Update scheduler at epoch level only for ReduceLROnPlateau
+        # if not scheduler_batch_update:
+        #     scheduler.step(avg_val_loss)
         
         epoch_time = time.time() - epoch_start_time
 
@@ -881,12 +1142,20 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
         if rank == 0 and writer is not None:
             writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch)
             writer.add_scalar('Loss/val_epoch', avg_val_loss, epoch)
+            writer.add_scalar('Loss/val_cd_mean_epoch', cd_mean, epoch)
+            writer.add_scalar('Loss/val_cd_median_epoch', cd_median, epoch)
+            writer.add_scalar('Loss/val_cd_min_epoch', cd_min, epoch)
+            writer.add_scalar('Loss/val_cd_max_epoch', cd_max, epoch)
+            writer.add_scalar('Loss/val_cd_p10_epoch', cd_p10, epoch)
+            writer.add_scalar('Loss/val_cd_p90_epoch', cd_p90, epoch)
+
             
             # Additional metrics if debugging is enabled
             if enable_debug:
                 writer.add_scalar('Metrics/epoch_time_minutes', epoch_time/60, epoch)
                 writer.add_scalar('Metrics/learning_rate', optimizer.param_groups[0]['lr'], epoch)
-                
+                writer.add_scalar('Metrics/lr_main', optimizer.param_groups[1]['lr'], epoch)
+
                 # Track GPU memory at epoch boundaries
                 allocated = torch.cuda.memory_allocated(device=device) / (1024**2)  # MB
                 reserved = torch.cuda.memory_reserved(device=device) / (1024**2)    # MB
@@ -895,37 +1164,14 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
 
         if rank == 0:
             log_message = (f"Epoch {epoch+1}/{num_epochs} | "
-                           f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | "
-                           f"LR: {optimizer.param_groups[0]['lr']:.4e} | "
-                           f"Time: {epoch_time/60:.2f}min")
+                        f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f} | "
+                        f"CD Mean: {cd_mean:.6f} | CD Median: {cd_median:.6f} | "
+                        f"CD Min: {cd_min:.6f} | CD Max: {cd_max:.6f} | "
+                        f"LR: {optimizer.param_groups[0]['lr']:.4e} | "
+                        f"Time: {epoch_time/60:.2f}min")
             print(log_message)
             logger.info(log_message)
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                epochs_without_improvement = 0
-                if world_size > 1 and hasattr(model, 'module'):
-                    best_model_state = model.module.state_dict()
-                else:
-                    best_model_state = model.state_dict()
-                logger.info(f"New best validation loss: {best_val_loss:.6f}")
-                
-                # Log the best model so far
-                if writer is not None:
-                    writer.add_scalar('Metrics/best_val_loss', best_val_loss, epoch)
-            else:
-                epochs_without_improvement += 1
-                logger.info(f"No improvement in validation loss for {epochs_without_improvement} epoch(s).")
-
-            # Check for early stopping and inform other ranks if triggered
-            if epochs_without_improvement >= early_stopping_patience:
-                logger.info("Early stopping triggered.")
-                is_running = torch.tensor(0, device=device)  # We'll stop after this epoch
-                if writer is not None:
-                    writer.add_text('Training/early_stopping', 
-                                  f"Training stopped at epoch {epoch+1} due to no improvement for {early_stopping_patience} epochs",
-                                  epoch)
-                break
 
             if (epoch + 1) % 10 == 0:
                 # Use model_name directly without adding modality string again
@@ -989,7 +1235,7 @@ def train_multimodal_model(train_dataset=None,
                          model_config=None,
                          num_epochs=60,
                          log_file="logs/training_log.txt",
-                         early_stopping_patience=40,
+                         early_stopping_patience=25,
                          temp_dir_root="data/output/tmp_shards",
                          shard_cache_dir="data/output/cached_shards",
                          use_cached_shards=False,
@@ -1423,94 +1669,139 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
         
         return avg_val_loss
     
-    # 1. Baseline (3DEP Only)
-    print("\n\n========== Running Baseline (3DEP Only) ==========\n")
-    baseline_config_dict = {k: v for k, v in asdict(base_config).items()}
-    baseline_config_dict['use_naip'] = False
-    baseline_config_dict['use_uavsar'] = False
-    baseline_config = MultimodalModelConfig(**baseline_config_dict)
+    # # 1. Baseline (3DEP Only)
+    # print("\n\n========== Running Baseline (3DEP Only) ==========\n")
+    # baseline_config_dict = {k: v for k, v in asdict(base_config).items()}
+    # baseline_config_dict['use_naip'] = False
+    # baseline_config_dict['use_uavsar'] = False
+    # baseline_config = MultimodalModelConfig(**baseline_config_dict)
+    
+    # # Make a unique directory for this run
+    # baseline_dir = os.path.join(checkpoint_dir, f"baseline_{timestamp}")
+    # os.makedirs(baseline_dir, exist_ok=True)
+    
+    # # Use a specific model name for this ablation
+    # baseline_model_name = "baseline"
+    
+    # # Check if we have a pre-trained model for baseline
+    # has_pretrained_baseline = (hasattr(base_config, 'checkpoint_path') and 
+    #                            base_config.checkpoint_path is not None and 
+    #                            base_config.checkpoint_path != '')
+    
+    # if has_pretrained_baseline:
+    #     print(f"Using pre-trained baseline model from: {base_config.checkpoint_path}")
+        
+    #     # Generate validation shard
+    #     timestamp_temp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #     temp_dir = os.path.join(temp_dir_root, f"multimodal_shards_{timestamp_temp}")
+    #     os.makedirs(temp_dir, exist_ok=True)
+        
+    #     # Load val dataset if needed
+    #     if val_dataset is None and val_data_path is not None:
+    #         print(f"Loading validation data from {val_data_path}...")
+    #         val_dataset = torch.load(val_data_path, weights_only=False)
+        
+    #     # Create validation shard
+    #     print("Creating validation data shard for pre-trained model evaluation...")
+    #     val_shard_paths = create_multimodal_shards(
+    #         val_dataset, 1, temp_dir, "val", 
+    #         use_naip=baseline_config.use_naip, 
+    #         use_uavsar=baseline_config.use_uavsar
+    #     )
+        
+    #     # Evaluate the pre-trained model
+    #     baseline_val_loss = evaluate_pretrained_model(
+    #         baseline_config, 
+    #         val_shard_paths[0], 
+    #         baseline_dir, 
+    #         baseline_model_name
+    #     )
+        
+    #     # Clean up temp directory
+    #     shutil.rmtree(temp_dir, ignore_errors=True)
+        
+    # else:
+    #     # Train the baseline model as usual
+    #     baseline_val_loss = train_multimodal_model(
+    #         train_dataset=train_dataset,
+    #         val_dataset=val_dataset,
+    #         train_data_paths=train_data_paths,
+    #         val_data_path=val_data_path,
+    #         model_name=f"{model_name}_{baseline_model_name}",
+    #         batch_size=batch_size,
+    #         checkpoint_dir=baseline_dir,
+    #         model_config=baseline_config,
+    #         num_epochs=epochs,
+    #         enable_debug=enable_debug,
+    #         visualize_samples=enable_debug,
+    #         use_cached_shards=use_cached_shards,
+    #         shard_cache_dir=shard_cache_dir,
+    #         lr_scheduler_type=lr_scheduler_type,
+    #         max_lr=max_lr,
+    #         pct_start=pct_start,
+    #         div_factor=div_factor,
+    #         final_div_factor=final_div_factor,
+    #         dscrm_lr_ratio=dscrm_lr_ratio
+    #     )
+    
+    # # Print GPU memory usage
+    # allocated_memory = torch.cuda.memory_allocated() / (1024 ** 2)  # Convert to MB
+    # reserved_memory = torch.cuda.memory_reserved() / (1024 ** 2)  # Convert to MB
+    # print(f"GPU Memory Usage: Allocated: {allocated_memory:.2f} MB, Reserved: {reserved_memory:.2f} MB")
+
+    # # Clear GPU memory
+    # torch.cuda.empty_cache()
+    # gc.collect()
+
+    # # Copy the final model to the common directory
+    # baseline_model_path = copy_final_model(baseline_dir, baseline_model_name)
+    # results["baseline"] = {"val_loss": baseline_val_loss, "model_path": baseline_model_path}
+
+
+    # 4. Both SAR & Optical
+    print("\n\n========== Running Combined (SAR & Optical) ==========\n")
+    combined_config_dict = {k: v for k, v in asdict(base_config).items()}
+    combined_config_dict['use_naip'] = True
+    combined_config_dict['use_uavsar'] = True
+    combined_config = MultimodalModelConfig(**combined_config_dict)
     
     # Make a unique directory for this run
-    baseline_dir = os.path.join(checkpoint_dir, f"baseline_{timestamp}")
-    os.makedirs(baseline_dir, exist_ok=True)
+    combined_dir = os.path.join(checkpoint_dir, f"combined_{timestamp}")
+    os.makedirs(combined_dir, exist_ok=True)
     
     # Use a specific model name for this ablation
-    baseline_model_name = "baseline"
+    combined_model_name = "combined"
     
-    # Check if we have a pre-trained model for baseline
-    has_pretrained_baseline = (hasattr(base_config, 'checkpoint_path') and 
-                               base_config.checkpoint_path is not None and 
-                               base_config.checkpoint_path != '')
+    combined_val_loss = train_multimodal_model(
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        train_data_paths=train_data_paths,
+        val_data_path=val_data_path,
+        model_name=f"{model_name}_{combined_model_name}",
+        batch_size=batch_size,
+        checkpoint_dir=combined_dir,
+        model_config=combined_config,
+        num_epochs=epochs,
+        enable_debug=enable_debug,
+        visualize_samples=enable_debug,
+        use_cached_shards=use_cached_shards,
+        shard_cache_dir=shard_cache_dir,
+        lr_scheduler_type=lr_scheduler_type,
+        max_lr=max_lr,
+        pct_start=pct_start,
+        div_factor=div_factor,
+        final_div_factor=final_div_factor,
+        dscrm_lr_ratio=dscrm_lr_ratio
+    )
     
-    if has_pretrained_baseline:
-        print(f"Using pre-trained baseline model from: {base_config.checkpoint_path}")
-        
-        # Generate validation shard
-        timestamp_temp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        temp_dir = os.path.join(temp_dir_root, f"multimodal_shards_{timestamp_temp}")
-        os.makedirs(temp_dir, exist_ok=True)
-        
-        # Load val dataset if needed
-        if val_dataset is None and val_data_path is not None:
-            print(f"Loading validation data from {val_data_path}...")
-            val_dataset = torch.load(val_data_path, weights_only=False)
-        
-        # Create validation shard
-        print("Creating validation data shard for pre-trained model evaluation...")
-        val_shard_paths = create_multimodal_shards(
-            val_dataset, 1, temp_dir, "val", 
-            use_naip=baseline_config.use_naip, 
-            use_uavsar=baseline_config.use_uavsar
-        )
-        
-        # Evaluate the pre-trained model
-        baseline_val_loss = evaluate_pretrained_model(
-            baseline_config, 
-            val_shard_paths[0], 
-            baseline_dir, 
-            baseline_model_name
-        )
-        
-        # Clean up temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        
-    else:
-        # Train the baseline model as usual
-        baseline_val_loss = train_multimodal_model(
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
-            train_data_paths=train_data_paths,
-            val_data_path=val_data_path,
-            model_name=f"{model_name}_{baseline_model_name}",
-            batch_size=batch_size,
-            checkpoint_dir=baseline_dir,
-            model_config=baseline_config,
-            num_epochs=epochs,
-            enable_debug=enable_debug,
-            visualize_samples=enable_debug,
-            use_cached_shards=use_cached_shards,
-            shard_cache_dir=shard_cache_dir,
-            lr_scheduler_type=lr_scheduler_type,
-            max_lr=max_lr,
-            pct_start=pct_start,
-            div_factor=div_factor,
-            final_div_factor=final_div_factor,
-            dscrm_lr_ratio=dscrm_lr_ratio
-        )
-    
-    # Print GPU memory usage
-    allocated_memory = torch.cuda.memory_allocated() / (1024 ** 2)  # Convert to MB
-    reserved_memory = torch.cuda.memory_reserved() / (1024 ** 2)  # Convert to MB
-    print(f"GPU Memory Usage: Allocated: {allocated_memory:.2f} MB, Reserved: {reserved_memory:.2f} MB")
+    # Copy the final model to the common directory
+    combined_model_path = copy_final_model(combined_dir, combined_model_name)
+    results["combined"] = {"val_loss": combined_val_loss, "model_path": combined_model_path}
 
     # Clear GPU memory
     torch.cuda.empty_cache()
     gc.collect()
 
-    # Copy the final model to the common directory
-    baseline_model_path = copy_final_model(baseline_dir, baseline_model_name)
-    results["baseline"] = {"val_loss": baseline_val_loss, "model_path": baseline_model_path}
-    
     # 2. SAR-Only
     print("\n\n========== Running SAR-Only ==========\n")
     sar_config_dict = {k: v for k, v in asdict(base_config).items()}
@@ -1550,7 +1841,11 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
     # Copy the final model to the common directory
     sar_model_path = copy_final_model(sar_dir, sar_model_name)
     results["sar_only"] = {"val_loss": sar_val_loss, "model_path": sar_model_path}
-    
+
+    # Clear GPU memory
+    torch.cuda.empty_cache()
+    gc.collect()
+
     # 3. Optical-Only
     print("\n\n========== Running Optical-Only ==========\n")
     optical_config_dict = {k: v for k, v in asdict(base_config).items()}
@@ -1591,45 +1886,7 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
     optical_model_path = copy_final_model(optical_dir, optical_model_name)
     results["optical_only"] = {"val_loss": optical_val_loss, "model_path": optical_model_path}
     
-    # 4. Both SAR & Optical
-    print("\n\n========== Running Combined (SAR & Optical) ==========\n")
-    combined_config_dict = {k: v for k, v in asdict(base_config).items()}
-    combined_config_dict['use_naip'] = True
-    combined_config_dict['use_uavsar'] = True
-    combined_config = MultimodalModelConfig(**combined_config_dict)
-    
-    # Make a unique directory for this run
-    combined_dir = os.path.join(checkpoint_dir, f"combined_{timestamp}")
-    os.makedirs(combined_dir, exist_ok=True)
-    
-    # Use a specific model name for this ablation
-    combined_model_name = "combined"
-    
-    combined_val_loss = train_multimodal_model(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        train_data_paths=train_data_paths,
-        val_data_path=val_data_path,
-        model_name=f"{model_name}_{combined_model_name}",
-        batch_size=batch_size,
-        checkpoint_dir=combined_dir,
-        model_config=combined_config,
-        num_epochs=epochs,
-        enable_debug=enable_debug,
-        visualize_samples=enable_debug,
-        use_cached_shards=use_cached_shards,
-        shard_cache_dir=shard_cache_dir,
-        lr_scheduler_type=lr_scheduler_type,
-        max_lr=max_lr,
-        pct_start=pct_start,
-        div_factor=div_factor,
-        final_div_factor=final_div_factor,
-        dscrm_lr_ratio=dscrm_lr_ratio
-    )
-    
-    # Copy the final model to the common directory
-    combined_model_path = copy_final_model(combined_dir, combined_model_name)
-    results["combined"] = {"val_loss": combined_val_loss, "model_path": combined_model_path}
+
     
     # Create a detailed summary file with results and configuration for publication
     summary_path = os.path.join(all_final_models_dir, "ablation_results_summary.txt")
