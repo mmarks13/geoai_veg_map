@@ -15,18 +15,18 @@ def main():
 
     # Load precomputed datasets
     data_dir = "data/processed/model_data/"
-    orig_train_data_path = os.path.join(data_dir, "precomputed_training_tiles.pt")
-    augmented_train_data_path = os.path.join(data_dir, "augmented_tiles_12k.pt")
-    val_data_path = os.path.join(data_dir, "precomputed_validation_tiles.pt")
+    orig_train_data_path = os.path.join(data_dir, "precomputed_training_tiles_32bit.pt")
+    augmented_train_data_path = os.path.join(data_dir, "augmented_tiles_32bit_16k_no_repl.pt")
+    val_data_path = os.path.join(data_dir, "precomputed_validation_tiles_32bit.pt")
 
     # Define a base model configuration
     base_config = MultimodalModelConfig(
         # Core model parameters
         feature_dim=256,     # Feature dimension
-        k=15,                # Number of neighbors for KNN
+        k=16,                # Number of neighbors for KNN
         up_ratio=2,          # Upsampling ratio
         pos_mlp_hdn=16,      # Hidden dimension for positional MLP
-        pt_attn_dropout=0.05,
+        pt_attn_dropout=0.02,
         
         # Granular attention head configurations
         extractor_lcl_heads=8,  # Local attention heads for feature extractor
@@ -45,30 +45,30 @@ def main():
         up_beta=False,        # Legacy parameter
         
         # Modality flags
-        use_naip=False,  # Will be overridden by the ablation study
-        use_uavsar=False,  # Will be overridden by the ablation study
+        use_naip=True,
+        use_uavsar=True,
         
         # Imagery encoder parameters
         img_embed_dim=128,    # Dimension of patch embeddings
         img_num_patches=16,  # Number of output patch embeddings
-        naip_dropout=0.05,
-        uavsar_dropout=0.05,
-        temporal_encoder='transformer',  # Type of temporal encoder
+        naip_dropout=0.0,
+        uavsar_dropout=0.0,
+        temporal_encoder='gru',  # Type of temporal encoder
         
         # Fusion parameters
         fusion_type='cross_attention',
-        max_dist_ratio=1.5,
+        max_dist_ratio=8,
 
         # Cross attention fusion parameters
-        fusion_dropout=0.05,
+        fusion_dropout=0.02,
         fusion_num_heads=4,
-        position_encoding_dim=24,
+        position_encoding_dim=36,
         
         # Other parameters
         attr_dim=3,
         
         # Checkpoint parameters
-        checkpoint_path="/home/jovyan/geoai_veg_map/data/output/checkpoints/0414_LGPA_final_baseline_k15_f256_b8_e40.pth",
+        # checkpoint_path="/home/jovyan/geoai_veg_map/data/output/checkpoints/0414_LGPA_final_baseline_k15_f256_b8_e40.pth",
         # layers_to_load=[
         #     "feature_extractor.point_transformer.convs.0.lin.weight",
         #     "feature_extractor.point_transformer.convs.0.lin_dst.weight",
@@ -139,21 +139,22 @@ def main():
     checkpoint_dir = "data/output/checkpoints/ablation_study"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+
     try:
         run_ablation_studies(
             train_data_paths=[orig_train_data_path, augmented_train_data_path],
             val_data_path=val_data_path,
             base_config=base_config,
-            model_name="0414_study_e25_1e-4_b5",
-            batch_size=5,
+            model_name="0512_ablation_study",
+            batch_size=15,
             checkpoint_dir=checkpoint_dir,
-            epochs=25,
+            epochs=400,
             enable_debug=True,
             lr_scheduler_type="onecycle",
-            max_lr=1e-4,
+            max_lr = 7e-4,
             pct_start=0.05, 
             div_factor=10, 
-            final_div_factor=10,
+            final_div_factor=1,
             # Optional: use cached shards if they exist
             use_cached_shards=True,
             shard_cache_dir="data/output/cached_shards"

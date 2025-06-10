@@ -1,3 +1,101 @@
+"""
+Multi-Model Point Cloud Upsampling Comparison Report Generator
+
+This script generates comprehensive visual reports comparing multiple terrain point cloud upsampling models.
+It evaluates how different models perform at upsampling low-resolution Digital Elevation Program (3DEP) 
+point clouds to match high-resolution UAV LiDAR scans, with options to leverage satellite imagery (NAIP) 
+and/or radar data (UAVSAR) as additional input sources.
+
+Background:
+-----------
+Terrain modeling typically relies on publicly available 3DEP data from 2014-2016, which has 
+lower point density compared to modern UAV LiDAR scans (2023-2024). This creates a challenge 
+for applications requiring high-resolution terrain data. The models being compared in this report 
+attempt to synthetically enhance 3DEP point clouds through deep learning techniques, with some 
+models incorporating additional remote sensing data (NAIP imagery and/or UAVSAR radar data).
+
+Models Compared:
+---------------
+1. Baseline: Uses only 3DEP point clouds with transformer-based upsampling
+2. NAIP: Incorporates NAIP satellite imagery with 3DEP point clouds
+3. UAVSAR: Incorporates UAVSAR radar data with 3DEP point clouds
+4. Combined: Uses all data sources (3DEP points + NAIP imagery + UAVSAR radar)
+
+The report evaluates each model's performance using Chamfer Distance (CD) metrics against
+ground truth UAV LiDAR data, showing visual 3D comparisons and statistical analysis.
+
+Sample Selection:
+----------------
+The report includes four categories of samples:
+- High-Loss Samples: Where models perform worst (largest Chamfer Distance)
+- Low-Improvement Samples: Where models show minimal improvement over input data
+- High-Improvement Samples: Where models show significant improvement over input data
+- Random Samples: Unbiased selection for general performance assessment
+
+Key Features:
+------------
+- Side-by-side 3D point cloud visualizations with consistent scaling and coloring
+- Chamfer Distance metrics for quantitative comparison
+- Point count information for each visualization
+- NAIP imagery visualization where available
+- Flexible model inclusion (can specify which models to include)
+- Customizable visualization parameters (point size, transparency, etc.)
+- Memory-efficient implementation for processing large point clouds
+
+Dependencies:
+------------
+- PyTorch
+- pytorch3d (for efficient KNN-based Chamfer Distance calculations)
+- matplotlib/seaborn (for visualizations)
+- numpy/pandas (for data processing)
+- Custom model implementation (MultimodalPointUpsampler class)
+
+Usage:
+------
+Call the generate_multi_model_report() function with:
+1. Dictionary of model paths (set any to None to exclude that model)
+2. Path to the validation dataset 
+3. Output directory for the generated PDF report
+4. Configuration parameters for sample counts and visualization
+
+Example:
+    model_paths = {
+        'combined': "/path/to/combined_model.pth",  # NAIP+UAVSAR
+        'naip': "/path/to/naip_model.pth",         # NAIP-only
+        'uavsar': "/path/to/uavsar_model.pth",     # UAVSAR-only
+        'baseline': "/path/to/baseline_model.pth", # No imagery
+    }
+    
+    generate_multi_model_report(
+        model_paths=model_paths,
+        validation_data_path="data/processed/validation_tiles.pt",
+        output_dir="data/output/reports",
+        n_high_loss_samples=30,
+        n_low_improvement_samples=30,
+        n_high_improvement_samples=30,
+        n_random_samples=30,
+        dpi=150,
+        point_size=1.0,
+        point_alpha=0.5
+    )
+
+Output:
+-------
+A PDF report with:
+1. Overview pages with global model statistics
+2. Sample pages showing:
+   - Side-by-side 3D point cloud visualizations for each model
+   - Point counts and Chamfer Distances
+   - NAIP imagery when available
+
+Implementation Notes:
+--------------------
+- The script can handle both uniform and variable-sized point clouds
+- Batched processing is used for efficiency when calculating Chamfer Distances
+- KNN-based implementations are preferred for accurate distance calculations
+- Error handling is implemented to ensure the report generation completes even if
+  individual samples or models encounter issues
+"""
 import torch
 import os
 import sys
@@ -1518,15 +1616,17 @@ if __name__ == "__main__":
         attr_dim=3,
     )
 
-    # Example usage
+    # Define model paths
     model_paths = {
-        'combined': "/home/jovyan/geoai_veg_map/data/output/checkpoints/0426_e250_1e3lr_1e3wd_b10_tau030_naip_uavsar_k16_f256_b10_e250.pth",  # NAIP+UAVSAR model
-        'naip': None,          # NAIP-only model
-        'uavsar': None, # '/home/jovyan/geoai_veg_map/data/output/checkpoints/0423_e110_4e-4lr_b10_uavsar_k16_f256_b10_e110.pth',      # UAVSAR-only model
-        'baseline': "/home/jovyan/geoai_veg_map/data/output/checkpoints/0422_e220_4e-4_b10_32bit_infocd_med_repul_adamw_1e-2_baseline_k16_f256_b10_e220.pth",  # Baseline model (no imagery)
+        'combined': "data/output/checkpoints/ablation_study/combined_20250430-043116/final_best/0430_ablation_study_combined_naip_uavsar_final_best.pth",  # NAIP+UAVSAR model
+        'naip': 'data/output/checkpoints/ablation_study/optical_only_20250430-043116/final_best/0430_ablation_study_optical_only_naip_final_best.pth',  # NAIP-only model
+        'uavsar': 'data/output/checkpoints/ablation_study/sar_only_20250430-043116/final_best/0430_ablation_study_sar_only_uavsar_final_best.pth',  # UAVSAR-only model
+        'baseline': "data/output/checkpoints/ablation_study/baseline_20250427-220218/final_best/0427_final_ablation_study_e300_baseline_baseline_final_best.pth",  # Baseline model (no imagery)
     }
     
-    validation_data_path = "data/processed/model_data/precomputed_validation_tiles_32bit.pt"
+
+    
+    validation_data_path = "data/processed/model_data/precomputed_test_tiles_32bit.pt"
     output_dir = "data/output/reports"
     
     # Generate the report
@@ -1534,10 +1634,10 @@ if __name__ == "__main__":
         model_paths=model_paths,
         validation_data_path=validation_data_path,
         output_dir=output_dir,
-        n_high_loss_samples=40,
-        n_low_improvement_samples=30,
-        n_high_improvement_samples=50,
-        n_random_samples=50,
+        n_high_loss_samples=50,
+        n_low_improvement_samples=20,
+        n_high_improvement_samples=300,
+        n_random_samples=300,
         dpi=150,
         point_size=1.0,
         point_alpha=0.5

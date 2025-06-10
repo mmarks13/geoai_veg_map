@@ -20,6 +20,7 @@ import threading
 import logging
 from torch.utils.tensorboard import SummaryWriter
 from schedulefree import AdamWScheduleFree 
+from pytorch3d.ops import knn_points
 
 # Make NCCL more robust to communication issues
 os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
@@ -253,125 +254,319 @@ def multimodal_variable_size_collate(batch):
     return dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list, tile_id_list
 
 
-def process_multimodal_batch(model, batch, device):
-    """
-    Process a single multimodal batch through the model and compute the average loss per sample.
-    Now includes spatial constraint information from center and scale.
-    """
-    dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list, tile_id_list = batch
-    total_loss = 0.0
-    total_infocd_loss = 0.0
-    total_repulsion_loss = 0.0
-    sample_count = 0
+# def process_multimodal_batch(model, batch, device):
+#     """
+#     Process a single multimodal batch through the model and compute the average loss per sample.
+#     Now includes spatial constraint information from center and scale.
+#     """
+#     dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, center_list, scale_list, bbox_list, tile_id_list = batch
+#     total_loss = 0.0
+#     total_infocd_loss = 0.0
+#     total_repulsion_loss = 0.0
+#     sample_count = 0
     
+#     for i in range(len(dep_list)):
+#         dep_points = dep_list[i].to(device)
+#         uav_points = uav_list[i].to(device)
+#         e_idx = edge_list[i].to(device)
+#         dep_attr = attr_list[i].to(device) if attr_list[i] is not None else None
+        
+#         # Get normalization parameters
+#         center = center_list[i].to(device) if center_list[i] is not None else None
+#         scale = scale_list[i].to(device) if scale_list[i] is not None else None
+#         bbox = bbox_list[i].to(device) if bbox_list[i] is not None else None
+        
+#         # Process imagery data if available
+#         naip_data = naip_list[i]
+#         uavsar_data = uavsar_list[i]
+        
+#         # Move imagery data to device if available
+#         if naip_data is not None:
+#             if 'images' in naip_data and naip_data['images'] is not None:
+#                 naip_data['images'] = naip_data['images'].to(device)
+        
+#         if uavsar_data is not None:
+#             if 'images' in uavsar_data and uavsar_data['images'] is not None:
+#                 uavsar_data['images'] = uavsar_data['images'].to(device)
+        
+#         # Run the model with all available data including spatial information
+#         pred_points = model(
+#             dep_points, e_idx, dep_attr, 
+#             naip_data, uavsar_data,
+#             center, scale, bbox
+#         )
+
+#         # Create batch tensors for chamfer distance calculation
+#         pred_points_batch = pred_points.unsqueeze(0)
+#         uav_points_batch = uav_points.unsqueeze(0)
+        
+#         pred_length = torch.tensor([pred_points.shape[0]], device=device)
+#         uav_length = torch.tensor([uav_points.shape[0]], device=device)
+
+#         from src.utils.infocd import info_cd_loss, repulsion_loss
+#         from pytorch3d.ops import knn_points
+
+#         # λ choice: k / |Y|   (e.g. k = 5 here gives a 5× stronger contrastive term)
+#         lam = 3.0 / uav_length.float()  
+
+
+#         # --- InfoCD ---  
+#         infocd = info_cd_loss(
+#             pred_points_batch, uav_points_batch,
+#             x_lengths=pred_length,
+#             y_lengths=uav_length,
+#             tau=0.3,        # temperature
+#             lam=lam        
+#         )
+
+#         # 2) compute dynamic repulsion radius h
+#         #    (a) do a 2‑NN on pred→pred
+#         knn = knn_points(
+#             pred_points_batch, pred_points_batch,
+#             lengths1=pred_length,
+#             lengths2=pred_length,
+#             K=2
+#         )
+#         #    (b) take the 2nd‑nearest distances, sqrt them
+#         nn_dists = torch.sqrt(knn.dists[..., 1].clamp(min=1e-12))
+
+#         #    (c) median per sample, then mean → scalar
+#         d_med = nn_dists.median(dim=1).values.mean()
+
+#         #    (d) scale by 1.8 and clamp to [0.15, 0.40] m
+#         h = (1.8 * d_med).clamp(0.15, 0.40)
+
+#         # --- Repulsion --- 
+#         repl = repulsion_loss(
+#             pred_points_batch,
+#             lengths=pred_length,
+#             k=8,
+#             h=h 
+#         )
+
+#         # Calculate weighted repulsion loss
+#         weighted_repl = 0.45 * repl
+        
+#         # Combine with a small weight on repulsion
+#         sample_loss = infocd + weighted_repl
+
+#         if torch.isnan(sample_loss):
+#             print(f"WARNING: Loss for a sample is NaN! {tile_id_list[i]}")
+
+#         if torch.isinf(sample_loss):
+#             print(f"WARNING: Loss for a sample is Inf! {tile_id_list[i]}")
+            
+#         total_loss += sample_loss
+#         total_infocd_loss += infocd
+#         total_repulsion_loss += weighted_repl
+#         sample_count += 1
+    
+#     avg_loss = total_loss / sample_count if sample_count > 0 else total_loss
+#     avg_infocd = total_infocd_loss / sample_count if sample_count > 0 else total_infocd_loss
+#     avg_repl = total_repulsion_loss / sample_count if sample_count > 0 else total_repulsion_loss
+    
+#     # Return a dictionary with all loss components
+#     return {
+#         'total': avg_loss,
+#         'infocd': avg_infocd,
+#         'repulsion': avg_repl
+#     }
+
+
+import torch
+from pytorch3d.ops import knn_points
+
+def density_aware_chamfer_loss( 
+    pred: torch.Tensor,
+    gt: torch.Tensor,
+    alpha: float = 1.0,
+    n_lambda: float = 1.0,
+    eps: float = 1e-12
+):
+    """
+    Symmetric Density-aware Chamfer Distance (DCD) using DCD-E style weighting. Equation 7
+    Uses L2 norm (non-squared) distances in the exponent.
+    The DCD-E style weighting ensures the factor multiplying the exp_term is <= 1,
+    making (1 - factor * exp_term) naturally >= 0.
+
+    Args:
+        pred: Predicted point cloud, shape (B, N_pred, 3).
+        gt: Ground truth point cloud, shape (B, N_gt, 3).
+        alpha: Temperature scalar. For initial large distances (e.g., CD ~2.0),
+               try alpha in [0.5, 1.5]. As CD improves, alpha can be increased.
+        n_lambda: Exponent for the query count term (n_query^n_lambda).
+                  Default is 1.0.
+        eps: Small epsilon value for numerical stability.
+
+    Returns:
+        The mean DCD loss over the batch.
+    """
+    B, N_pred, _ = pred.shape
+    _, N_gt, _ = gt.shape
+
+    # --- Term 1: gt → pred (Paper: S2 -> S1, where S1=pred, S2=gt) ---
+    nn_gt_to_pred = knn_points(gt, pred, K=1, return_nn=False)
+    dist_gt_to_pred_sq = nn_gt_to_pred.dists[..., 0]
+    dist_gt_to_pred = torch.sqrt(dist_gt_to_pred_sq.clamp_min(eps))
+    idx_pred_for_gt = nn_gt_to_pred.idx[..., 0]
+
+    exp_gt_to_pred = torch.exp(-alpha * dist_gt_to_pred)
+
+    # --- Term 2: pred → gt (Paper: S1 -> S2, where S1=pred, S2=gt) ---
+    nn_pred_to_gt = knn_points(pred, gt, K=1, return_nn=False)
+    dist_pred_to_gt_sq = nn_pred_to_gt.dists[..., 0]
+    dist_pred_to_gt = torch.sqrt(dist_pred_to_gt_sq.clamp_min(eps))
+    idx_gt_for_pred = nn_pred_to_gt.idx[..., 0]
+
+    exp_pred_to_gt = torch.exp(-alpha * dist_pred_to_gt)
+
+    losses_batch = []
+    for b in range(B):
+        # Term 1: gt -> pred (S2 -> S1)
+        # Here, effectively S_a = gt, S_b = pred for the DCD-E weight formula
+        if N_gt > 0 and N_pred > 0:
+            eta_gt_pred = float(N_gt) / float(N_pred) # |S_a| / |S_b|
+
+            # n_x_hat: For each y in gt, its NN in pred is x_hat.
+            # n_x_hat_counts[k] = how many times pred_point[k] is an NN for gt_points
+            n_x_hat_counts = torch.bincount(idx_pred_for_gt[b], minlength=N_pred).float()
+            # For each y_i in gt, get n_x_hat for its corresponding x_hat_i
+            n_query_count_gt_side = n_x_hat_counts[idx_pred_for_gt[b]].pow(n_lambda) # This is n_q in DCD-E
+
+            # DCD-E weight: 1.0 / max(eta_ab / n_q, 1.0)
+            weight_factor_gt_pred = 1.0 / (torch.maximum(eta_gt_pred / (n_query_count_gt_side + eps), torch.tensor(1.0, device=pred.device)) + eps)
+
+            loss_gt_side_points = (1.0 - exp_gt_to_pred[b] * weight_factor_gt_pred)
+            # No clamp_min(0.0) needed due to DCD-E weight ensuring factor <=1
+            loss_gt_side = loss_gt_side_points.mean()
+        elif N_gt == 0 and N_pred > 0: # gt is empty, pred is not, high penalty for gt side
+            loss_gt_side = torch.tensor(1.0, device=pred.device)
+        else: # both empty or N_gt > 0, N_pred == 0 (covered by pred_side) or pred_side handles N_pred >0, N_gt==0
+            loss_gt_side = torch.tensor(0.0, device=pred.device)
+
+
+        # Term 2: pred -> gt (S1 -> S2)
+        # Here, S_a = pred, S_b = gt for the DCD-E weight formula
+        if N_pred > 0 and N_gt > 0:
+            eta_pred_gt = float(N_pred) / float(N_gt) # |S_a| / |S_b|
+
+            # n_y_hat: For each x in pred, its NN in gt is y_hat.
+            # n_y_hat_counts[k] = how many times gt_point[k] is an NN for pred_points
+            n_y_hat_counts = torch.bincount(idx_gt_for_pred[b], minlength=N_gt).float()
+            # For each x_i in pred, get n_y_hat for its corresponding y_hat_i
+            n_query_count_pred_side = n_y_hat_counts[idx_gt_for_pred[b]].pow(n_lambda) # This is n_q
+
+            weight_factor_pred_gt = 1.0 / (torch.maximum(eta_pred_gt / (n_query_count_pred_side + eps), torch.tensor(1.0, device=pred.device)) + eps)
+
+            loss_pred_side_points = (1.0 - exp_pred_to_gt[b] * weight_factor_pred_gt)
+            loss_pred_side = loss_pred_side_points.mean()
+        elif N_pred == 0 and N_gt > 0: # pred is empty, gt is not, high penalty for pred side
+            loss_pred_side = torch.tensor(1.0, device=pred.device)
+        else: # both empty or N_pred > 0, N_gt == 0 (covered by gt_side)
+            loss_pred_side = torch.tensor(0.0, device=pred.device)
+
+        losses_batch.append(0.5 * (loss_pred_side + loss_gt_side))
+
+    return torch.stack(losses_batch).mean() if B > 0 and len(losses_batch) > 0 else torch.tensor(0.0, device=pred.device)
+
+
+
+# --------------------------------------------------------------------------- #
+#  MAIN BATCH PROCESSING (excerpt: replace the InfoCD section)                #
+# --------------------------------------------------------------------------- #
+def process_multimodal_batch(model, batch, device):
+    dep_list, uav_list, edge_list, attr_list, naip_list, uavsar_list, \
+        center_list, scale_list, bbox_list, tile_id_list = batch
+
+    total_loss = total_dcd_loss = total_repulsion_loss = 0.0
+    sample_count = 0
+
     for i in range(len(dep_list)):
+        # ------------------------------------------------------------
+        # (1)  forward pass – identical to your current code
+        # ------------------------------------------------------------
         dep_points = dep_list[i].to(device)
         uav_points = uav_list[i].to(device)
-        e_idx = edge_list[i].to(device)
-        dep_attr = attr_list[i].to(device) if attr_list[i] is not None else None
-        
-        # Get normalization parameters
+        e_idx      = edge_list[i].to(device)
+        dep_attr   = attr_list[i].to(device) if attr_list[i] is not None else None
+
         center = center_list[i].to(device) if center_list[i] is not None else None
-        scale = scale_list[i].to(device) if scale_list[i] is not None else None
-        bbox = bbox_list[i].to(device) if bbox_list[i] is not None else None
-        
-        # Process imagery data if available
-        naip_data = naip_list[i]
+        scale  = scale_list[i].to(device)  if scale_list[i] is not None else None
+        bbox   = bbox_list[i].to(device)   if bbox_list[i] is not None else None
+
+        naip_data   = naip_list[i]
         uavsar_data = uavsar_list[i]
-        
-        # Move imagery data to device if available
-        if naip_data is not None:
-            if 'images' in naip_data and naip_data['images'] is not None:
-                naip_data['images'] = naip_data['images'].to(device)
-        
-        if uavsar_data is not None:
-            if 'images' in uavsar_data and uavsar_data['images'] is not None:
-                uavsar_data['images'] = uavsar_data['images'].to(device)
-        
-        # Run the model with all available data including spatial information
-        pred_points = model(
-            dep_points, e_idx, dep_attr, 
-            naip_data, uavsar_data,
-            center, scale, bbox
+        if naip_data  and naip_data .get('images') is not None:
+            naip_data ['images'] = naip_data ['images'].to(device)
+        if uavsar_data and uavsar_data.get('images') is not None:
+            uavsar_data['images'] = uavsar_data['images'].to(device)
+
+        pred_points = model(dep_points, e_idx, dep_attr,
+                            naip_data, uavsar_data,
+                            center, scale, bbox)
+
+        # ------------------------------------------------------------
+        # (2)  DENSITY-AWARE CHAMFER LOSS  (batch size = 1 here)
+        # ------------------------------------------------------------
+        # prepare batch-size-1 tensors for losses
+        pred_b = pred_points.unsqueeze(0)  # (1, P, 3)
+        uav_b  = uav_points.unsqueeze(0)   # (1, Q, 3)
+        len_p  = torch.tensor([pred_points.shape[0]], device=device)
+
+        # (2) Density-aware Chamfer Loss
+        dcd = density_aware_chamfer_loss(
+            pred_b, uav_b,
+            alpha=4,    
+            n_lambda=1
         )
 
-        # Create batch tensors for chamfer distance calculation
-        pred_points_batch = pred_points.unsqueeze(0)
-        uav_points_batch = uav_points.unsqueeze(0)
-        
-        pred_length = torch.tensor([pred_points.shape[0]], device=device)
-        uav_length = torch.tensor([uav_points.shape[0]], device=device)
+        # ------------------------------------------------------------
+        # (3)  Repulsion loss
+        # ------------------------------------------------------------
+        # knn = knn_points(pred_b, pred_b, lengths1=len_p, lengths2=len_p, K=2)
+        # nn_dists = torch.sqrt(knn.dists[..., 1].clamp(min=1e-12))
+        # d_med    = nn_dists.median(dim=1).values.mean()
+        # h        = (1.8 * d_med).clamp(0.15, 0.40)
 
-        from src.utils.infocd import info_cd_loss, repulsion_loss
-        from pytorch3d.ops import knn_points
+        # from src.utils.infocd import repulsion_loss
+        # repl = repulsion_loss(pred_b, lengths=len_p, k=8, h=h)
 
-        # λ choice: k / |Y|   (e.g. k = 5 here gives a 5× stronger contrastive term)
-        lam = 3.0 / uav_length.float()  
+        # weighted_repl = 0.02 * repl
+
+        # Zero-out weighted_repl for now
+        # Ensure weighted_repl is a zero-valued tensor on the correct device.
+        # 'device' should be the same device your other tensors (like pred_b) are on.
+        weighted_repl = torch.tensor(0.0, device=device) 
 
 
-        # --- InfoCD ---  
-        infocd = info_cd_loss(
-            pred_points_batch, uav_points_batch,
-            x_lengths=pred_length,
-            y_lengths=uav_length,
-            tau=0.3,        # temperature
-            lam=lam        
-        )
+        # ------------------------------------------------------------
+        # (4)  Total loss = DCD  +  λ·Repulsion
+        # ------------------------------------------------------------
+        sample_loss = dcd + weighted_repl
 
-        # 2) compute dynamic repulsion radius h
-        #    (a) do a 2‑NN on pred→pred
-        knn = knn_points(
-            pred_points_batch, pred_points_batch,
-            lengths1=pred_length,
-            lengths2=pred_length,
-            K=2
-        )
-        #    (b) take the 2nd‑nearest distances, sqrt them
-        nn_dists = torch.sqrt(knn.dists[..., 1].clamp(min=1e-12))
-
-        #    (c) median per sample, then mean → scalar
-        d_med = nn_dists.median(dim=1).values.mean()
-
-        #    (d) scale by 1.8 and clamp to [0.15, 0.40] m
-        h = (1.8 * d_med).clamp(0.15, 0.40)
-
-        # --- Repulsion --- 
-        repl = repulsion_loss(
-            pred_points_batch,
-            lengths=pred_length,
-            k=8,
-            h=h 
-        )
-
-        # Calculate weighted repulsion loss
-        weighted_repl = 0.45 * repl
-        
-        # Combine with a small weight on repulsion
-        sample_loss = infocd + weighted_repl
-
+        # log / accumulate
         if torch.isnan(sample_loss):
-            print(f"WARNING: Loss for a sample is NaN! {tile_id_list[i]}")
-
+            print(f"WARNING: NaN loss for {tile_id_list[i]}")
         if torch.isinf(sample_loss):
-            print(f"WARNING: Loss for a sample is Inf! {tile_id_list[i]}")
-            
-        total_loss += sample_loss
-        total_infocd_loss += infocd
+            print(f"WARNING: Inf loss for {tile_id_list[i]}")
+
+        total_loss         += sample_loss
+        total_dcd_loss     += dcd
         total_repulsion_loss += weighted_repl
-        sample_count += 1
-    
-    avg_loss = total_loss / sample_count if sample_count > 0 else total_loss
-    avg_infocd = total_infocd_loss / sample_count if sample_count > 0 else total_infocd_loss
-    avg_repl = total_repulsion_loss / sample_count if sample_count > 0 else total_repulsion_loss
-    
-    # Return a dictionary with all loss components
+        sample_count       += 1
+
+    # ------------------------------------------------------------
+    # (5)  Average & return
+    # ------------------------------------------------------------
+    avg_loss = total_loss / sample_count
+    avg_dcd  = total_dcd_loss / sample_count
+    avg_repl = total_repulsion_loss / sample_count
+
     return {
-        'total': avg_loss,
-        'infocd': avg_infocd,
+        'total' : avg_loss,
+        'dcd'   : avg_dcd,      # renamed key
         'repulsion': avg_repl
     }
-
-
 
 
 def create_multimodal_model(device, config: MultimodalModelConfig):
@@ -554,7 +749,7 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
 
     batch_log_interval = 10 if enable_debug else 999999
 
-    max_grad_norm = 1.0 # Define the max_norm used for clipping here for logging consistency
+    max_grad_norm = 10 # Define the max_norm used for clipping here for logging consistency
 
     for batch_idx, batch in enumerate(train_loader):
         current_batch_step = epoch * len(train_loader) + batch_idx
@@ -562,7 +757,7 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
         with autocast(device_type='cuda', dtype=torch.bfloat16):
             loss_dict = process_batch_fn(model, batch, device)
             batch_loss = loss_dict['total']
-            batch_infocd = loss_dict['infocd']
+            batch_infocd = loss_dict['dcd']
             batch_repulsion = loss_dict['repulsion']
 
             scaled_loss = batch_loss / accumulation_steps
@@ -603,15 +798,15 @@ def train_one_epoch_ddp(model, train_loader, optimizer, device, scaler, writer=N
                 model.parameters(), max_norm=max_grad_norm
             )
 
-            # # Log the effective gradient norm (capped at max_norm)
-            # if writer is not None:
-            #      # Calculate the effective norm after clipping. If norm was <= max_norm, it's unchanged.
-            #      # If norm was > max_norm, it was scaled down to max_norm.
-            #      effective_grad_norm = min(grad_norm_before_clip.item(), max_grad_norm)
-            #      writer.add_scalar('Gradients/norm_post_clip', effective_grad_norm, current_optimizer_step)
-            #      # Optionally log the pre-clip norm for comparison/debugging
-            #      writer.add_scalar('Gradients/norm_pre_clip', grad_norm_before_clip.item(), current_optimizer_step)
-            # # --- END GRADIENT LOGGING ---
+            # Log the effective gradient norm (capped at max_norm)
+            if writer is not None:
+                 # Calculate the effective norm after clipping. If norm was <= max_norm, it's unchanged.
+                 # If norm was > max_norm, it was scaled down to max_norm.
+                 effective_grad_norm = min(grad_norm_before_clip.item(), max_grad_norm)
+                 writer.add_scalar('Gradients/norm_post_clip', effective_grad_norm, current_optimizer_step)
+                 # Optionally log the pre-clip norm for comparison/debugging
+                 writer.add_scalar('Gradients/norm_pre_clip', grad_norm_before_clip.item(), current_optimizer_step)
+            # --- END GRADIENT LOGGING ---
 
             # Update weights
             scaler.step(optimizer)
@@ -707,7 +902,7 @@ def validate_one_epoch_ddp(model, val_loader, device, writer=None, epoch=0, proc
                 # Get loss components
                 loss_dict = process_batch_fn(model, batch, device)
                 batch_loss = loss_dict['total']
-                batch_infocd = loss_dict['infocd']
+                batch_infocd = loss_dict['dcd']
                 batch_repulsion = loss_dict['repulsion']
                 
                 # Also compute chamfer distance for each sample in the batch
@@ -998,15 +1193,15 @@ def _train_multimodal_worker(rank, world_size, train_shard_path, val_shard_path,
 
     # Calculate total steps for OneCycleLR
     total_steps = (len(train_loader) // accumulation_steps) * num_epochs
-    warmup_steps  = int(0.05 * total_steps)           # 5 % linear warm-up
+    warmup_steps  = int(0.05 * total_steps)           # 5% linear warm-up
     optimizer = AdamWScheduleFree(
         param_groups,
-        lr=1e-3,                 # ignored for groups but required
-        betas=(0.95, 0.999),
-        weight_decay=1e-3,
-        warmup_steps=warmup_steps, # replaces scheduler
-        r=0.0,
-        weight_lr_power=2.0,
+        lr=	1e-5,                
+        betas=(0.98, 0.999),
+        weight_decay=1e-5,
+        warmup_steps=1000, #warmup_steps, # replaces scheduler
+        r=0.1,
+        weight_lr_power=2,
     )
 
     # mark optimiser as in training mode
@@ -1235,7 +1430,7 @@ def train_multimodal_model(train_dataset=None,
                          model_config=None,
                          num_epochs=60,
                          log_file="logs/training_log.txt",
-                         early_stopping_patience=25,
+                         early_stopping_patience=40,
                          temp_dir_root="data/output/tmp_shards",
                          shard_cache_dir="data/output/cached_shards",
                          use_cached_shards=False,
@@ -1669,93 +1864,93 @@ def run_ablation_studies(train_dataset=None, val_dataset=None,
         
         return avg_val_loss
     
-    # # 1. Baseline (3DEP Only)
-    # print("\n\n========== Running Baseline (3DEP Only) ==========\n")
-    # baseline_config_dict = {k: v for k, v in asdict(base_config).items()}
-    # baseline_config_dict['use_naip'] = False
-    # baseline_config_dict['use_uavsar'] = False
-    # baseline_config = MultimodalModelConfig(**baseline_config_dict)
+    # 1. Baseline (3DEP Only)
+    print("\n\n========== Running Baseline (3DEP Only) ==========\n")
+    baseline_config_dict = {k: v for k, v in asdict(base_config).items()}
+    baseline_config_dict['use_naip'] = False
+    baseline_config_dict['use_uavsar'] = False
+    baseline_config = MultimodalModelConfig(**baseline_config_dict)
     
-    # # Make a unique directory for this run
-    # baseline_dir = os.path.join(checkpoint_dir, f"baseline_{timestamp}")
-    # os.makedirs(baseline_dir, exist_ok=True)
+    # Make a unique directory for this run
+    baseline_dir = os.path.join(checkpoint_dir, f"baseline_{timestamp}")
+    os.makedirs(baseline_dir, exist_ok=True)
     
-    # # Use a specific model name for this ablation
-    # baseline_model_name = "baseline"
+    # Use a specific model name for this ablation
+    baseline_model_name = "baseline"
     
-    # # Check if we have a pre-trained model for baseline
-    # has_pretrained_baseline = (hasattr(base_config, 'checkpoint_path') and 
-    #                            base_config.checkpoint_path is not None and 
-    #                            base_config.checkpoint_path != '')
+    # Check if we have a pre-trained model for baseline
+    has_pretrained_baseline = (hasattr(base_config, 'checkpoint_path') and 
+                               base_config.checkpoint_path is not None and 
+                               base_config.checkpoint_path != '')
     
-    # if has_pretrained_baseline:
-    #     print(f"Using pre-trained baseline model from: {base_config.checkpoint_path}")
+    if has_pretrained_baseline:
+        print(f"Using pre-trained baseline model from: {base_config.checkpoint_path}")
         
-    #     # Generate validation shard
-    #     timestamp_temp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    #     temp_dir = os.path.join(temp_dir_root, f"multimodal_shards_{timestamp_temp}")
-    #     os.makedirs(temp_dir, exist_ok=True)
+        # Generate validation shard
+        timestamp_temp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_dir = os.path.join(temp_dir_root, f"multimodal_shards_{timestamp_temp}")
+        os.makedirs(temp_dir, exist_ok=True)
         
-    #     # Load val dataset if needed
-    #     if val_dataset is None and val_data_path is not None:
-    #         print(f"Loading validation data from {val_data_path}...")
-    #         val_dataset = torch.load(val_data_path, weights_only=False)
+        # Load val dataset if needed
+        if val_dataset is None and val_data_path is not None:
+            print(f"Loading validation data from {val_data_path}...")
+            val_dataset = torch.load(val_data_path, weights_only=False)
         
-    #     # Create validation shard
-    #     print("Creating validation data shard for pre-trained model evaluation...")
-    #     val_shard_paths = create_multimodal_shards(
-    #         val_dataset, 1, temp_dir, "val", 
-    #         use_naip=baseline_config.use_naip, 
-    #         use_uavsar=baseline_config.use_uavsar
-    #     )
+        # Create validation shard
+        print("Creating validation data shard for pre-trained model evaluation...")
+        val_shard_paths = create_multimodal_shards(
+            val_dataset, 1, temp_dir, "val", 
+            use_naip=baseline_config.use_naip, 
+            use_uavsar=baseline_config.use_uavsar
+        )
         
-    #     # Evaluate the pre-trained model
-    #     baseline_val_loss = evaluate_pretrained_model(
-    #         baseline_config, 
-    #         val_shard_paths[0], 
-    #         baseline_dir, 
-    #         baseline_model_name
-    #     )
+        # Evaluate the pre-trained model
+        baseline_val_loss = evaluate_pretrained_model(
+            baseline_config, 
+            val_shard_paths[0], 
+            baseline_dir, 
+            baseline_model_name
+        )
         
-    #     # Clean up temp directory
-    #     shutil.rmtree(temp_dir, ignore_errors=True)
+        # Clean up temp directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
         
-    # else:
-    #     # Train the baseline model as usual
-    #     baseline_val_loss = train_multimodal_model(
-    #         train_dataset=train_dataset,
-    #         val_dataset=val_dataset,
-    #         train_data_paths=train_data_paths,
-    #         val_data_path=val_data_path,
-    #         model_name=f"{model_name}_{baseline_model_name}",
-    #         batch_size=batch_size,
-    #         checkpoint_dir=baseline_dir,
-    #         model_config=baseline_config,
-    #         num_epochs=epochs,
-    #         enable_debug=enable_debug,
-    #         visualize_samples=enable_debug,
-    #         use_cached_shards=use_cached_shards,
-    #         shard_cache_dir=shard_cache_dir,
-    #         lr_scheduler_type=lr_scheduler_type,
-    #         max_lr=max_lr,
-    #         pct_start=pct_start,
-    #         div_factor=div_factor,
-    #         final_div_factor=final_div_factor,
-    #         dscrm_lr_ratio=dscrm_lr_ratio
-    #     )
+    else:
+        # Train the baseline model as usual
+        baseline_val_loss = train_multimodal_model(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            train_data_paths=train_data_paths,
+            val_data_path=val_data_path,
+            model_name=f"{model_name}_{baseline_model_name}",
+            batch_size=batch_size,
+            checkpoint_dir=baseline_dir,
+            model_config=baseline_config,
+            num_epochs=epochs,
+            enable_debug=enable_debug,
+            visualize_samples=enable_debug,
+            use_cached_shards=use_cached_shards,
+            shard_cache_dir=shard_cache_dir,
+            lr_scheduler_type=lr_scheduler_type,
+            max_lr=max_lr,
+            pct_start=pct_start,
+            div_factor=div_factor,
+            final_div_factor=final_div_factor,
+            dscrm_lr_ratio=dscrm_lr_ratio
+        )
     
-    # # Print GPU memory usage
-    # allocated_memory = torch.cuda.memory_allocated() / (1024 ** 2)  # Convert to MB
-    # reserved_memory = torch.cuda.memory_reserved() / (1024 ** 2)  # Convert to MB
-    # print(f"GPU Memory Usage: Allocated: {allocated_memory:.2f} MB, Reserved: {reserved_memory:.2f} MB")
+    # Print GPU memory usage
+    allocated_memory = torch.cuda.memory_allocated() / (1024 ** 2)  # Convert to MB
+    reserved_memory = torch.cuda.memory_reserved() / (1024 ** 2)  # Convert to MB
+    print(f"GPU Memory Usage: Allocated: {allocated_memory:.2f} MB, Reserved: {reserved_memory:.2f} MB")
 
-    # # Clear GPU memory
-    # torch.cuda.empty_cache()
-    # gc.collect()
+    # Clear GPU memory
+    torch.cuda.empty_cache()
+    gc.collect()
 
-    # # Copy the final model to the common directory
-    # baseline_model_path = copy_final_model(baseline_dir, baseline_model_name)
-    # results["baseline"] = {"val_loss": baseline_val_loss, "model_path": baseline_model_path}
+    # Copy the final model to the common directory
+    baseline_model_path = copy_final_model(baseline_dir, baseline_model_name)
+    results["baseline"] = {"val_loss": baseline_val_loss, "model_path": baseline_model_path}
 
 
     # 4. Both SAR & Optical

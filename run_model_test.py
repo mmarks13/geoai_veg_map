@@ -22,16 +22,16 @@ def main():
     # Define a base model configuration
     base_config = MultimodalModelConfig(
         # Core model parameters
-        feature_dim=256,     # Feature dimension
+        feature_dim=512,     # Feature dimension
         k=16,                # Number of neighbors for KNN
-        up_ratio=2,          # Upsampling ratio
+        up_ratio=8,          # Upsampling ratio
         pos_mlp_hdn=16,      # Hidden dimension for positional MLP
-        pt_attn_dropout=0.0,
+        pt_attn_dropout=0.00,
         
         # Granular attention head configurations
-        extractor_lcl_heads=8,  # Local attention heads for feature extractor
+        extractor_lcl_heads=16,  # Local attention heads for feature extractor
         extractor_glbl_heads=4,  # Global attention heads for feature extractor
-        expansion_lcl_heads=8,  # Local attention heads for feature expansion
+        expansion_lcl_heads=16,  # Local attention heads for feature expansion
         expansion_glbl_heads=4,  # Global attention heads for feature expansion
         refinement_lcl_heads=4,  # Local attention heads for feature refinement
         refinement_glbl_heads=4,  # Global attention heads for feature refinement
@@ -49,7 +49,7 @@ def main():
         use_uavsar=True,
         
         # Imagery encoder parameters
-        img_embed_dim=128,    # Dimension of patch embeddings
+        img_embed_dim=192,    # Dimension of patch embeddings
         img_num_patches=16,  # Number of output patch embeddings
         naip_dropout=0.00,
         uavsar_dropout=0.00,
@@ -68,7 +68,7 @@ def main():
         attr_dim=3,
         
     # # #     # # Checkpoint parameters
-        # checkpoint_path="/home/jovyan/geoai_veg_map/data/output/checkpoints/0426_e250_1e3lr_1e3wd_b10_tau030_naip_uavsar_k16_f256_b10_e250.pth",
+        checkpoint_path="data/output/checkpoints/0528_8xUp_512ft_b1_naip_uavsar_k16_f512_b1_e10.pth",
     #     layers_to_load=[
     #         "feature_extractor.point_transformer.convs.0.lin.weight",
     #         "feature_extractor.point_transformer.convs.0.lin_dst.weight",
@@ -142,17 +142,18 @@ def main():
     try:
         train_multimodal_model(
             train_data_paths=[orig_train_data_path,augmented_train_data_path],
+            # train_data_paths=[orig_train_data_path],
             val_data_path=val_data_path,
-            model_name="0426_e250_1e3lr_1e3wd_b10_tau030_continuation_lam5x",
+            model_name="0529_8xUp_512ft_b1",
             # model_name="test",
-            batch_size=10,
+            batch_size=1,
             checkpoint_dir=checkpoint_dir,
             model_config=base_config,
             enable_debug=True,
             num_epochs=30,
             lr_scheduler_type="onecycle",
-            max_lr=1e-3,
-            pct_start=0.10, 
+            max_lr=	1e-5,
+            pct_start=0.0, 
             div_factor=25, 
             final_div_factor=5,
             dscrm_lr_ratio=1,
