@@ -5,31 +5,31 @@ cd /home/jovyan/geoai_veg_map/
 export EARTHDATA_USERNAME=mmarks13
 export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
 
-# #UAVSAR
-# python src/data_prep/make_local_uavsar_stac.py\
-#   --bbox -120.127900 34.649349 -119.938771 34.775782 \
-#   --bbox -116.674113 33.096041 -116.567707 33.170647 \
-#   --start 2014-01-01 \
-#   --end 2024-12-31 \
-#   --output /home/jovyan/geoai_veg_map/data/stac/uavsar/ \
-#   --temp data/raw/uavsar
+#UAVSAR
+python src/data_prep/make_local_uavsar_stac.py\
+  --bbox -120.127900 34.649349 -119.938771 34.775782 \
+  --bbox -116.674113 33.096041 -116.567707 33.170647 \
+  --start 2014-01-01 \
+  --end 2024-12-31 \
+  --output /home/jovyan/geoai_veg_map/data/stac/uavsar/ \
+  --temp data/raw/uavsar
 
-# #UAV LiDAR Point Clouds
-# python src/data_prep/make_local_uavlidar_stac.py \
-#   --input data/raw/uavlidar/study_las \
-#   --output data/stac/uavlidar \
-#   --collection-id uav_lidar \
-#   --collection-title "UAV LiDAR Point Clouds"\
-#   --target-crs "EPSG:32611"  #\
-#   #--filename-regex "210014|TREX"
+#UAV LiDAR Point Clouds
+python src/data_prep/make_local_uavlidar_stac.py \
+  --input data/raw/uavlidar/study_las \
+  --output data/stac/uavlidar \
+  --collection-id uav_lidar \
+  --collection-title "UAV LiDAR Point Clouds"\
+  --target-crs "EPSG:32611"  #\
+  #--filename-regex "210014|TREX"
 
-# # get naip imagery from planetary computer and save it locally. 
-# python src/data_prep/make_local_naip_stac.py\
-#   --bbox -116.674113 33.096041 -116.567707 33.170647 \
-#   --bbox -120.127900 34.649349 -119.938771 34.775782 \
-#   --start 2014-01-01 \
-#   --end 2025-12-31 \
-#   --output /home/jovyan/geoai_veg_map/data/stac/naip/
+# get naip imagery from planetary computer and save it locally. 
+python src/data_prep/make_local_naip_stac.py\
+  --bbox -116.674113 33.096041 -116.567707 33.170647 \
+  --bbox -120.127900 34.649349 -119.938771 34.775782 \
+  --start 2014-01-01 \
+  --end 2025-12-31 \
+  --output /home/jovyan/geoai_veg_map/data/stac/naip/
 
 
 # # get 3dep point clouds from planetary computer and save it locally. 
@@ -40,41 +40,3 @@ export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
 #   --end 2025-12-31 \
 #   --output /home/jovyan/geoai_veg_map/data/stac/3dep/
 
-
-
-# python src/data_prep/process_uav_lidar.py
-# python src/data_prep/create_training_tile_bboxes.py 
-
-# python src/data_prep/generate_training_data.py\
-#  --tiles_geojson data/processed/tiles.geojson \
-#  --lidar_stac_source data/stac/uavlidar/catalog.json \
-#  --outdir data/processed/training_data_chunks/ \
-#  --chunk_size 200 \
-#  --max-api-retries 20\
-#  --uavsar_stac_source data/stac/uavsar/catalog.json \
-#  --naip_stac_source data/stac/naip/catalog.json\
-#  --threads 12 \
-#  --initial-voxel-size-cm 4 \
-#  --max-points 20000
-
-
-# python src/data_prep/h5_loader.py \
-#  --input_dir data/processed/training_data_chunks/sample_test \
-#  --output_path data/processed/model_data/combined_training_data.pt
-#  --verbose
-
-
-# the the geojson file with the footprints of the point clouds
-# python src/data_prep/pointcloud_footprints_to_geojson.py
-#
-# the resuling geojson file is used to create the training and test regions
-# this was done manually in qgis
-
-python src/data_prep/split_train_test_val_tiles.py \
-    --pt-file data/processed/model_data/combined_training_data.pt \
-    --geojson-file /home/jovyan/geoai_veg_map/data/processed/test_val_polygons.geojson \
-    --output-dir data/processed/model_data \
-    --min-uav-points 5000 \
-    --min-dep-points 400 \
-    --test-val-ratio 0.6 \
-    --random-seed 123

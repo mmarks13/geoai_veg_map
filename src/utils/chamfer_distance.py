@@ -94,7 +94,7 @@ def knn_gather(x, idx, lengths=None):
     return gathered
 
 
-def chamfer_distance(
+def chamfer_distance( 
     x,
     y,
     x_lengths=None,
@@ -104,10 +104,17 @@ def chamfer_distance(
     weights=None,
     batch_reduction="mean",
     point_reduction="mean",
+    norm_type="L2_squared",
+    huber_delta=2.0, 
+    trim_percentage_x_to_y=0.0,
+    trim_percentage_y_to_x=0.01,
+    eps=1e-8
 ):
     """
-    Compute the Chamfer distance between two batches of point clouds.
-    
+    Compute the Chamfer distance between two batches of point clouds
+    with selectable norm types (L1, L2, L2-squared, Huber)
+    and optional trimming of largest distances.
+
     Args:
         x: Tensor of shape (N, P1, D) representing the first point cloud batch.
         y: Tensor of shape (N, P2, D) representing the second point cloud batch.
@@ -118,15 +125,35 @@ def chamfer_distance(
         weights: Optional Tensor of shape (N,) with per-cloud weights.
         batch_reduction: Reduction over the batch ("mean" or "sum") or None.
         point_reduction: Reduction over the points ("mean" or "sum").
-        
+        norm_type (str): Specifies the distance metric/loss:
+                         - 'L1': Manhattan distance.
+                         - 'L2': Euclidean distance (non-squared).
+                         - 'L2_squared': Squared Euclidean distance (standard Chamfer).
+                         - 'Huber': Huber loss applied to L2 distance.
+        huber_delta (float): The threshold delta for Huber loss (used if norm_type='Huber').
+                             Must be positive. Defaults to 1.0.
+        trim_percentage_x_to_y (float): Percentage (0.0 to <1.0) of largest
+                                        x->y distances to discard before reduction.
+        trim_percentage_y_to_x (float): Percentage (0.0 to <1.0) of largest
+                                        y->x distances to discard before reduction.
+        eps (float): Small epsilon added for numerical stability.
+
     Returns:
         A tuple (chamfer_loss, chamfer_normals) where:
             - chamfer_loss is a scalar tensor giving the distance loss.
-            - chamfer_normals is a scalar tensor giving the normals loss (or None if normals not provided).
+            - chamfer_normals is a scalar tensor giving the normals loss (or None).
     """
     _validate_chamfer_reduction_inputs(batch_reduction, point_reduction)
+    # Updated norm_type validation
+    if norm_type not in ["L1", "L2", "L2_squared", "Huber"]:
+         raise ValueError("norm_type must be one of 'L1', 'L2', 'L2_squared', 'Huber'")
+    if norm_type == "Huber" and not (huber_delta > 0):
+         raise ValueError("huber_delta must be positive when norm_type is 'Huber'")
+    if not (0.0 <= trim_percentage_x_to_y < 1.0):
+        raise ValueError("trim_percentage_x_to_y must be in [0.0, 1.0)")
+    if not (0.0 <= trim_percentage_y_to_x < 1.0):
+        raise ValueError("trim_percentage_y_to_x must be in [0.0, 1.0)")
 
-    # Process inputs (assumes x and y are tensors; extend this helper if needed)
     x, x_lengths, x_normals = _handle_pointcloud_input(x, x_lengths, x_normals)
     y, y_lengths, y_normals = _handle_pointcloud_input(y, y_lengths, y_normals)
     return_normals = (x_normals is not None) and (y_normals is not None)
@@ -134,79 +161,184 @@ def chamfer_distance(
     N, P1, D = x.shape
     P2 = y.shape[1]
 
-    # Create masks for padded points (if clouds are heterogeneous)
-    x_mask = torch.arange(P1, device=x.device)[None, :] >= x_lengths[:, None]
-    y_mask = torch.arange(P2, device=y.device)[None, :] >= y_lengths[:, None]
+    x_lengths_long = x_lengths.long()
+    y_lengths_long = y_lengths.long()
+    x_mask = torch.arange(P1, device=x.device)[None, :] >= x_lengths_long[:, None]
+    y_mask = torch.arange(P2, device=y.device)[None, :] >= y_lengths_long[:, None]
 
-    # Find nearest neighbors: for each point in x, find the closest in y and vice versa.
-    x_nn = knn_points(x, y, lengths1=x_lengths, lengths2=y_lengths, K=1)
-    y_nn = knn_points(y, x, lengths1=y_lengths, lengths2=x_lengths, K=1)
-
-    # Squared distances from each point to its nearest neighbor.
-    cham_x = x_nn.dists[..., 0]  # (N, P1)
-    cham_y = y_nn.dists[..., 0]  # (N, P2)
-
-    # Zero out contributions from padded (invalid) points.
-    cham_x = cham_x.masked_fill(x_mask, 0.0)
-    cham_y = cham_y.masked_fill(y_mask, 0.0)
-
-    if weights is not None:
-        cham_x = cham_x * weights.view(N, 1)
-        cham_y = cham_y * weights.view(N, 1)
-
-    # Compute normal consistency loss if normals are provided.
-    if return_normals:
-        # For each point in x, gather the nearest neighbor normal from y.
-        x_normals_near = knn_gather(y_normals, x_nn.idx, y_lengths)[..., 0, :]
-        y_normals_near = knn_gather(x_normals, y_nn.idx, x_lengths)[..., 0, :]
-
-        cham_norm_x = 1 - torch.abs(
-            F.cosine_similarity(x_normals, x_normals_near, dim=2, eps=1e-6)
-        )
-        cham_norm_y = 1 - torch.abs(
-            F.cosine_similarity(y_normals, y_normals_near, dim=2, eps=1e-6)
-        )
-        cham_norm_x = cham_norm_x.masked_fill(x_mask, 0.0)
-        cham_norm_y = cham_norm_y.masked_fill(y_mask, 0.0)
-        if weights is not None:
-            cham_norm_x = cham_norm_x * weights.view(N, 1)
-            cham_norm_y = cham_norm_y * weights.view(N, 1)
+    if P1 == 0 or P2 == 0:
+        cham_x_per_point = torch.zeros(N, P1, device=x.device, dtype=x.dtype)
+        cham_y_per_point = torch.zeros(N, P2, device=y.device, dtype=y.dtype)
+        cham_norm_x_sum = torch.zeros(N, device=x.device, dtype=x.dtype)
+        cham_norm_y_sum = torch.zeros(N, device=y.device, dtype=y.dtype)
+        k_vec_x = torch.zeros_like(x_lengths_long)
+        k_vec_y = torch.zeros_like(y_lengths_long)
+        cham_norm_x_per_point = None
+        cham_norm_y_per_point = None
     else:
-        cham_norm_x = torch.zeros_like(cham_x)
-        cham_norm_y = torch.zeros_like(cham_y)
+        x_nn = knn_points(x, y, lengths1=x_lengths, lengths2=y_lengths, K=1)
+        y_nn = knn_points(y, x, lengths1=y_lengths, lengths2=x_lengths, K=1)
 
-    # Reduce over points.
-    cham_x = cham_x.sum(dim=1)  # (N,)
-    cham_y = cham_y.sum(dim=1)  # (N,)
-    if return_normals:
-        cham_norm_x = cham_norm_x.sum(dim=1)
-        cham_norm_y = cham_norm_y.sum(dim=1)
+        # Calculate per-point losses based on the chosen norm type
+        if norm_type == "L1":
+            # Note: knn_gather might be slow/approximate in dummy version
+            x_coords_near_y = knn_gather(y, x_nn.idx, y_lengths)[..., 0, :]
+            y_coords_near_x = knn_gather(x, y_nn.idx, x_lengths)[..., 0, :]
+            cham_x_per_point = torch.sum(torch.abs(x - x_coords_near_y), dim=2)
+            cham_y_per_point = torch.sum(torch.abs(y - y_coords_near_x), dim=2)
+        elif norm_type == "L2":
+            cham_x_per_point = torch.sqrt(x_nn.dists[..., 0].clamp(min=0) + eps)
+            cham_y_per_point = torch.sqrt(y_nn.dists[..., 0].clamp(min=0) + eps)
+        elif norm_type == "Huber":
+            # Huber loss is applied to the L2 distance (non-squared)
+            l2_dist_x = torch.sqrt(x_nn.dists[..., 0].clamp(min=0) + eps)
+            l2_dist_y = torch.sqrt(y_nn.dists[..., 0].clamp(min=0) + eps)
+            # Use F.huber_loss comparing the distance to zero
+            cham_x_per_point = F.huber_loss(l2_dist_x, torch.zeros_like(l2_dist_x),
+                                            delta=huber_delta, reduction='none')
+            cham_y_per_point = F.huber_loss(l2_dist_y, torch.zeros_like(l2_dist_y),
+                                            delta=huber_delta, reduction='none')
+        else: # norm_type == "L2_squared"
+            cham_x_per_point = x_nn.dists[..., 0]
+            cham_y_per_point = y_nn.dists[..., 0]
+
+        # --- Apply Trimming ---
+        k_vec_x = torch.ceil((1.0 - trim_percentage_x_to_y) * x_lengths.float()).long()
+        k_vec_y = torch.ceil((1.0 - trim_percentage_y_to_x) * y_lengths.float()).long()
+        k_vec_x = torch.where(x_lengths > 0, k_vec_x.clamp(min=1), torch.tensor(0, device=x.device, dtype=torch.long))
+        k_vec_y = torch.where(y_lengths > 0, k_vec_y.clamp(min=1), torch.tensor(0, device=y.device, dtype=torch.long))
+
+        if trim_percentage_x_to_y > 0.0:
+            cham_x_masked = cham_x_per_point.masked_fill(x_mask, float('inf'))
+            if P1 > 0:
+                 sorted_cham_x = torch.topk(cham_x_masked, P1, dim=1, largest=False, sorted=True)[0]
+            else:
+                 sorted_cham_x = cham_x_masked
+            keep_mask_x = torch.arange(P1, device=x.device)[None, :] < k_vec_x[:, None]
+            cham_x_per_point = sorted_cham_x.masked_fill(~keep_mask_x, 0.0)
+        else:
+             cham_x_per_point = cham_x_per_point.masked_fill(x_mask, 0.0)
+
+        if trim_percentage_y_to_x > 0.0:
+            cham_y_masked = cham_y_per_point.masked_fill(y_mask, float('inf'))
+            if P2 > 0:
+                sorted_cham_y = torch.topk(cham_y_masked, P2, dim=1, largest=False, sorted=True)[0]
+            else:
+                sorted_cham_y = cham_y_masked
+            keep_mask_y = torch.arange(P2, device=y.device)[None, :] < k_vec_y[:, None]
+            cham_y_per_point = sorted_cham_y.masked_fill(~keep_mask_y, 0.0)
+        else:
+             cham_y_per_point = cham_y_per_point.masked_fill(y_mask, 0.0)
+
+        # --- Compute Normal Consistency Loss ---
+        if return_normals:
+            # Ensure knn_gather returns valid shapes even if knn results were odd
+            idx_x_nn = x_nn.idx if hasattr(x_nn, 'idx') else torch.full((N, P1, 1), -1, dtype=torch.long, device=x.device)
+            idx_y_nn = y_nn.idx if hasattr(y_nn, 'idx') else torch.full((N, P2, 1), -1, dtype=torch.long, device=y.device)
+
+            x_normals_near = knn_gather(y_normals, idx_x_nn, y_lengths)[..., 0, :]
+            y_normals_near = knn_gather(x_normals, idx_y_nn, x_lengths)[..., 0, :]
+
+            cham_norm_x_per_point = 1 - torch.abs(F.cosine_similarity(x_normals, x_normals_near, dim=2, eps=eps))
+            cham_norm_y_per_point = 1 - torch.abs(F.cosine_similarity(y_normals, y_normals_near, dim=2, eps=eps))
+            cham_norm_x_per_point = cham_norm_x_per_point.masked_fill(x_mask, 0.0)
+            cham_norm_y_per_point = cham_norm_y_per_point.masked_fill(y_mask, 0.0)
+            cham_norm_x_sum = cham_norm_x_per_point.sum(dim=1)
+            cham_norm_y_sum = cham_norm_y_per_point.sum(dim=1)
+        else:
+            cham_norm_x_per_point = None
+            cham_norm_y_per_point = None
+            cham_norm_x_sum = torch.zeros(N, device=x.device, dtype=x.dtype)
+            cham_norm_y_sum = torch.zeros(N, device=y.device, dtype=y.dtype)
+
+
+    # --- Reduce over points ---
+    cham_x_sum = cham_x_per_point.sum(dim=1)
+    cham_y_sum = cham_y_per_point.sum(dim=1)
 
     if point_reduction == "mean":
-        cham_x = cham_x / x_lengths.to(cham_x.dtype)
-        cham_y = cham_y / y_lengths.to(cham_x.dtype)
-        if return_normals:
-            cham_norm_x = cham_norm_x / x_lengths.to(cham_norm_x.dtype)
-            cham_norm_y = cham_norm_y / x_lengths.to(cham_norm_y.dtype)
+        k_vec_x_clamped = k_vec_x.to(cham_x_sum.dtype).clamp(min=1.0)
+        k_vec_y_clamped = k_vec_y.to(cham_y_sum.dtype).clamp(min=1.0)
+        cham_x = cham_x_sum / k_vec_x_clamped
+        cham_y = cham_y_sum / k_vec_y_clamped
 
-    # Reduce over batch.
+        x_lengths_clamped = x_lengths.to(cham_norm_x_sum.dtype).clamp(min=1.0)
+        y_lengths_clamped = y_lengths.to(cham_norm_y_sum.dtype).clamp(min=1.0)
+        cham_norm_x = cham_norm_x_sum / x_lengths_clamped if return_normals else cham_norm_x_sum
+        cham_norm_y = cham_norm_y_sum / y_lengths_clamped if return_normals else cham_norm_y_sum
+
+    elif point_reduction == "sum":
+        cham_x = cham_x_sum
+        cham_y = cham_y_sum
+        cham_norm_x = cham_norm_x_sum
+        cham_norm_y = cham_norm_y_sum
+    else:
+        raise ValueError("Invalid point_reduction type")
+
+
+    # --- Apply weights per batch element ---
+    if weights is not None:
+         weights_squeezed = weights.to(cham_x.dtype)
+         cham_x = cham_x * weights_squeezed
+         cham_y = cham_y * weights_squeezed
+         cham_norm_x = cham_norm_x * weights_squeezed
+         cham_norm_y = cham_norm_y * weights_squeezed
+
+
+    # --- Reduce over batch ---
     if batch_reduction is not None:
-        cham_x = cham_x.sum()
-        cham_y = cham_y.sum()
-        if return_normals:
-            cham_norm_x = cham_norm_x.sum()
-            cham_norm_y = cham_norm_y.sum()
-        if batch_reduction == "mean":
-            div = weights.sum() if weights is not None else torch.tensor(N, device=x.device, dtype=cham_x.dtype)
-            cham_x = cham_x / div
-            cham_y = cham_y / div
-            if return_normals:
-                cham_norm_x = cham_norm_x / div
-                cham_norm_y = cham_norm_y / div
+        cham_x_batchsum = cham_x.sum()
+        cham_y_batchsum = cham_y.sum()
+        cham_norm_x_batchsum = cham_norm_x.sum()
+        cham_norm_y_batchsum = cham_norm_y.sum()
 
+        if batch_reduction == "mean":
+            if point_reduction == "sum":
+                if weights is None:
+                     divisor_x = k_vec_x.sum().to(cham_x.dtype).clamp(min=1.0)
+                     divisor_y = k_vec_y.sum().to(cham_y.dtype).clamp(min=1.0)
+                     divisor_norm_x = x_lengths.sum().to(cham_norm_x.dtype).clamp(min=1.0)
+                     divisor_norm_y = y_lengths.sum().to(cham_norm_y.dtype).clamp(min=1.0)
+                else:
+                     divisor_x = (weights * k_vec_x.to(weights.dtype)).sum().clamp(min=eps)
+                     divisor_y = (weights * k_vec_y.to(weights.dtype)).sum().clamp(min=eps)
+                     divisor_norm_x = (weights * x_lengths.to(weights.dtype)).sum().clamp(min=eps)
+                     divisor_norm_y = (weights * y_lengths.to(weights.dtype)).sum().clamp(min=eps)
+            elif point_reduction == "mean":
+                 if weights is None:
+                      divisor = torch.tensor(N, device=x.device, dtype=cham_x.dtype).clamp(min=1.0)
+                 else:
+                      divisor = weights.sum().clamp(min=eps)
+                 divisor_x = divisor_y = divisor_norm_x = divisor_norm_y = divisor
+
+            cham_x = cham_x_batchsum / divisor_x
+            cham_y = cham_y_batchsum / divisor_y
+            # Handle potentially zero divisor for normals if not computed
+            cham_norm_x = cham_norm_x_batchsum / divisor_norm_x if return_normals and divisor_norm_x > 0 else cham_norm_x_batchsum
+            cham_norm_y = cham_norm_y_batchsum / divisor_norm_y if return_normals and divisor_norm_y > 0 else cham_norm_y_batchsum
+
+        elif batch_reduction == "sum":
+            cham_x = cham_x_batchsum
+            cham_y = cham_y_batchsum
+            cham_norm_x = cham_norm_x_batchsum
+            cham_norm_y = cham_norm_y_batchsum
+        # else batch_reduction is None, use per-batch-element values
+
+    # --- Final Combination ---
     cham_dist = cham_x + cham_y
     cham_normals = (cham_norm_x + cham_norm_y) if return_normals else None
+
+    # Ensure output is scalar if batch reduction is done
+    if batch_reduction is not None:
+        # Check if already scalar before squeezing
+        if cham_dist.dim() > 0:
+             cham_dist = cham_dist.squeeze()
+        if cham_normals is not None and cham_normals.dim() > 0:
+            cham_normals = cham_normals.squeeze()
+
     return cham_dist, cham_normals
+
+
 
 
 # Example usage:

@@ -1,7 +1,8 @@
 import torch
 import matplotlib.pyplot as plt
-from preprocess import variable_size_collate, PointCloudUpsampleDataset,normalize_pair
-from torch_geometric.data import Data 
+from torch_geometric.data import Data
+from torch_geometric.nn import knn_graph
+from torch_geometric.utils import to_undirected
 
 def chamfer_distance(pc1, pc2):
     """
@@ -52,19 +53,28 @@ def run_inference_and_visualize_1plot_w_rotation(
     """
 
     def process_sample(index):
-        """Extracts, normalizes, runs inference, and computes distance metrics."""
+        """Extracts data, runs inference, and computes distance metrics."""
         sample = train_df[index]
-        dep_points_raw = sample['dep_points']
-        uav_points_raw = sample['uav_points']  
-        edge_index = sample['dep_edge_index']
-
-        # Normalize
-        dep_points_norm, uav_points_norm, center, scale = normalize_pair(dep_points_raw, uav_points_raw)
+        
+        # Use precomputed normalized points
+        dep_points_norm = sample['dep_points_norm']
+        uav_points_norm = sample['uav_points_norm']
+        
+        # Get the edge index from the appropriate source
+        if 'dep_edge_index' in sample:
+            edge_index = sample['dep_edge_index']
+        elif 'knn_edge_indices' in sample and 30 in sample['knn_edge_indices']:  # Default to k=30
+            edge_index = sample['knn_edge_indices'][30]
+        else:
+            # Compute KNN if not available
+            print(f"Warning: No precomputed edges found for sample {index}, computing KNN")
+            edge_index = knn_graph(dep_points_norm, k=30, loop=False)
+            edge_index = to_undirected(edge_index, num_nodes=dep_points_norm.size(0))
 
         # Move to device
         dep_points_norm = dep_points_norm.to(device)
         uav_points_norm = uav_points_norm.to(device)
-        edge_index      = edge_index.to(device)
+        edge_index = edge_index.to(device)
 
         # Inference in normalized space
         trained_model.eval()
@@ -192,37 +202,42 @@ def run_inference_and_visualize_2plots(
     """
 
     def process_sample(index):
-        """Extracts, normalizes, runs inference, and computes distance metrics."""
+        """Extracts data, runs inference, and computes distance metrics."""
         sample = model_data[index]
-        dep_points_raw = sample['dep_points']  # [N_dep, 3]
-        uav_points_raw = sample['uav_points']  # [N_uav, 3]
-        edge_index = sample['dep_edge_index']
+        
+        # Use precomputed normalized points
+        dep_points_norm = sample['dep_points_norm']  # [N_dep, 3]
+        uav_points_norm = sample['uav_points_norm']  # [N_uav, 3]
+        
+        # Get the edge index from the appropriate source
+        if 'dep_edge_index' in sample:
+            edge_index = sample['dep_edge_index']
+        elif 'knn_edge_indices' in sample and 30 in sample['knn_edge_indices']:  # Default to k=30
+            edge_index = sample['knn_edge_indices'][30]
+        else:
+            # Compute KNN if not available
+            print(f"Warning: No precomputed edges found for sample {index}, computing KNN")
+            edge_index = knn_graph(dep_points_norm, k=30, loop=False)
+            edge_index = to_undirected(edge_index, num_nodes=dep_points_norm.size(0))
 
-        # 1) Normalize
-        dep_points_norm, uav_points_norm, center, scale = normalize_pair(dep_points_raw, uav_points_raw)
-
-        # 2) Move to device
+        # Move to device
         dep_points_norm = dep_points_norm.to(device)
         uav_points_norm = uav_points_norm.to(device)
-        edge_index      = edge_index.to(device)
+        edge_index = edge_index.to(device)
 
-        # 3) Build a PyG Data object for inference.
-        data = Data(pos=dep_points_norm, edge_index=edge_index)
-
-        # 4) Run inference in normalized space.
+        # Run inference
         trained_model.eval()
         with torch.no_grad():
-            # Now pass the single Data object.
-            pred_points_norm = trained_model(data.pos, data.edge_index)
+            pred_points_norm = trained_model(dep_points_norm, edge_index)
 
-        # 5) Compute distances (using your existing chamfer_distance and hausdorff_distance functions).
+        # Compute distances
         orig_chamfer_dist = chamfer_distance(dep_points_norm, uav_points_norm)
         upsmpl_chamfer_dist = chamfer_distance(pred_points_norm, uav_points_norm)
 
         orig_hausdorff_dist = hausdorff_distance(dep_points_norm, uav_points_norm)
         upsmpl_hausdorff_dist = hausdorff_distance(pred_points_norm, uav_points_norm)
         
-        # 6) Return CPU data for plotting
+        # Return CPU data for plotting
         return (
             dep_points_norm.cpu(),
             uav_points_norm.cpu(),
@@ -316,12 +331,3 @@ def run_inference_and_visualize_2plots(
     plt.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0)
 
     plt.show()
-    
-
-
-
-
-
-
-
-
