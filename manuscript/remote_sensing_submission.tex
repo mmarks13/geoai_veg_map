@@ -610,7 +610,7 @@ To isolate the impact of each data modality, we trained four distinct model vari
   \end{tabular}
 \end{table}
 
-All model variants were trained using an identical architecture, set of hyperparameters, and training protocol to ensure a fair comparison. Key model configuration parameters, including feature dimensions and attention head counts, are provided in Table \ref{tab:model_config_a}. The models were trained for 100 epochs on four NVIDIA L40 GPUs using the ScheduleFreeAdamW optimizer and a density-aware Chamfer distance loss function. Further details on the training protocol and hardware are listed in Table \ref{tab:training_protocol}.
+All model variants were trained using an identical architecture, set of hyperparameters, and training protocol to ensure a fair comparison. Key model configuration parameters, including feature dimensions and attention head counts, are provided in Table \ref{tab:model_config_a}. The models were trained for 100 epochs on four NVIDIA L40 GPUs using the ScheduleFreeAdamW optimizer \cite{defazio_road_2024} and a density-aware Chamfer distance loss function (Eq. 9 in \cite{wu_density-aware_2021}). Further details on the training protocol and hardware are listed in Table \ref{tab:training_protocol}.
 
 \begin{table}[htbp]
   \centering
@@ -661,7 +661,7 @@ All model variants were trained using an identical architecture, set of hyperpar
     Batch size    & 15 tiles per GPU \\
     Epochs        & 100 \\
     Gradient clip & $\lVert g\rVert_2 \le 10$ \\
-    Training time & ≈ 7 h per model variant \\
+    Training time & $\approx$ 7 h per model variant \\
     Model selection & Epoch with lowest validation loss \\
     \bottomrule
   \end{tabular}
@@ -891,21 +891,7 @@ USGS & U.S. Geological Survey \\
 \subsection[\appendixname~\thesubsection]{}
 The appendix is an optional section that can contain details and data supplemental to the main text---for example, explanations of experimental details that would disrupt the flow of the main text but nonetheless remain crucial to understanding and reproducing the research shown; figures of replicates for experiments of which representative data are shown in the main text can be added here if brief, or as Supplementary Data. Mathematical proofs of results not central to the paper can be added as an appendix.
 
-\begin{table}[H] 
-\caption{This is a table caption.\label{tab5}}
-%\newcolumntype{C}{>{\centering\arraybackslash}X}
-\begin{tabularx}{\textwidth}{CCC}
-\toprule
-\textbf{Title 1}	& \textbf{Title 2}	& \textbf{Title 3}\\
-\midrule
-Entry 1		& Data			& Data\\
-Entry 2		& Data			& Data\\
-\bottomrule
-\end{tabularx}
-\end{table}
 
-\section[\appendixname~\thesection]{}
-All appendix sections must be cited in the main text. In the appendices, Figures, Tables, etc. should be labeled, starting with ``A''---e.g., Figure A1, Figure A2, etc.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %\isPreprints{}{% This command is only used for ``preprints''.
