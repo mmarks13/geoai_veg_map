@@ -179,7 +179,7 @@ def visualize_tile_point_clouds(
         ax.set_axis_off()
         
         # Add just the title
-        ax.set_title(title, fontsize=10, pad=-5)  # Negative pad for title
+        ax.set_title(title, fontsize=13, pad=-5)  # Negative pad for title
         
         # Directly manipulate position - the hacky part!
         # Expand each axis beyond its normal bounds
@@ -602,15 +602,89 @@ def visualize_tiles_paired_spacing(
     title_prefixes=None,
     title_fontsize=10,
     horizontal_extent=10.0,
-    wspace=-0.15,          # Negative for overlap between columns
-    hspace=-0.2,           # Negative for overlap between rows
-    plot_dist=8,           # Controls 3D plot distance (smaller = bigger plot)
-    title_pad=-5,          # Negative padding for titles
-    expand_factor=0.15,    # How much to expand each subplot beyond its boundaries
-    tight_margins=True,    # Use tight figure margins
+    intra_tile_wspace=-0.15,  # Within each tile pair (between Input and GT)
+    inter_tile_wspace=0.12,   # Between tile pairs (left pair vs right pair)
+    inter_tile_hspace=0.1,    # Between tile rows (top row vs bottom row)
+    plot_dist=8,
+    title_pad=-5,          # Can be single value or list [top_row_pad, bottom_row_pad]
+                          # Negative values use manual positioning for true negative padding
+    subplot_expand=0.15,
+    subplot_position_scale=1.0,
+    tight_margins=True,
+    fig_margins=None,
+    axis_limit_pad=0.02,
+    # Backwards compatibility (deprecated)
+    wspace=None,  # Will use intra_tile_wspace if not None
+    hspace=None,  # Will use inter_tile_hspace if not None
+    expand_factor=None,  # Will use subplot_expand if not None
 ):
     """
-    Visualize four tiles as Input | GT pairs (2 rows), with extra space between tile pairs.
+    Visualize four tiles as Input | GT pairs (2 rows), with advanced spacing control.
+    Layout: 
+    Row 1: [Tile1_Input | Tile1_GT]  [spacer]  [Tile2_Input | Tile2_GT]
+    Row 2: [Tile3_Input | Tile3_GT]  [spacer]  [Tile4_Input | Tile4_GT]
+    
+    Parameters
+    ----------
+    df : DataFrame
+        DataFrame containing point cloud data
+    tile_ids : list
+        Exactly four tile IDs to visualize
+    point_size : float
+        Size of points in scatter plot
+    point_alpha : float
+        Transparency of points
+    colors : tuple
+        Colors for (input, ground truth)
+    elev, azim : float
+        3D viewing angles
+    figsize : tuple
+        Figure size (width, height)
+    title_prefixes : tuple, optional
+        Prefix text for each column's title. Default: ("Input", "Ground Truth")
+    title_fontsize : int
+        Font size for titles
+    horizontal_extent : float
+        Standard horizontal extent for X/Y axes
+    intra_tile_wspace : float
+        Horizontal spacing WITHIN each tile pair (between Input and GT)
+        Negative values create overlap (-1 to 1)
+    inter_tile_wspace : float
+        Horizontal spacing BETWEEN tile pairs (left pair vs right pair)
+        Positive values create separation (0 to 1)
+    inter_tile_hspace : float
+        Vertical spacing between tile rows (top row vs bottom row)
+        Negative values create overlap (-1 to 1)
+    plot_dist : float
+        3D plot distance (smaller = bigger plot)
+    title_pad : float or list
+        Padding for titles. Can be:
+        - Single value: applies to all titles
+        - List of 2 values: [top_row_pad, bottom_row_pad]
+        - Positive values: normal matplotlib padding
+        - Negative values: manual positioning for true negative padding (closer to plots)
+    subplot_expand : float
+        Factor to expand each subplot beyond boundaries (0-1)
+    subplot_position_scale : float
+        Scale factor for subplot positioning (>1 makes subplots larger, <1 smaller)
+    tight_margins : bool
+        Whether to use tight figure margins (overridden by fig_margins if provided)
+    fig_margins : dict, optional
+        Specific figure margins as dict with keys: left, right, bottom, top
+        Values should be between 0 and 1
+    axis_limit_pad : float
+        Padding factor for axis limits (0.0 = no padding, 0.02 = 2% padding)
+        Smaller values make plots fill more of their space
+    wspace : float, optional (deprecated)
+        Use intra_tile_wspace instead
+    hspace : float, optional (deprecated) 
+        Use inter_tile_hspace instead
+    expand_factor : float, optional (deprecated)
+        Use subplot_expand instead
+        
+    Returns
+    -------
+    fig : matplotlib Figure
     """
     if len(tile_ids) != 4:
         raise ValueError("Please provide exactly four tile IDs")
@@ -618,6 +692,39 @@ def visualize_tiles_paired_spacing(
         title_prefixes = ("Input", "Ground Truth")
     if len(title_prefixes) != 2:
         raise ValueError("`title_prefixes` must have exactly two elements.")
+    
+    # Handle title_pad as single value or list
+    if isinstance(title_pad, (list, tuple)):
+        if len(title_pad) != 2:
+            raise ValueError("title_pad list must have exactly 2 values [top_row, bottom_row]")
+        title_pads = title_pad
+    else:
+        title_pads = [title_pad, title_pad]  # Same padding for both rows
+
+    # Handle backwards compatibility
+    if wspace is not None:
+        print("Warning: 'wspace' is deprecated, use 'intra_tile_wspace' instead")
+        intra_tile_wspace = wspace
+    if hspace is not None:
+        print("Warning: 'hspace' is deprecated, use 'inter_tile_hspace' instead")
+        inter_tile_hspace = hspace
+    if expand_factor is not None:
+        print("Warning: 'expand_factor' is deprecated, use 'subplot_expand' instead")
+        subplot_expand = expand_factor
+
+    # Helper function to set title with proper negative padding support
+    def set_title_with_negative_padding(ax, title, fontsize, pad_value):
+        if pad_value < 0:
+            # For negative padding, position title manually closer to the plot
+            # Convert negative padding to a position offset (more negative = closer)
+            y_offset = 1.0 + (pad_value / 500.0)  # Scale: -100 -> 0.8, -200 -> 0.6, etc.
+            # Use text2D for 3D axes to position in 2D axes coordinates
+            ax.text2D(0.5, y_offset, title, 
+                     transform=ax.transAxes, ha='center', va='bottom',
+                     fontsize=fontsize)
+        else:
+            # Use normal title for positive padding
+            ax.set_title(title, fontsize=fontsize, pad=pad_value)
 
     # Prepare point clouds and titles
     all_clouds, all_titles = [], []
@@ -638,6 +745,12 @@ def visualize_tiles_paired_spacing(
     # Compute shared global axis limits for all clouds
     all_points = np.vstack([pt for pair in all_clouds for pt in pair])
     mins, maxs = all_points.min(0), all_points.max(0)
+    
+    # Apply padding to axis limits if specified
+    if axis_limit_pad > 0:
+        pad = axis_limit_pad * (maxs - mins)
+        mins, maxs = mins - pad, maxs + pad
+    
     centers = (mins + maxs) / 2
     half_extent = horizontal_extent / 2
     xlims = (centers[0] - half_extent, centers[0] + half_extent)
@@ -645,20 +758,28 @@ def visualize_tiles_paired_spacing(
     zlims = (mins[2], maxs[2])
     z_scale = (zlims[1] - zlims[0]) / horizontal_extent
 
-    # Create figure with tight borders if requested
+    # Create figure
     fig = plt.figure(figsize=figsize)
-    if tight_margins:
+    
+    # Apply figure margins
+    if fig_margins is not None:
+        fig.subplots_adjust(**fig_margins)
+    elif tight_margins:
         fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.99)
     
-    # GridSpec with potentially negative spacing values
+    # GridSpec with advanced spacing control
+    # Layout: [tile_pair_1: input|gt] [spacer] [tile_pair_2: input|gt]
+    # Width ratios: [1, 1, inter_tile_wspace, 1, 1]
+    width_ratios = [1, 1, inter_tile_wspace, 1, 1]
     gs = GridSpec(2, 5, 
-                 width_ratios=[1, 1, 0.12, 1, 1], 
-                 wspace=wspace,   # Can be negative
-                 hspace=hspace)   # Can be negative
+                 width_ratios=width_ratios, 
+                 wspace=intra_tile_wspace,    # Controls spacing within pairs
+                 hspace=inter_tile_hspace)    # Controls spacing between rows
 
-    for tile_pair in range(2):  # There are 2 tile pairs (rows)
-        for in_out in range(2): # 0: input, 1: gt
-            # Left tile of the row
+    # Plot all tiles
+    for tile_pair in range(2):  # 2 rows (tile pairs)
+        for in_out in range(2):  # 2 columns per pair (input, gt)
+            # Left tile pair (columns 0-1)
             tile_idx = tile_pair * 2 + 0
             col_idx = in_out
             ax = fig.add_subplot(gs[tile_pair, col_idx], projection="3d")
@@ -666,52 +787,88 @@ def visualize_tiles_paired_spacing(
             col = colors[in_out]
             title = all_titles[tile_idx][in_out]
             
+            # Plot points
             ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
                        s=point_size, c=col, alpha=point_alpha, linewidths=0)
+            
+            # Set view and limits
             ax.view_init(elev=elev, azim=azim)
             ax.set_xlim(xlims)
             ax.set_ylim(ylims)
             ax.set_zlim(zlims)
             ax.set_box_aspect([1, 1, z_scale])
             ax.set_axis_off()
-            ax.dist = plot_dist  # Control 3D plot distance
-            ax.set_title(title, fontsize=title_fontsize, pad=title_pad)
+            ax.dist = plot_dist
             
-            # Expand subplot beyond its normal boundaries
-            if expand_factor > 0:
+            # Set title with negative padding support
+            set_title_with_negative_padding(ax, title, title_fontsize, title_pads[tile_pair])
+            
+            # Apply subplot expansion and scaling
+            if subplot_expand > 0 or subplot_position_scale != 1.0:
                 pos = ax.get_position()
-                width = pos.width * (1 + expand_factor)
-                height = pos.height * (1 + expand_factor)
-                left = max(0, pos.x0 - (width - pos.width)/2)
-                bottom = max(0, pos.y0 - (height - pos.height)/2)
+                
+                # Apply expansion
+                width = pos.width * (1 + subplot_expand)
+                height = pos.height * (1 + subplot_expand)
+                
+                # Apply position scaling
+                width *= subplot_position_scale
+                height *= subplot_position_scale
+                
+                # Center the expanded subplot
+                left = pos.x0 - (width - pos.width) / 2
+                bottom = pos.y0 - (height - pos.height) / 2
+                
+                # Ensure we don't go outside figure bounds
+                left = max(0, min(left, 1 - width))
+                bottom = max(0, min(bottom, 1 - height))
+                
                 ax.set_position([left, bottom, width, height])
 
-            # Right tile of the row
+            # Right tile pair (columns 3-4)
             tile_idx = tile_pair * 2 + 1
-            col_idx = in_out + 3
+            col_idx = in_out + 3  # Skip the spacer column (index 2)
             ax = fig.add_subplot(gs[tile_pair, col_idx], projection="3d")
             pts = all_clouds[tile_idx][in_out]
             col = colors[in_out]
             title = all_titles[tile_idx][in_out]
             
+            # Plot points
             ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
                        s=point_size, c=col, alpha=point_alpha, linewidths=0)
+            
+            # Set view and limits
             ax.view_init(elev=elev, azim=azim)
             ax.set_xlim(xlims)
             ax.set_ylim(ylims)
             ax.set_zlim(zlims)
             ax.set_box_aspect([1, 1, z_scale])
             ax.set_axis_off()
-            ax.dist = plot_dist  # Control 3D plot distance
-            ax.set_title(title, fontsize=title_fontsize, pad=title_pad)
+            ax.dist = plot_dist
             
-            # Expand subplot beyond its normal boundaries
-            if expand_factor > 0:
+            # Set title with negative padding support
+            set_title_with_negative_padding(ax, title, title_fontsize, title_pads[tile_pair])
+            
+            # Apply subplot expansion and scaling
+            if subplot_expand > 0 or subplot_position_scale != 1.0:
                 pos = ax.get_position()
-                width = pos.width * (1 + expand_factor)
-                height = pos.height * (1 + expand_factor)
-                left = max(0, pos.x0 - (width - pos.width)/2)
-                bottom = max(0, pos.y0 - (height - pos.height)/2)
+                
+                # Apply expansion
+                width = pos.width * (1 + subplot_expand)
+                height = pos.height * (1 + subplot_expand)
+                
+                # Apply position scaling
+                width *= subplot_position_scale
+                height *= subplot_position_scale
+                
+                # Center the expanded subplot
+                left = pos.x0 - (width - pos.width) / 2
+                bottom = pos.y0 - (height - pos.height) / 2
+                
+                # Ensure we don't go outside figure bounds
+                left = max(0, min(left, 1 - width))
+                bottom = max(0, min(bottom, 1 - height))
+                
                 ax.set_position([left, bottom, width, height])
 
     return fig
@@ -1362,19 +1519,28 @@ if __name__ == "__main__":
     intro_pt_clouds = visualize_tiles_paired_spacing(
         df,
         tile_ids=["tile_15957", "tile_15958", "tile_31561", "tile_30473"],
-        point_size=1.8,
-        point_alpha=0.6,
+        point_size=0.8,
+        point_alpha=0.4,
         colors=("#D55E00", "#009E73"),
         title_prefixes = ("Aerial LiDAR\n2015-18", "UAV LiDAR\n2023-24"),
-        title_fontsize=20,
+        title_fontsize=12,
         horizontal_extent=10.0,
-        figsize = (20, 20),
+        figsize = (10, 10),
+        plot_dist = 10,
+        title_pad = [0.0,-125],
+        intra_tile_wspace=-0.00,    # Tight spacing within each Input|GT pair
+        inter_tile_wspace=0.16,    # More space between left and right tile pairs
+        inter_tile_hspace=-0.5,    # Slight overlap between top and bottom rows
+        subplot_expand=0,        # Expand subplots beyond boundaries
+        subplot_position_scale=1.25, # Make subplots x% larger
+        axis_limit_pad=0.0,        # No padding around data
+        fig_margins=dict(left=0, right=1, bottom=0.005, top=0.995),
     )
 
     save_and_crop_figure(
         intro_pt_clouds, 
         "manuscript/figures/intro_pt_clouds.png",
-        (0.04, 0.0, 0.96, .985),  # ratios: (left, top, right, bottom)
+        (0.085, 0.0, 0.92, .96),  # ratios: (left, top, right, bottom)
         dpi=300
     )
 
@@ -1396,11 +1562,30 @@ if __name__ == "__main__":
     save_and_crop_figure(
         single_veg_loss_example, 
         "manuscript/figures/single_veg_loss_example.png",
-        (0.04, 0.0, 0.96, .985),  # ratios: (left, top, right, bottom)
-        dpi=1000
+        (0.06, 0.0, 0.94, .90),  # ratios: (left, top, right, bottom)
+        dpi=500
+    )
+
+    model_output_example = visualize_tile_point_clouds(
+        df,
+        tile_id="tile_30473",
+        middle_cols=["baseline_pred_points","combined_pred_points"],
+        point_size=1,
+        point_alpha=0.7,
+        elev = 25,
+        azim=  -60,
+        figsize=(10, 5),
+        margins=dict(left=-0.2, right=1, bottom=0.05, top=0.95, wspace=-0.27),
+        title_prefixes = ("Aerial LiDAR (2015-18)", "Predicted - LiDAR Only","Predicted - Optical+SAR", "UAV LiDAR (2023-24)")
     )
 
 
+    save_and_crop_figure(
+        model_output_example, 
+        "manuscript/figures/model_output_example.png",
+        (0.06, 0.0, 0.94, .89),  # ratios: (left, top, right, bottom)
+        dpi=500
+    )
 
     veg_growth = ['tile_21167', 'tile_17898', 'tile_34378', 'tile_27176', 'tile_22627', 'tile_31490', 'tile_16730', 'tile_24896', 'tile_21162', 'tile_33122', 'tile_16869', 'tile_20241']
     veg_growth_8x = visualize_tiles_small_multiples(
@@ -1443,7 +1628,7 @@ if __name__ == "__main__":
         veg_growth_8x, 
         "manuscript/figures/veg_growth_8x.png",
         (0.03, 0.0, 0.97, 1),  # ratios: (left, top, right, bottom)
-        dpi=1000
+        dpi=500
     )
 
 
@@ -1488,7 +1673,7 @@ if __name__ == "__main__":
         veg_growth2_8x, 
         "manuscript/figures/veg_growth2_8x.png",
         (0.03, 0.0, 0.97, 1),  # ratios: (left, top, right, bottom)
-        dpi=1000
+        dpi=500
     )
 
 
@@ -1534,7 +1719,7 @@ if __name__ == "__main__":
         veg_loss_2x, 
         "manuscript/figures/veg_loss_2x.png",
         (0.045, 0.0, 0.955, .98),  # ratios: (left, top, right, bottom)
-        dpi=1000
+        dpi=500
     )
 
 
@@ -1583,7 +1768,47 @@ if __name__ == "__main__":
     )
 
 
+    example_8x_v_2x = visualize_tiles_small_multiples(
+        df,
+        tile_ids= ['tile_15518', 'tile_988','tile_19335'],
+        pred_cols=["combined_pred_points","combined_8x_pred_points"],
+        n_cols=1,
+        fig_width=8,
+        fig_height_per_row=2.5,
+        intra_tile_wspace=-0.2,   # Tight spacing within each tile group
+        inter_tile_wspace=0.08,     # More space between tile groups
+        inter_tile_hspace=0.3,    # Small space between rows  
+        # Whitespace reduction
+        axis_limit_pad=0.0,          # No padding around data
+        subplot_position_scale=1.1,   # Make subplots X% larger
+        subplot_expand=0,          # Additional X% expansion
+        plot_dist=7,                 # Closer camera for bigger plots
+        # Tight figure margins
+        fig_margins=dict(left=-0.0, right=1, bottom=0.000, top=1),
 
+        title_prefixes=("Aerial LiDAR", "2x Upsampling", "8x Upsampling", "UAV LiDAR"),
+        point_size=0.4,
+        point_alpha=0.5,
+        elev=25,
+        azim=-60,
+        title_fontsize=9,
+        title_pad=-40,
+        tight_margins=True,
+        show_chamfer=False,
+        chamfer_mapping=None,
+        overall_title="Comparing 8x Upsampling and 2x Upsampling Predictions",
+        overall_title_fontsize=14,
+        overall_title_y=1.08,
+        overall_title_weight='bold',
+        overall_title_pad=0,
+    )
+
+    save_and_crop_figure(
+        example_8x_v_2x, 
+        "manuscript/figures/example_8x_v_2x.png",
+        (0.04, 0.0, 0.96, .985),  # ratios: (left, top, right, bottom)
+        dpi=500
+    )
 
     baseline_prediction_example = visualize_tiles_small_multiples(
         df,
@@ -1624,7 +1849,7 @@ if __name__ == "__main__":
         baseline_prediction_example, 
         "manuscript/figures/baseline_prediction_example.png",
         (0.04, 0.0, 0.96, .985),  # ratios: (left, top, right, bottom)
-        dpi=1000
+        dpi=500
     )
 
     baseline_v_input_boxplot, _  = plot_boxplot_chamfer_distance(df,   model_order=['input','baseline'],
@@ -1659,7 +1884,7 @@ if __name__ == "__main__":
         error_vs_cnpy_chng, 
         "manuscript/figures/error_vs_cnpy_chng.png",
         (0.0, 0.0, 1, 1),  # ratios: (left, top, right, bottom)
-        dpi=1000
+        dpi=500
     )
 
 
