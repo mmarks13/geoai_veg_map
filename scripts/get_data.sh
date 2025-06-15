@@ -2,8 +2,8 @@
 cd /home/jovyan/geoai_veg_map/
 
 #set environment variables for getting uavsar data
-export EARTHDATA_USERNAME=mmarks13
-export EARTHDATA_PASSWORD=vuj@zmp2CQX5bkp2kbd
+export EARTHDATA_USERNAME=username
+export EARTHDATA_PASSWORD=password
 
 #UAVSAR
 python src/data_prep/make_local_uavsar_stac.py\
