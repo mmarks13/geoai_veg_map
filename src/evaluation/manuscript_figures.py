@@ -1563,7 +1563,7 @@ if __name__ == "__main__":
         single_veg_loss_example, 
         "manuscript/figures/single_veg_loss_example.png",
         (0.06, 0.0, 0.94, .90),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
     model_output_example = visualize_tile_point_clouds(
@@ -1584,7 +1584,7 @@ if __name__ == "__main__":
         model_output_example, 
         "manuscript/figures/model_output_example.png",
         (0.06, 0.0, 0.94, .89),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
     veg_growth = ['tile_21167', 'tile_17898', 'tile_34378', 'tile_27176', 'tile_22627', 'tile_31490', 'tile_16730', 'tile_24896', 'tile_21162', 'tile_33122', 'tile_16869', 'tile_20241']
@@ -1628,7 +1628,7 @@ if __name__ == "__main__":
         veg_growth_8x, 
         "manuscript/figures/veg_growth_8x.png",
         (0.03, 0.0, 0.97, 1),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
 
@@ -1673,7 +1673,7 @@ if __name__ == "__main__":
         veg_growth2_8x, 
         "manuscript/figures/veg_growth2_8x.png",
         (0.03, 0.0, 0.97, 1),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
 
@@ -1719,7 +1719,7 @@ if __name__ == "__main__":
         veg_loss_2x, 
         "manuscript/figures/veg_loss_2x.png",
         (0.045, 0.0, 0.955, .98),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
 
@@ -1807,7 +1807,7 @@ if __name__ == "__main__":
         example_8x_v_2x, 
         "manuscript/figures/example_8x_v_2x.png",
         (0.04, 0.0, 0.96, .985),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
     baseline_prediction_example = visualize_tiles_small_multiples(
@@ -1849,7 +1849,7 @@ if __name__ == "__main__":
         baseline_prediction_example, 
         "manuscript/figures/baseline_prediction_example.png",
         (0.04, 0.0, 0.96, .985),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
     baseline_v_input_boxplot, _  = plot_boxplot_chamfer_distance(df,   model_order=['input','baseline'],
@@ -1861,7 +1861,7 @@ if __name__ == "__main__":
         baseline_v_input_boxplot, 
         "manuscript/figures/baseline_v_input_boxplot.png",
         (0.0, 0.0, 1, 1),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
     
     
@@ -1874,7 +1874,7 @@ if __name__ == "__main__":
         boxplot_by_model, 
         "manuscript/figures/boxplot_by_model.png",
         (0.0, 0.0, 1, 1),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
 
@@ -1884,7 +1884,7 @@ if __name__ == "__main__":
         error_vs_cnpy_chng, 
         "manuscript/figures/error_vs_cnpy_chng.png",
         (0.0, 0.0, 1, 1),  # ratios: (left, top, right, bottom)
-        dpi=500
+        dpi=600
     )
 
 
