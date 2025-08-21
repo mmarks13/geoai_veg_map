@@ -38,7 +38,7 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
 
   \item \emph{Specify the exact layer setup (conv sizes, pooling window, MLP dimensions, stage naming ambiguity).}
 
-  \response We made three changes: (i) inline parenthetical specifications for the patch tokenization stem: Conv1 ($C_{in}\rightarrow D_{token}/2$, $3\times3$, stride 1, pad 1), Conv2 ($D_{token}/2\rightarrow D_{token}$, $3\times3$, stride 1, pad 1), followed by AvgPool (kernel=stride=10) producing a $4\times4$ patch grid; (ii) inline MLP expansion factors and depth-wise convolution kernel ($D_{token}\rightarrow 4D_{token} \rightarrow D_{token}$, depth-wise $k=3$) in the Transformer block; (iii) added an Appendix table (Table~\ref{tab:layer_specs}) enumerating remaining architectural components: fusion projection layers, LG-PAB local/global FFNs, position generator MLP (256$\rightarrow$64$\rightarrow$32$\rightarrow$3), coordinate decoder MLP (256$\rightarrow$128$\rightarrow$64$\rightarrow$32$\rightarrow$3), positional encoding MLPs, heads, and dropout values. We also replaced the ambiguous \emph{Stage 3} wording with \emph{Transformer Encoder Block} for consistency.
+  \response We made three changes: (i) inline parenthetical specifications for the patch tokenization stem: Conv1 ($C_{in}\rightarrow D_{token}/2$, $3\times3$, stride 1, pad 1), Conv2 ($D_{token}/2\rightarrow D_{token}$, $3\times3$, stride 1, pad 1), followed by AvgPool (kernel=stride=10) producing a $4\times4$ patch grid; (ii) inline MLP expansion factors and depth-wise convolution kernel ($D_{token}\rightarrow 4D_{token} \rightarrow D_{token}$, depth-wise $k=3$) in the Transformer block; (iii) added an Appendix table enumerating remaining architectural components: fusion projection layers, LG-PAB local/global FFNs, position generator MLP (256$\rightarrow$64$\rightarrow$32$\rightarrow$3), coordinate decoder MLP (256$\rightarrow$128$\rightarrow$64$\rightarrow$32$\rightarrow$3), positional encoding MLPs, heads, and dropout values. We also replaced the ambiguous \emph{Stage 3} wording with \emph{Transformer Encoder Block} for consistency.
 
   \item \emph{Line 273–274: Justification for 50k point threshold in a 10 m × 10 m tile.}
 
@@ -83,18 +83,18 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
 \begin{enumerate}
   \item \emph{High computational complexity: Global attention over entire point cloud; parameter increase (fusion model 6.8M, +26\% over baseline).}
 
-  \response A new Discussion paragraph quantifies and contextualizes complexity: (i) parameter delta (+26\%) primarily from fusion projections and dual-modality encoders; (ii) global FlashAttention maintains exact attention while reducing memory bandwidth pressure; (iii) tile-level point counts are bounded (\textasciitilde50k reference, \textasciitilde25k sparse input) and we employ an adaptive voxel cap plus local–global separation to restrain quadratic scaling; (iv) we outline potential future reductions (sparse or clustered global attention, mixed-precision kernels, lightweight token merging). This addresses transparency and scalability considerations.
+  \response We clarified complexity drivers in the main text. First, we documented an existing implementation detail: the 3DEP input is capped at 10,000 points per 10\,m tile (random subsample if exceeded; <1\% of tiles affected), which has bounded the global-attention sequence length and memory from the outset. This cap was already present in the publicly available code; it is now stated explicitly in Methods. With $R_{\text{up}}{=}2$, the largest sequence occurs right after expansion (at most \~20k tokens) before refinement/decoding. We implement global attention with FlashAttention to reduce memory traffic while preserving exact attention; under these bounds we observed stable runtime/memory without additional approximations. Separately, the parameter increase from 4.7M (baseline) to 6.8M (fused) arises from adding modality-specific imagery encoders and cross-attention fusion projections; learned weights depend on layer widths/head counts and are independent of per-tile point counts.
 
   \item \emph{High requirements for data alignment and quality; complex preprocessing; UAV:3DEP ratio > 2 may limit generalization.}
 
-  \response We revised the data alignment/quality subsection in the Discussion to: (a) enumerate the actual preprocessing pipeline (tiling, STAC ingestion, anisotropic voxel downsampling schedule, QA thresholds: UAV ≥16k points, 3DEP ≥200 points, UAV:3DEP ≥2.0, coverage ≥96\%, ≥5 points per 2 m cell); (b) justify thresholds as ensuring supervision richness for geometric learning and mitigating temporal misalignment artifacts; (c) acknowledge trade-offs in broader deployment where lower-density or misaligned datasets prevail; and (d) propose future relaxation and robustness experiments (e.g., synthetic misalignment augmentation, adaptive loss weighting, alignment confidence modeling) to extend generalization.
+  \response We reframed the thresholds as training/benchmark curation rather than deployment requirements. The revised Methods explicitly state the UAV:3DEP > 2 and \geq\,16k UAV / \geq\,200 3DEP point thresholds were used to exclude edge-of-flight or extremely sparse tiles so the UAV reference is meaningfully denser and the 3DEP input minimally informative for stable supervision; at inference the method needs only sparse airborne LiDAR plus co-registered imagery. In the Discussion we acknowledge that perfect cross-sensor alignment is not guaranteed; we relied on established, well-orthorectified public datasets (3DEP, NAIP, UAVSAR) to minimize gross misregistration, and we chose point-to-image cross-attention with a modest proximity mask partly because it is more tolerant to small horizontal offsets than naïve feature concatenation. We did not run a formal misregistration sensitivity study and identify it as future work; we also note potential domain-shift limitations and the straightforward path to broaden training with additional high-density LiDAR from new biomes.
 \end{enumerate}
 
 \section*{Summary of Major Manuscript Changes}
 \begin{itemize}
   \item Added \emph{Figure notation bridge} mapping figure labels to formal symbols.
   \item Inline architectural specifications (convolutional stem, pooling, MLP expansion) plus comprehensive Appendix layer specification table.
-  \item Clarified downsampling 50k cap.
+  \item Clarified downsampling 50k cap for UAV LiDAR reference data.
   \item Explicitly listed six UAVSAR polarimetric channels.
   \item Clarified LiDAR per-return attributes (intensity scaling, return number semantics).
   \item Added rationale for $\alpha=4$ density-aware Chamfer weighting on meter-scale data.
@@ -102,8 +102,10 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
   \item Added canopy height change computation method and one-tile exclusion note (N=5687 for that analysis only).
   \item Expanded discussion on asymmetric performance (loss vs. gain) and limitations for canopy growth detection.
   \item Clarified illustrative purpose of 8× Appendix figures vs. 2× production evaluation.
-  \item Inserted computational complexity and scalability discussion paragraph.
-  \item Revised and detailed data alignment and quality requirements paragraph; enumerated preprocessing and QA thresholds.
+  \item Documented the existing 10,000-point 3DEP input cap in Methods to bound attention context length (\textless1\% of tiles affected).
+  \item Inserted a complexity paragraph (Model Architecture) outlining sequence-length bounds (cap and $R_{\text{up}}{=}2$) and FlashAttention’s memory benefits.
+  \item Added a one-line note after Table~\ref{tab:model_variants} clarifying that parameter increases come from imagery encoders and fusion projections (independent of per-tile point counts).
+  \item Reframed QA thresholds as training/evaluation curation filters (not inference requirements) and added an Alignment and generalization paragraph discussing misregistration, cross-attention tolerance, and domain shift.
 \end{itemize}
 
 We appreciate the reviewers’ insights, which have strengthened the clarity, transparency, and reproducibility of the manuscript. We hope the revisions satisfactorily address all concerns.
