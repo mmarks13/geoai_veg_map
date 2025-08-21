@@ -7,6 +7,8 @@
 \usepackage{enumitem}
 \usepackage{xcolor}
 \usepackage{hyperref}
+\usepackage[utf8]{inputenc}
+
 \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
 \newcommand{\revA}{\textcolor{blue}}
 \newcommand{\revB}{\textcolor{teal}}
@@ -46,7 +48,7 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
 
   \item \emph{Line 306: What are the six UAVSAR channels?}
 
-  \response We explicitly list the six fully polarimetric multi-look cross-product channels now used: \texttt{HHHH}, \texttt{HVHV}, \texttt{VVVV}, \texttt{HHHV}, \texttt{HHVV}, and \texttt{HVVV}. Extraction and resampling pipeline details (chip size, 5 m resample) are also included.
+  \response We explicitly list the six fully polarimetric multi-look cross-product channels now used: \texttt{HHHH}, \texttt{HVHV}, \texttt{VVVV}, \texttt{HHHV}, \texttt{HHVV}, and \texttt{HVVV}. 
 
   \item \emph{Line 375: Clarify intensity and \emph{number of returns}.}
 
@@ -70,7 +72,7 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
 
   \item \emph{Lines 468–470: Lack of improvement for canopy gains vs. losses—request for discussion.}
 
-  \response The Discussion now elaborates that canopy loss regions benefit more from multi-modal fusion because (a) ancillary imagery captures disturbance signatures (spectral gaps, radar backscatter reduction) that align with removal of structure, whereas canopy gains often involve subtle vertical infill lacking distinctive cross-modal cues at imagery resolutions; and (b) temporal mismatch biases can over-penalize growth predictions when reference (UAV) includes emergent fine branches not inferable from older sparse LiDAR plus imagery snapshots. We note future work on higher temporal pairing and growth-focused augmentations.
+  \response We have added further discussion on this in the results section. The lack of improvement for canopy gains aligns with the original rationale laid out in our hypotheses: most gain tiles reflect modest vertical or volumetric accretion within an existing canopy framework already partially represented in the sparse legacy LiDAR, so the baseline can plausibly extrapolate them.
 
   \item \emph{Appendix Figures (A1–A3): Mixed 8× (growth) vs. 2× (loss) illustrations—consistency concern.}
 
@@ -106,6 +108,7 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
   \item Inserted a complexity paragraph (Model Architecture) outlining sequence-length bounds (cap and $R_{\text{up}}{=}2$) and FlashAttention’s memory benefits.
   \item Added a one-line note after Table~\ref{tab:model_variants} clarifying that parameter increases come from imagery encoders and fusion projections (independent of per-tile point counts).
   \item Reframed QA thresholds as training/evaluation curation filters (not inference requirements) and added an Alignment and generalization paragraph discussing misregistration, cross-attention tolerance, and domain shift.
+
 \end{itemize}
 
 We appreciate the reviewers’ insights, which have strengthened the clarity, transparency, and reproducibility of the manuscript. We hope the revisions satisfactorily address all concerns.
