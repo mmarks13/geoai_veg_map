@@ -7,6 +7,8 @@
 \usepackage{enumitem}
 \usepackage{xcolor}
 \usepackage{hyperref}
+\usepackage[utf8]{inputenc}
+
 \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
 \newcommand{\revA}{\textcolor{blue}}
 \newcommand{\revB}{\textcolor{teal}}
@@ -46,7 +48,7 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
 
   \item \emph{Line 306: What are the six UAVSAR channels?}
 
-  \response We explicitly list the six fully polarimetric multi-look cross-product channels now used: \texttt{HHHH}, \texttt{HVHV}, \texttt{VVVV}, \texttt{HHHV}, \texttt{HHVV}, and \texttt{HVVV}. Extraction and resampling pipeline details (chip size, 5 m resample) are also included.
+  \response We explicitly list the six fully polarimetric multi-look cross-product channels now used: \texttt{HHHH}, \texttt{HVHV}, \texttt{VVVV}, \texttt{HHHV}, \texttt{HHVV}, and \texttt{HVVV}. 
 
   \item \emph{Line 375: Clarify intensity and \emph{number of returns}.}
 
@@ -70,7 +72,7 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
 
   \item \emph{Lines 468–470: Lack of improvement for canopy gains vs. losses—request for discussion.}
 
-  \response The Discussion now elaborates that canopy loss regions benefit more from multi-modal fusion because (a) ancillary imagery captures disturbance signatures (spectral gaps, radar backscatter reduction) that align with removal of structure, whereas canopy gains often involve subtle vertical infill lacking distinctive cross-modal cues at imagery resolutions; and (b) temporal mismatch biases can over-penalize growth predictions when reference (UAV) includes emergent fine branches not inferable from older sparse LiDAR plus imagery snapshots. We note future work on higher temporal pairing and growth-focused augmentations.
+  \response We have added further discussion on this in the results section. The lack of improvement for canopy gains aligns with the original rationale laid out in our hypotheses: most gain tiles reflect modest vertical or volumetric accretion within an existing canopy framework already partially represented in the sparse legacy LiDAR, so the baseline can plausibly extrapolate them.
 
   \item \emph{Appendix Figures (A1–A3): Mixed 8× (growth) vs. 2× (loss) illustrations—consistency concern.}
 
@@ -83,11 +85,11 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
 \begin{enumerate}
   \item \emph{High computational complexity: Global attention over entire point cloud; parameter increase (fusion model 6.8M, +26\% over baseline).}
 
-  \response A new Discussion paragraph quantifies and contextualizes complexity: (i) parameter delta (+26\%) primarily from fusion projections and dual-modality encoders; (ii) global FlashAttention maintains exact attention while reducing memory bandwidth pressure; (iii) tile-level point counts are bounded (\textasciitilde50k reference, \textasciitilde25k sparse input) and we employ an adaptive voxel cap plus local–global separation to restrain quadratic scaling; (iv) we outline potential future reductions (sparse or clustered global attention, mixed-precision kernels, lightweight token merging). This addresses transparency and scalability considerations.
+  \response TBG
 
   \item \emph{High requirements for data alignment and quality; complex preprocessing; UAV:3DEP ratio > 2 may limit generalization.}
 
-  \response We revised the data alignment/quality subsection in the Discussion to: (a) enumerate the actual preprocessing pipeline (tiling, STAC ingestion, anisotropic voxel downsampling schedule, QA thresholds: UAV ≥16k points, 3DEP ≥200 points, UAV:3DEP ≥2.0, coverage ≥96\%, ≥5 points per 2 m cell); (b) justify thresholds as ensuring supervision richness for geometric learning and mitigating temporal misalignment artifacts; (c) acknowledge trade-offs in broader deployment where lower-density or misaligned datasets prevail; and (d) propose future relaxation and robustness experiments (e.g., synthetic misalignment augmentation, adaptive loss weighting, alignment confidence modeling) to extend generalization.
+  \response TBD
 \end{enumerate}
 
 \section*{Summary of Major Manuscript Changes}
@@ -103,7 +105,7 @@ For clarity, new or clarified text inserted into the manuscript is paraphrased (
   \item Expanded discussion on asymmetric performance (loss vs. gain) and limitations for canopy growth detection.
   \item Clarified illustrative purpose of 8× Appendix figures vs. 2× production evaluation.
   \item Inserted computational complexity and scalability discussion paragraph.
-  \item Revised and detailed data alignment and quality requirements paragraph; enumerated preprocessing and QA thresholds.
+  \item Revised and detailed data alignment and quality requirements paragraph.
 \end{itemize}
 
 We appreciate the reviewers’ insights, which have strengthened the clarity, transparency, and reproducibility of the manuscript. We hope the revisions satisfactorily address all concerns.
