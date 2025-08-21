@@ -1,0 +1,115 @@
+% Revision Response Letter
+% Manuscript: Attention-Based Enhancement of Airborne LiDAR across Vegetated Landscapes using SAR and Optical Imagery Fusion
+% File: revision1_response.tex
+
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue}
+\newcommand{\revA}{\textcolor{blue}}
+\newcommand{\revB}{\textcolor{teal}}
+\newcommand{\commentlabel}[1]{\textbf{Comment #1.}}
+\newcommand{\response}{\textbf{Response.} }
+\setlist[itemize]{topsep=2pt,itemsep=2pt,parsep=0pt}
+\setlist[enumerate]{topsep=4pt,itemsep=4pt,parsep=0pt}
+
+\begin{document}
+
+\begin{center}
+{\Large \textbf{Response to Reviewers}}\\[4pt]
+Manuscript Title: \emph{Attention-Based Enhancement of Airborne LiDAR across Vegetated Landscapes using SAR and Optical Imagery Fusion}\\[2pt]
+Journal: \emph{Remote Sensing} (MDPI)\\[2pt]
+Date: \today
+\end{center}
+
+We thank the reviewers for their careful reading and constructive feedback. Below we reproduce each comment (in italics) followed by our point-by-point response. All manuscript changes referenced below have been incorporated into the revised submission (file: \texttt{remote\_sensing\_submission.tex}). Section / table / figure references refer to the revised manuscript. Minor grammar/style edits are not exhaustively enumerated.
+
+For clarity, new or clarified text inserted into the manuscript is paraphrased (not always quoted verbatim) in the responses below.
+
+\section*{Reviewer 1}
+
+\begin{enumerate}
+
+  \item \emph{Make the notations consistent in the manuscript text and the Figures (e.g., Figure 6: \texttt{in\_features} vs $D_{p\_in}$ / $D_{p\_out}$; difference between $D_{p\_in}$ and $D_{feat}$).}
+
+  \response We added a concise \emph{Figure notation bridge} paragraph in the Notation Conventions subsection explicitly mapping the diagram placeholders \texttt{in\_features}, \texttt{out\_features} (and \texttt{out\_feat}) to the manuscript symbols $D_{p\_in}$ and $D_{p\_out}$. We clarified that Mermaid diagramming limitations (lack of math subscripts) necessitated the plain-text labels. We also clarified that $D_{p\_in}$/$D_{p\_out}$ denote point feature dimensionalities entering/leaving an LG-PAB stage, while $D_{p\_feat}$ refers to the working point feature embedding dimension used across blocks.
+
+  \item \emph{Specify the exact layer setup (conv sizes, pooling window, MLP dimensions, stage naming ambiguity).}
+
+  \response We made three changes: (i) inline parenthetical specifications for the patch tokenization stem: Conv1 ($C_{in}\rightarrow D_{token}/2$, $3\times3$, stride 1, pad 1), Conv2 ($D_{token}/2\rightarrow D_{token}$, $3\times3$, stride 1, pad 1), followed by AvgPool (kernel=stride=10) producing a $4\times4$ patch grid; (ii) inline MLP expansion factors and depth-wise convolution kernel ($D_{token}\rightarrow 4D_{token} \rightarrow D_{token}$, depth-wise $k=3$) in the Transformer block; (iii) added an Appendix table (Table~\ref{tab:layer_specs}) enumerating remaining architectural components: fusion projection layers, LG-PAB local/global FFNs, position generator MLP (256$\rightarrow$64$\rightarrow$32$\rightarrow$3), coordinate decoder MLP (256$\rightarrow$128$\rightarrow$64$\rightarrow$32$\rightarrow$3), positional encoding MLPs, heads, and dropout values. We also replaced the ambiguous \emph{Stage 3} wording with \emph{Transformer Encoder Block} for consistency.
+
+  \item \emph{Line 273–274: Justification for 50k point threshold in a 10 m × 10 m tile.}
+
+  \response We clarified that the adaptive anisotropic voxel filtering targets a \textasciitilde50k ceiling as a balance between (a) preserving fine vertical structure and (b) managing memory and compute; the ceiling is set to be at least 2× larger than the densest sparse 3DEP input clouds so supervision remains substantially denser without incurring quadratic cost escalation in global attention. The adaptive horizontal voxel enlargement (vertical edge fixed at half horizontal) continues until the cap is met, ensuring controlled density normalization across tiles.
+
+  \item \emph{Line 306: What are the six UAVSAR channels?}
+
+  \response We explicitly list the six fully polarimetric multi-look cross-product channels now used: \texttt{HHHH}, \texttt{HVHV}, \texttt{VVVV}, \texttt{HHHV}, \texttt{HHVV}, and \texttt{HVVV}. Extraction and resampling pipeline details (chip size, 5 m resample) are also included.
+
+  \item \emph{Line 375: Clarify intensity and \emph{number of returns}.}
+
+  \response We corrected the wording and clarified that the additional per-return attributes for 3DEP LiDAR include: (1) intensity (original 16-bit pulse magnitude, standardized via global mean/std), (2) return number (ordinal), and (3) number of returns (pulse multiplicity). All are standardized prior to model ingestion.
+
+  \item \emph{Table 7: Choice of $\alpha=4$ vs. reference value 1000 for density-aware Chamfer loss.}
+
+  \response We added explicit rationale: the prior work’s $\alpha=1000$ was tuned for small, normalized coordinate scales. Our coordinates remain in meters over larger absolute extents; using $\alpha=1000$ collapsed gradients numerically (dominating scale factors), so we re-tuned and empirically selected $\alpha=4$ to maintain loss sensitivity and stable optimization on large-scale vegetation geometry. This adaptation is now stated directly adjacent to the loss description.
+
+  \item \emph{Figure 8 comparability of Chamfer Distance (CD) values between Input vs. Reference and Model vs. Reference given differing point counts.}
+
+  \response We now explicitly caution (Results section and figure caption) that CD is sampling-density sensitive; the Input (sparse 3DEP vs. UAV reference) CD serves only as a qualitative sanity anchor. All quantitative model comparisons are conducted at matched upsampling (2×) against a common \textasciitilde50k-point reference, ensuring direct comparability.
+
+  \item \emph{Related: Does differing point count magnitude affect CD comparability across scenarios?}
+
+  \response Addressed with the clarification above: yes, raw CD magnitudes differ when sampling densities change; hence only equal-density (upsampled baseline/fusion outputs vs. standardized reference) CDs are interpreted quantitatively.
+
+  \item \emph{Line 457–458: Canopy height change estimation details; missing tile in counts (5688 vs. 5687).}
+
+  \response We appended a methods sentence describing net canopy height change computation (tile-level aggregation of per-point canopy heights; difference between UAV reference and temporally earlier 3DEP). One tile contained a spurious below-ground 3DEP return producing an undefined canopy change metric after quality control; it was excluded for the canopy-change correlation analysis only (N=5687). All other analyses (RQ1–RQ2) retained the full 5688 tiles. A parenthetical note documents this exclusion.
+
+  \item \emph{Lines 468–470: Lack of improvement for canopy gains vs. losses—request for discussion.}
+
+  \response The Discussion now elaborates that canopy loss regions benefit more from multi-modal fusion because (a) ancillary imagery captures disturbance signatures (spectral gaps, radar backscatter reduction) that align with removal of structure, whereas canopy gains often involve subtle vertical infill lacking distinctive cross-modal cues at imagery resolutions; and (b) temporal mismatch biases can over-penalize growth predictions when reference (UAV) includes emergent fine branches not inferable from older sparse LiDAR plus imagery snapshots. We note future work on higher temporal pairing and growth-focused augmentations.
+
+  \item \emph{Appendix Figures (A1–A3): Mixed 8× (growth) vs. 2× (loss) illustrations—consistency concern.}
+
+  \response We clarified in the Appendix note and individual captions that figures are illustrative only; all reported metrics use the production 2× models. We retained 8× growth illustrations to enhance the visibility of subtle structural emergence, explicitly noting that these are not part of quantitative evaluation.
+
+\end{enumerate}
+
+\section*{Reviewer 2}
+
+\begin{enumerate}
+  \item \emph{High computational complexity: Global attention over entire point cloud; parameter increase (fusion model 6.8M, +26\% over baseline).}
+
+  \response A new Discussion paragraph quantifies and contextualizes complexity: (i) parameter delta (+26\%) primarily from fusion projections and dual-modality encoders; (ii) global FlashAttention maintains exact attention while reducing memory bandwidth pressure; (iii) tile-level point counts are bounded (\textasciitilde50k reference, \textasciitilde25k sparse input) and we employ an adaptive voxel cap plus local–global separation to restrain quadratic scaling; (iv) we outline potential future reductions (sparse or clustered global attention, mixed-precision kernels, lightweight token merging). This addresses transparency and scalability considerations.
+
+  \item \emph{High requirements for data alignment and quality; complex preprocessing; UAV:3DEP ratio > 2 may limit generalization.}
+
+  \response We revised the data alignment/quality subsection in the Discussion to: (a) enumerate the actual preprocessing pipeline (tiling, STAC ingestion, anisotropic voxel downsampling schedule, QA thresholds: UAV ≥16k points, 3DEP ≥200 points, UAV:3DEP ≥2.0, coverage ≥96\%, ≥5 points per 2 m cell); (b) justify thresholds as ensuring supervision richness for geometric learning and mitigating temporal misalignment artifacts; (c) acknowledge trade-offs in broader deployment where lower-density or misaligned datasets prevail; and (d) propose future relaxation and robustness experiments (e.g., synthetic misalignment augmentation, adaptive loss weighting, alignment confidence modeling) to extend generalization.
+\end{enumerate}
+
+\section*{Summary of Major Manuscript Changes}
+\begin{itemize}
+  \item Added \emph{Figure notation bridge} mapping figure labels to formal symbols.
+  \item Inline architectural specifications (convolutional stem, pooling, MLP expansion) plus comprehensive Appendix layer specification table.
+  \item Clarified downsampling 50k cap.
+  \item Explicitly listed six UAVSAR polarimetric channels.
+  \item Clarified LiDAR per-return attributes (intensity scaling, return number semantics).
+  \item Added rationale for $\alpha=4$ density-aware Chamfer weighting on meter-scale data.
+  \item Explicit caution on Chamfer Distance comparability across differing point densities; figure caption adjustments.
+  \item Added canopy height change computation method and one-tile exclusion note (N=5687 for that analysis only).
+  \item Expanded discussion on asymmetric performance (loss vs. gain) and limitations for canopy growth detection.
+  \item Clarified illustrative purpose of 8× Appendix figures vs. 2× production evaluation.
+  \item Inserted computational complexity and scalability discussion paragraph.
+  \item Revised and detailed data alignment and quality requirements paragraph; enumerated preprocessing and QA thresholds.
+\end{itemize}
+
+We appreciate the reviewers’ insights, which have strengthened the clarity, transparency, and reproducibility of the manuscript. We hope the revisions satisfactorily address all concerns.
+
+\vspace{1em}
+\noindent Sincerely,\\[4pt]
+Michael Marks (on behalf of all authors)
+
+\end{document}

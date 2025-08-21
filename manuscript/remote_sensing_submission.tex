@@ -1,10 +1,10 @@
-%  LaTeX support: latex@mdpi.com 
+%  LaTeX support: latex@mdpi.com
 %  For support, please attach all files needed for compiling as well as the log file, and specify your operating system, LaTeX version, and LaTeX editor.
 
 %=================================================================
 \documentclass[remotesensing,article,submit,pdftex,moreauthors]{Definitions/mdpi}
 
-% \documentclass[preprints,article,accept,pdftex,moreauthors]{Definitions/mdpi} 
+% \documentclass[preprints,article,accept,pdftex,moreauthors]{Definitions/mdpi}
 % For posting an early version of this manuscript as a preprint, you may use "preprints" as the journal. Changing "submit" to "accept" before posting will remove line numbers.
 
 % Below journals will use APA reference format:
@@ -25,7 +25,7 @@
 %---------
 % article
 %---------
-% The default type of manuscript is "article", but can be replaced by: 
+% The default type of manuscript is "article", but can be replaced by:
 % abstract, addendum, article, benchmark, book, bookreview, briefcommunication, briefreport, casereport, changes, clinicopathologicalchallenge, comment, commentary, communication, conceptpaper, conferenceproceedings, correction, conferencereport, creative, datadescriptor, discussion, entry, expressionofconcern, extendedabstract, editorial, essay, erratum, fieldguide, hypothesis, interestingimages, letter, meetingreport, monograph, newbookreceived, obituary, opinion, proceedingpaper, projectreport, reply, retraction, review, perspective, protocol, shortnote, studyprotocol, supfile, systematicreview, technicalnote, viewpoint, guidelines, registeredreport, tutorial,  giantsinurology, urologyaroundtheworld
 % supfile = supplementary materials
 
@@ -46,9 +46,9 @@
 
 %=================================================================
 % MDPI internal commands - do not modify
-\firstpage{1} 
-\makeatletter 
-\setcounter{page}{\@firstpage} 
+\firstpage{1}
+\makeatletter
+\setcounter{page}{\@firstpage}
 \makeatother
 \pubvolume{1}
 \issuenum{1}
@@ -56,10 +56,10 @@
 \pubyear{2025}
 \copyrightyear{2025}
 %\externaleditor{Firstname Lastname} % More than 1 editor, please add `` and '' before the last editor name
-\datereceived{ } 
+\datereceived{ }
 \daterevised{ } % Comment out if no revised date
-\dateaccepted{ } 
-\datepublished{ } 
+\dateaccepted{ }
+\datepublished{ }
 %\datecorrected{} % For corrected papers: "Corrected: XXX" date in the original paper.
 %\dateretracted{} % For retracted papers: "Retracted: XXX" date in the original paper.
 \hreflink{https://doi.org/} % If needed use \linebreak
@@ -73,7 +73,7 @@
 % Add packages and commands here. The following packages are loaded in our class file: fontenc, inputenc, calc, indentfirst, fancyhdr, graphicx, epstopdf, lastpage, ifthen, float, amsmath, amssymb, lineno, setspace, enumitem, mathpazo, booktabs, titlesec, etoolbox, tabto, xcolor, colortbl, soul, multirow, microtype, tikz, totcount, changepage, attrib, upgreek, array, tabularx, pbox, ragged2e, tocloft, marginnote, marginfix, enotez, amsthm, natbib, hyperref, cleveref, scrextend, url, geometry, newfloat, caption, draftwatermark, seqsplit
 % cleveref: load \crefname definitions after \begin{document}
 \usepackage{siunitx}
-\usepackage{makecell} 
+\usepackage{makecell}
 % \usepackage{wrapfig}
 
 
@@ -84,7 +84,7 @@
 \newenvironment{widefigure}[1][]{%
   \begin{figure}[#1]\begin{adjustwidth}{-\extralength}{0cm}\centering}{%
   \end{adjustwidth}\end{figure}}
-  
+
 %=================================================================
 % Please use the following mathematics environments: Theorem, Lemma, Corollary, Proposition, Characterization, Property, Problem, Example, ExamplesandDefinitions, Hypothesis, Remark, Definition, Notation, Assumption
 %% For proofs, please use the proof environment (the amsthm package is loaded by the MDPI class).
@@ -101,7 +101,7 @@
 % Author Orchid ID: enter ID or remove command
 \newcommand{\orcidauthorA}{0009-0005-3782-9431} % Michael Marks
 \newcommand{\orcidauthorB}{0000-0002-1632-1955} % Dan Sousa
-\newcommand{\orcidauthorC}{0000-0003-0314-4598} % Janet Franklin 
+\newcommand{\orcidauthorC}{0000-0003-0314-4598} % Janet Franklin
 
 
 % Authors, for the paper
@@ -112,8 +112,8 @@
 \AuthorNames{Michael Marks, Daniel Sousa, Janet Franklin}
 
 % MDPI internal command: Authors, for citation in the left column, only choose below one of them according to the journal style
-% If this is a Chicago style journal 
-% (arts, genealogy, histories, humanities, jintelligence, laws, literature, religions, risks, socsci): 
+% If this is a Chicago style journal
+% (arts, genealogy, histories, humanities, jintelligence, laws, literature, religions, risks, socsci):
 % Lastname, Firstname, Firstname Lastname, and Firstname Lastname.
 % \isAPAStyle{%
 %        \AuthorCitation{Marks, M., Sousa, D., \& Franklin, J.} % Placeholder for APA
@@ -124,8 +124,8 @@
 %         \AuthorCitation{Marks, M.; Sousa, D.; Franklin, J.} % ACS Style
 %         }
 % }
-% If this is a APA style journal 
-% (admsci, behavsci, businesses, econometrics, economies, education, ejihpe, games, humans, ijfs, journalmedia, jrfm, languages, psycholint, publications, tourismhosp, youth): 
+% If this is a APA style journal
+% (admsci, behavsci, businesses, econometrics, economies, education, ejihpe, games, humans, ijfs, journalmedia, jrfm, languages, psycholint, publications, tourismhosp, youth):
 % Lastname, F., Lastname, F., \& Lastname, F.
 
 % Affiliations / Addresses (Add [1] after \address if there is only one affiliation.)
@@ -146,7 +146,7 @@ $^{2}$ \quad Center for Open Geographical Sciences, San Diego State University, 
 
 %\conference{} % An extended version of a conference paper
 
-% Abstract (Do not insert blank lines, i.e. \\) 
+% Abstract (Do not insert blank lines, i.e. \\)
 \abstract{Accurate and timely 3D vegetation structure information is essential for ecological modeling and land management. However, these needs often cannot be met with existing airborne LiDAR surveys, whose broad-area coverage comes with trade-offs in point density and update frequency. To address these limitations, this study introduces a deep learning framework built on attention mechanisms, the fundamental building block of modern large language models. The framework upsamples sparse ($<22 pt/m^2$) airborne LiDAR point clouds by fusing them with stacks of multi-temporal optical (NAIP) and L-band quad-polarized Synthetic Aperture Radar (UAVSAR) imagery. Utilizing a novel Local-Global Point Attention Block (LG-PAB), our model directly enhances 3D point cloud density and accuracy in vegetated landscapes by learning structure directly from the point cloud itself. Results in fire-prone Southern California foothill and montane ecosystems demonstrate that fusing both optical and radar imagery reduces reconstruction error (measured by Chamfer distance) compared to using LiDAR alone or with a single image modality. Notably, the fused model substantially mitigates errors arising from vegetation changes over time, particularly in areas of canopy loss, thereby increasing the utility of historical LiDAR archives. This research presents a novel approach for direct 3D point cloud enhancement, moving beyond traditional raster-based methods and offering a pathway to more accurate and up-to-date vegetation structure assessments.}
 
 % Keywords
@@ -208,7 +208,7 @@ $^{2}$ \quad Center for Open Geographical Sciences, San Diego State University, 
 
 \section{Introduction}
 
-Accurate three-dimensional (3D) vegetation structure information at submeter spatial scales now plays a key role in applications ranging from wildfire risk modeling \cite{martin-ducup_unlocking_2025} to biodiversity and habitat assessment \cite{Merrick2013Into3D,moudry2023vegetation}. The way vegetation is arranged—its height, density, and continuity—directly influences both fire hazard and fire behavior, and impacts how species use the landscape. Fuels, as opposed to topography and weather, are the only element of the fire behavior triangle that land managers can directly manipulate \cite{agee_influence_1996}, making structural data vital for strategic interventions. Simultaneously, vegetation structure governs microclimate, resource availability, and landscape connectivity, making it a cornerstone of ecological monitoring and conservation planning \cite{guo2018integrating, mahata2023microclimate,ustin2021current}. Airborne light detection and ranging (LiDAR) has emerged as a premier tool for capturing this structural complexity, enabling detailed, landscape-scale mapping of vegetation structure that was previously unattainable with passive optical imagery \cite{Merrick2013Into3D, belov2019capabilities, guo2020lidar}. 
+Accurate three-dimensional (3D) vegetation structure information at submeter spatial scales now plays a key role in applications ranging from wildfire risk modeling \cite{martin-ducup_unlocking_2025} to biodiversity and habitat assessment \cite{Merrick2013Into3D,moudry2023vegetation}. The way vegetation is arranged—its height, density, and continuity—directly influences both fire hazard and fire behavior, and impacts how species use the landscape. Fuels, as opposed to topography and weather, are the only element of the fire behavior triangle that land managers can directly manipulate \cite{agee_influence_1996}, making structural data vital for strategic interventions. Simultaneously, vegetation structure governs microclimate, resource availability, and landscape connectivity, making it a cornerstone of ecological monitoring and conservation planning \cite{guo2018integrating, mahata2023microclimate,ustin2021current}. Airborne light detection and ranging (LiDAR) has emerged as a premier tool for capturing this structural complexity, enabling detailed, landscape-scale mapping of vegetation structure that was previously unattainable with passive optical imagery \cite{Merrick2013Into3D, belov2019capabilities, guo2020lidar}.
 
 National mapping programs such as the U.S. Geological Survey's 3D Elevation Program (3DEP) now collect LiDAR data over large areas, but these surveys have important limitations. Typical 3DEP acquisitions are performed at modest point densities (on the order of \qtyrange{0.5}{20}{pts\per\square\meter}) \cite{wu2016evaluating} and with much of the national LiDAR baseline acquired over an extended period (e.g., roughly 2015-2023), a significant portion of this data is now several years old, a situation exacerbated by the lack of a guaranteed or universal update timeline \cite{usgs_what_2019}. Consequently, the available point clouds often reflect conditions from several years prior and are relatively sparse compared to those obtained from other platforms (e.g., uncrewed aerial vehicles, or UAVs, see figure \ref{fig:intro_pt_clouds}).
 \begin{widefigure}%[!b]
@@ -268,7 +268,7 @@ The primary scientific contribution of our study is not merely a new network arc
             \item \textbf{Hypothesis:} Errors will scale with canopy change and be greater for losses than gains. Model performance will stratify accordingly: the fused model will best mitigate these errors, followed by single-modality models, with the baseline performing poorest, though it may capture some uniform growth.
             \item \textbf{Reasoning:} The predicted error asymmetry stems from the different nature of vegetation dynamics. Growth is often an incremental extrapolation of existing structure, whereas disturbance-driven loss (e.g., fire, treefall) can be abrupt and total. This creates a complete information void for removed canopy in the legacy LiDAR, a more significant reconstruction challenge than modeling gradual growth.
         \end{itemize}
-\end{itemize} 
+\end{itemize}
 
 \begin{figure}[!t]
   \centering
@@ -284,7 +284,7 @@ The primary scientific contribution of our study is not merely a new network arc
 \section{Materials and Methods}
 
 % \begin{wrapfigure}[20]{r}{0.48\textwidth}
-%   % \vspace{-38pt}  
+%   % \vspace{-38pt}
 %   % \captionsetup{aboveskip=2pt, belowskip=0pt} % tighten caption gap
 %   \centering
 %   \includegraphics[trim=0mm 0mm 0mm 0mm, clip, width=\linewidth]
@@ -309,7 +309,7 @@ The core challenge addressed by this research is the enhancement of sparse and o
 
 
 The study area (Figure \ref{fig:overall_study_area}) consists of two separate sites in Southern California, USA.
-The first study area includes parts of the 24-square-kilometer Sedgwick Reserve, managed by the University of California, Santa Barbara, and the adjacent 11.5 square kilometer Midland School property. Both sit within the San Rafael Mountain foothills of Santa Barbara County (Figure \ref{fig:sedgwick_study_area}). 
+The first study area includes parts of the 24-square-kilometer Sedgwick Reserve, managed by the University of California, Santa Barbara, and the adjacent 11.5 square kilometer Midland School property. Both sit within the San Rafael Mountain foothills of Santa Barbara County (Figure \ref{fig:sedgwick_study_area}).
 
 
 \begin{figure}%[!b]
@@ -323,7 +323,7 @@ The area spans elevations from 287 to 852 meters and supports a mosaic of vegeta
 
 
 % % \vspace*{\fill} % push content down from above
-% \begin{table}[H] 
+% \begin{table}[H]
 %   \centering
 %   \caption{UAV LiDAR sites used as ground truth for model development}
 %   \label{tab:lidar_sites}
@@ -350,7 +350,7 @@ The area spans elevations from 287 to 852 meters and supports a mosaic of vegeta
     2 & 12  & Midland School   & 23 Oct 2023 & Training \\
     3 &  9  & Midland School   & 23 Oct 2023 & Test/Validation \\
     4 & 11  & Midland School   & 28 Sep 2023 & Test/Validation \\
-    5 & 197 & Volcan Mountain  & 25 Oct 2024 & 
+    5 & 197 & Volcan Mountain  & 25 Oct 2024 &
         \makecell[l]{70\% Training\\ 30\% Test/Validation} \\
     \bottomrule
   \end{tabular}
@@ -359,7 +359,7 @@ The area spans elevations from 287 to 852 meters and supports a mosaic of vegeta
 % \vspace*{\fill} % push content up from below
 The second study area (Figure \ref{fig:volcan_mtn_study_area}) comprises 197 hectares within and adjacent to the Volcan Mountain Wilderness Preserve in the Peninsular Range of Southern California. The reserve is managed by San Diego County and the Volcan Mountain Foundation and ranges in elevation from about 1220 meters to over 1675 meters.
 % \newpage
- It hosts diverse plant communities, including oak woodlands, chaparral, mixed conifer forests, and grasslands.  To ensure robust model evaluation across this ecological gradient, roughly 30 percent of the area (58 hectares) was reserved for testing and validation (Table \ref{tab:lidar_sites}). The three holdout zones (Figure \ref{fig:volcan_mtn_study_area}) used for model evaluation were selected to reflect the site’s vegetation diversity: the northernmost area includes chaparral that replaced forest following wildfires in 2003 and 2005; the central zone contains dense mixed-conifer and riparian vegetation interspersed with oak woodlands and chaparral; and the southernmost zone is predominantly semi-continuous oak canopy. 
+ It hosts diverse plant communities, including oak woodlands, chaparral, mixed conifer forests, and grasslands.  To ensure robust model evaluation across this ecological gradient, roughly 30 percent of the area (58 hectares) was reserved for testing and validation (Table \ref{tab:lidar_sites}). The three holdout zones (Figure \ref{fig:volcan_mtn_study_area}) used for model evaluation were selected to reflect the site’s vegetation diversity: the northernmost area includes chaparral that replaced forest following wildfires in 2003 and 2005; the central zone contains dense mixed-conifer and riparian vegetation interspersed with oak woodlands and chaparral; and the southernmost zone is predominantly semi-continuous oak canopy.
 
 \begin{figure}[!t]
     \centering
@@ -375,7 +375,7 @@ The second study area (Figure \ref{fig:volcan_mtn_study_area}) comprises 197 hec
 
 \subsection{The Data}
 
-All remote‐sensing assets were co-registered within a common tiling framework covering both study sites.  
+All remote‐sensing assets were co-registered within a common tiling framework covering both study sites.
 First, the UAV‐LiDAR acquisition footprints were tessellated into 10 m × 10 m analysis tiles with 15\% overlap, yielding an initial set of 9,800 tiles at Sedgwick–Midland and 26,557 tiles at Volcan Mountain.  Each tile served as the spatial key for assembling a four-layer data stack (Table \ref{tab:data_summary})
 
 % \begin{enumerate}[leftmargin=*]
@@ -407,12 +407,13 @@ NAIP (Optical) & Ancillary Input & 0.6–1 m GSD \newline \textit{Coverage: 2014
 By standardizing on overlapping 10 m patches, we guarantee that each training example draws from the same footprint across sensors—ensuring the model learns consistent, co-registered features from LiDAR, SAR, and imagery.
 
 \subsubsection{UAV LiDAR Data}
-\textit{Sedgwick and Midland Sites} - Between June and October 2023, UAV LiDAR data were collected by San Diego State Geography Department Staff on the Sedgwick and Midland School Sites using a DJI Matrice 300 drone equipped with a TrueView 515 LiDAR. The drone was flown at an altitude of approximately 60 meters above ground level, achieving a point density of around 300 points per square meter. 
+\textit{Sedgwick and Midland Sites} - Between June and October 2023, UAV LiDAR data were collected by San Diego State Geography Department Staff on the Sedgwick and Midland School Sites using a DJI Matrice 300 drone equipped with a TrueView 515 LiDAR. The drone was flown at an altitude of approximately 60 meters above ground level, achieving a point density of around 300 points per square meter.
 
 \textit{Volcan Mountain Site} - On October 25, 2024, the same Geography Department staff conducted flights using a  DJI Matrice 350 drone equipped with a TrueView 540 LIDAR system. This newer drone and sensor was flown at a higher altitude of approximately 110 meters above ground level, and still achieved a point density of over 600 points per square meter.
 
 \subsubsection{Crewed Airborne LiDAR}
-The available crewed airborne LiDAR (C-ALS) data includes two separate 3DEP datasets. The  Sedgwick  3DEP dataset, collected in 2018, has a point density of 22 pts/m\textsuperscript{2}. The C-ALS data for the Volcan Mountain site was collected between October 2015 and November 2016 and has a point density of 6.3 pts/m\textsuperscript{2} \citep{usgs_usgs_2016}. Both datasets were obtained from Microsoft's Planetary Computer \citep{us_geological_survey_3d_elevation_program_usgs_2023,planetary_computer}
+The available crewed airborne LiDAR (C-ALS) data includes two separate 3DEP datasets. The  Sedgwick  3DEP dataset, collected in 2018, has a point density of 22 pts/m\textsuperscript{2}. The C-ALS data for the Volcan Mountain site was collected between October 2015 and November 2016 and has a point density of 6.3 pts/m\textsuperscript{2} \citep{usgs_usgs_2016}. Both datasets were obtained from Microsoft's Planetary Computer \citep{us_geological_survey_3d_elevation_program_usgs_2023,planetary_computer}.
+In addition to the point X, Y, and Z values we include three per-return attributes—intensity (16-bit integer 0–65,535 pulse magnitude), return number (ordinal of the return within its pulse), and number of returns (total returns from that pulse)—each standardized using the global mean and standard deviation computed across the full 3DEP dataset.
 
 \begin{table}[H]
 \centering
@@ -446,18 +447,17 @@ The available crewed airborne LiDAR (C-ALS) data includes two separate 3DEP data
 }
 \end{table}
 \subsubsection{Synthetic Aperture Radar (SAR)}
-Fully polarimetric L-band imagery (23.84 cm wavelength) from NASA’s UAVSAR system was obtained with the Alaska Satellite Facility’s \texttt{asf\_search} Python API \citep{alaska_search}.  The UAVSAR flights were conducted from a Gulfstream-III platform with bidirectional acquisitions from opposite look directions at an average altitude of 12,495 meters, providing multi-perspective radar coverage of the landscape at 6.17-meter ground resolution. The specific campaigns and acquisition details for each study site are summarized in Table \ref{tab:imagery_timeline_v2}. For every \SI{10}{m} × \SI{10}{m} 3DEP tile we extracted a co-centered \SI{20}{m} × \SI{20}{m} UAVSAR chip to accommodate layover and shadow extent, then bilinearly resampled each chip to \SI{5}{m} GSD before fusion with NAIP imagery and LiDAR. 
+Fully polarimetric L-band imagery (23.84 cm wavelength) from NASA’s UAVSAR system was obtained with the Alaska Satellite Facility’s \texttt{asf\_search} Python API \citep{alaska_search}.  The UAVSAR flights were conducted from a Gulfstream-III platform with bidirectional acquisitions from opposite look directions at an average altitude of 12,495 meters, providing multi-perspective radar coverage of the landscape at 6.17-meter ground resolution. We utilized six fully polarimetric multi-look cross-product channels: \texttt{HHHH}, \texttt{HVHV}, \texttt{VVVV}, \texttt{HHHV}, \texttt{HHVV}, and \texttt{HVVV}. The specific campaigns and acquisition details for each study site are summarized in Table \ref{tab:imagery_timeline_v2}. For every \SI{10}{m} × \SI{10}{m} 3DEP tile we extracted a co-centered \SI{20}{m} × \SI{20}{m} UAVSAR chip to accommodate layover and shadow extent, then bilinearly resampled each chip to \SI{5}{m} GSD before fusion with NAIP imagery and LiDAR.
 
 
 \subsubsection{High-Resolution Aerial Imagery}
-We ingested NAIP imagery through the Microsoft Planetary Computer STAC API \citep{planetary_computer} for survey years 2014–2022.  
+We ingested NAIP imagery through the Microsoft Planetary Computer STAC API \citep{planetary_computer} for survey years 2014–2022.
 NAIP provides four-band (Red, Green, Blue, Near-Infrared) orthoimagery of the conterminous United States, collected at peak green-up on a two- to three-year cycle.  Prior to the 2016 flight season, data were delivered at 1 m ground-sample distance (GSD); since 2016 the native resolution has been 60 cm. A complete timeline of these acquisitions and their resolutions is provided in Table \ref{tab:imagery_timeline_v2}. For every 10 m × 10 m 3DEP tile we extracted a 20 m × 20 m NAIP chip centered on the same point to accommodate viewing-geometry variance and to capture neighboring shadows.  All NAIP scenes were then resampled to a common 50 cm grid.
 
 
 
 \subsection{Data Cleaning and Preprocessing}
-To reduce computational load and give the upsampling network a uniform-density target, we downsampled the UAV LiDAR for every tile with an adaptive anisotropic voxel grid. Each cloud was first voxelized at a 4 cm × 4 cm × 2 cm resolution; if more than 50 000 points remained, the horizontal voxel edge was incrementally enlarged (keeping the vertical edge at 50\% of that value) and the filter reapplied until the count fell below the limit. The resulting point sets preserve fine vertical structure while standardizing horizontal density. The dataset was partitioned into training, validation, and test sets using reference polygons to ensure the holdout sets captured the full environmental gradients found in the training data. We enforced quality constraints by requiring a UAV-to-3DEP point ratio above 2.0, and a minimum of 16000 UAV LiDAR points and 200 3DEP points per tile.
-
+To reduce computational load and give the upsampling network a uniform-density target, we downsampled the UAV LiDAR for every tile with an adaptive anisotropic voxel grid. Each cloud was first voxelized at a 4 cm × 4 cm × 2 cm resolution; if more than 50 000 points remained, the horizontal voxel edge was incrementally enlarged (keeping the vertical edge at 50\% of that value) and the filter reapplied until the count fell below the limit. The 50k ceiling was chosen as a practical balance between retaining fine structural detail and constraining training complexity—set to be at least 2× larger than the largest sparse 3DEP input clouds to ensure sufficient supervisory density while limiting memory/FLOP growth. The resulting point sets preserve fine vertical structure while standardizing horizontal density. The dataset was partitioned into training, validation, and test sets using reference polygons to ensure the holdout sets captured the full environmental gradients found in the training data. We enforced quality constraints by requiring a UAV-to-3DEP point ratio above 2.0, and a minimum of 16000 UAV LiDAR points and 200 3DEP points per tile.
 
 \subsection{Data Augmentation}
 To increase the model's robustness and prevent overfitting, we expanded the training dataset from 24,000 to 40,000 tiles via data augmentation\cite{zhu2024advancements, shorten2019survey}. First, we preferentially selected source tiles for this process, prioritizing those with high structural complexity (z-variance) and large vegetation changes. Each selected source tile was then used to generate a new, augmented sample by applying a random combination of transformations. These included geometric operations (rotations and reflections) applied to all data layers, and point cloud-specific perturbations (random point removal and jittering) applied only to the input LiDAR data.
@@ -466,13 +466,13 @@ To increase the model's robustness and prevent overfitting, we expanded the trai
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \subsection{Model Architecture}
 \label{sec:architecture}
-Our multimodal upsampling framework transforms a sparse 3DEP point cloud, plus co-registered NAIP and UAVSAR image chips, into a denser 3-D point cloud (Fig.~\ref{fig:pipeline}).  
-The network is built around the \textbf{Local–Global Point Attention Block} (LG-PAB; §\ref{sec:lgpab}), which provides permutation‐invariant feature learning, optional feature-guided upsampling, and long-range geometric context.  
-Five macro–components are arranged in a feed-forward sequence:  
+Our multimodal upsampling framework transforms a sparse 3DEP point cloud, plus co-registered NAIP and UAVSAR image chips, into a denser 3-D point cloud (Fig.~\ref{fig:pipeline}).
+The network is built around the \textbf{Local–Global Point Attention Block} (LG-PAB; §\ref{sec:lgpab}), which provides permutation‐invariant feature learning, optional feature-guided upsampling, and long-range geometric context.
+Five macro–components are arranged in a feed-forward sequence:
 (1) point feature extraction, (2) imagery encoding, (3) cross-attention fusion, (4) feature expansion and refinement, and (5) point decoding.
 
 \begin{widefigure}
-    %\vspace{-20pt}  
+    %\vspace{-20pt}
     \centering
     \includegraphics[trim=0mm 0mm 0mm 9mm, clip, width=1\linewidth]{manuscript/figures/Overall_Architecture.png}
     \caption{The overall multimodal upsampling architecture. Key components include Local–Global Point Attention Blocks, modality-specific imagery encoders for processing optical (NAIP) and radar (UAVSAR) data, and a cross-attention fusion module for combining imagery and LiDAR features.}
@@ -492,6 +492,8 @@ Throughout this section, we use the following notation for tensor dimensions:
     \item Other: $R_{\text{up}}$ (upsampling ratio, default 2), $k_{\text{knn}} = 16$ (k-nearest neighbors).
 \end{itemize}
 For tensors, we use the notation TensorSymbol: (dim$_1$, dim$_2$, ..., dim$_k$) to describe their dimensions.
+
+\noindent\textit{Figure notation bridge.} In Fig.~\ref{fig:lgpab} the generic diagram labels \texttt{in\_features} and \texttt{out\_features} (and the shortened \texttt{out\_feat} on two arrows) correspond to $D_{\text{p\_in}}$ and $D_{\text{p\_out}}$ in the above notation. (We used Mermaid for the schematic, which does not support mathematical subscripts, so plain text placeholders were used.)
 
 Given an input cloud $P_{\text{in}}: (N_{\text{pts}}, D_{\text{coord}})$ with points $\{\mathbf{x}_i\}_{i=1}^{N_{\text{pts}}}\subset\mathbb{R}^{D_{\text{coord}}}$ and attributes $\mathbf{a}_i: (D_{\text{attr}})$, the network outputs $P_{\text{out}}: (N_{\text{pts\_up}}, D_{\text{coord}})$ with points $\{\hat{\mathbf{x}}_j\}_{j=1}^{N_{\text{pts\_up}}}$ where $N_{\text{pts\_up}} = R_{\text{up}} \cdot N_{\text{pts}}$ (typically $R_{\text{up}} = 2$).
 
@@ -518,27 +520,27 @@ An overview is:
 \begin{figure}[!b]
   \centering
   \includegraphics[trim=0mm 0mm 36mm 0mm, clip, width=0.5\textwidth]{manuscript/figures/LG-PAB.png}
-  \caption{Flowchart of the Local–Global Point Attention Block (LG-PAB), the core computational unit used across the feature extraction, expansion, and refinement stages. The block applies local attention via a multi-head Point Transformer, optional upsampling with learned position offsets, and global multi-head Flash Attention for broader spatial context. A feed-forward MLP follows both the local and global attention blocks.} 
+  \caption{Flowchart of the Local–Global Point Attention Block (LG-PAB), the core computational unit used across the feature extraction, expansion, and refinement stages. The block applies local attention via a multi-head Point Transformer, optional upsampling with learned position offsets, and global multi-head Flash Attention for broader spatial context. A feed-forward MLP follows both the local and global attention blocks.}
   \label{fig:lgpab}
 \end{figure}
 % \end{wrapfigure}%
 
-Figure~\ref{fig:lgpab} presents a flow-chart of the \emph{Local–Global Point Attention Block}, the fundamental unit used three times in our architecture (extraction, expansion, and refinement stages).  
+Figure~\ref{fig:lgpab} presents a flow-chart of the \emph{Local–Global Point Attention Block}, the fundamental unit used three times in our architecture (extraction, expansion, and refinement stages).
 Each LG-PAB converts an input tuple $\langle X, P \rangle$ consisting of point features $X: (N_{\text{curr\_pts}}, D_{\text{p\_in}})$ and 3-D coordinates $P: (N_{\text{curr\_pts}}, D_{\text{coord}})$ into refined (and optionally upsampled) features and positions. The block proceeds through the stages that appear in the diagram:
 
 \begin{enumerate}[leftmargin=*]
-\item \textbf{Local Attention Block}  
-      A \textsc{Multi-Head Point Transformer} operates on a $k_{\text{knn}}$-nearest-neighbour graph ($k_{\text{knn}}{=}16$) to capture fine-scale geometry. Its output passes through a two-layer \textsc{Feed-Forward Network} (FFN) with GELU activation, producing an intermediate tensor 
-      $Z: (N_{\text{curr\_pts}}, R_{\text{up}} \cdot D_{\text{p\_out}})$.  
+\item \textbf{Local Attention Block}
+      A \textsc{Multi-Head Point Transformer} operates on a $k_{\text{knn}}$-nearest-neighbour graph ($k_{\text{knn}}{=}16$) to capture fine-scale geometry. Its output passes through a two-layer \textsc{Feed-Forward Network} (FFN) with GELU activation, producing an intermediate tensor
+      $Z: (N_{\text{curr\_pts}}, R_{\text{up}} \cdot D_{\text{p\_out}})$.
       When the upsampling ratio $R_{\text{up}}{=}1$ this step already delivers the final per-point features.
 
-\item[\emph{2\,a}] \textbf{Feature-Guided Upsampling (optional)}  
-      If $R_{\text{up}}{>}1$ (expansion stage) the intermediate tensor is reshaped to $[N_{\text{curr\_pts}}, R_{\text{up}}, D_{\text{p\_out}}]$, effectively cloning each feature vector $R_{\text{up}}$ times.  
-      A small \textbf{Position-Generator MLP} then predicts a 3-D offset for every clone, yielding new coordinates  
-      $\hat{P} = P^{\text{rep}} + \Delta P: (N_{\text{curr\_pts}} \cdot R_{\text{up}}, D_{\text{coord}})$.  
+\item[\emph{2\,a}] \textbf{Feature-Guided Upsampling (optional)}
+      If $R_{\text{up}}{>}1$ (expansion stage) the intermediate tensor is reshaped to $[N_{\text{curr\_pts}}, R_{\text{up}}, D_{\text{p\_out}}]$, effectively cloning each feature vector $R_{\text{up}}$ times.
+      A small \textbf{Position-Generator MLP} then predicts a 3-D offset for every clone, yielding new coordinates
+      $\hat{P} = P^{\text{rep}} + \Delta P: (N_{\text{curr\_pts}} \cdot R_{\text{up}}, D_{\text{coord}})$.
       The features are flattened back to $[N_{\text{curr\_pts}} \cdot R_{\text{up}}, D_{\text{p\_out}}]$.
 
-\item \textbf{Global Attention Block}  
+\item \textbf{Global Attention Block}
       To impose long-range coherence, the upsampled (or original) features are processed by \textsc{Position-Aware Global Flash Attention}. Coordinates are first embedded by a two-layer MLP, concatenated to the features, and fed to a four-head FlashAttention layer that attends across \emph{all} points in the tile. A second FFN refines the attended features, after which residual connections and LayerNorm complete the block.
 \end{enumerate}
 
@@ -548,7 +550,7 @@ Each LG-PAB converts an input tuple $\langle X, P \rangle$ consisting of point f
 \label{sec:img_enc}
 
 % \begin{wrapfigure}[20]{r}{0.45\textwidth}
-%   \vspace{-25pt}  
+%   \vspace{-25pt}
 %   \centering
 %   \includegraphics[trim=0mm 0mm 20mm 0mm, clip, width=0.43\textwidth]{manuscript/figures/Imagery_Encoders.png}
 %   \caption{Architecture diagram of the imagery encoders. Image stacks from NAIP (optical) and UAVSAR (radar) pass sequentially through Patch Tokenization, Transformer Encoder blocks for spatial context modeling, and a Temporal GRU-Attention Head for temporal aggregation.}
@@ -556,7 +558,7 @@ Each LG-PAB converts an input tuple $\langle X, P \rangle$ consisting of point f
 % \end{wrapfigure}%
 
 \begin{figure}
-    %\vspace{-20pt}  
+    %\vspace{-20pt}
     \centering
     \includegraphics[trim=0mm 0mm 20mm 0mm, clip, width=0.7\linewidth]{manuscript/figures/Imagery_Encoders.png}
     \caption{Architecture diagram of the imagery encoders. Image stacks from NAIP (optical) and UAVSAR (radar) pass sequentially through Patch Tokenization, Transformer Encoder blocks for spatial context modeling, and a Temporal GRU-Attention Head for temporal aggregation.}
@@ -565,32 +567,34 @@ Each LG-PAB converts an input tuple $\langle X, P \rangle$ consisting of point f
 
 Optical (NAIP) and radar (UAVSAR) image chips are processed by a \emph{shared five-stage encoder} (with modality specific weights) that converts each image stack into a fixed set of patch tokens. The encoder stages—illustrated in Fig.~\ref{fig:imgenc}—are:
 
-\begin{enumerate}[leftmargin=*]      
-\item \textbf{Patch Tokenization.}  
-      A two-layer Conv–GELU–Conv stem with stride-1 followed by average pooling (stride=$\texttt{patch\_size}$) extracts features on a $4\times4$ grid.  
-      This design mirrors Shifted Patch Tokenization, which adds local texture bias to Vision Transformers (ViTs) and improves sample efficiency on small datasets \cite{lee2021vision}.  
-      The $N_{\text{patch}}=16$ patches are flattened to $Z_{\text{tok}}: (N_{\text{patch}}, D_{\text{token}})$ and normalized via LayerNorm.
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Patch Tokenization.}
+      A two-layer Conv–GELU–Conv stem with stride-1 followed by average pooling (stride=$\texttt{patch\_size}$) extracts features on a $4\times4$ grid.
+      This design mirrors Shifted Patch Tokenization, which adds local texture bias to Vision Transformers (ViTs) and improves sample efficiency on small datasets \cite{lee2021vision}.
+  (Conv1: $C_{in}\rightarrow D_{\text{token}}/2$, $3\times3$, stride 1, pad 1; Conv2: $D_{\text{token}}/2\rightarrow D_{\text{token}}$, $3\times3$, stride 1, pad 1; AvgPool: kernel=stride=$\texttt{patch\_size}=10$.) The $N_{\text{patch}}=16$ patches are flattened to $Z_{\text{tok}}: (N_{\text{patch}}, D_{\text{token}})$ and normalized via LayerNorm.
 
 
-\item \textbf{2-D Positional Encoding.}  
-      Normalized patch centers are embedded via a two-layer MLP and added to the tokens:  
+\item \textbf{2-D Positional Encoding.}
+      Normalized patch centers are embedded via a two-layer MLP and added to the tokens:
       $Z_{\text{pos}} = Z_{\text{tok}} + \text{MLP}_{\text{pos}}(x,y)$.
 
-\item \textbf{Transformer Encoder Block.}  
-      A 4-head self-attention layer is paired with LayerScale ($\gamma \approx 10^{-5}$), a learnable scalar that stabilizes deep transformers \cite{touvron2021going}.  
-      The accompanying MLP includes a depth-wise 1-D convolution, following the ConViT approach to introduce a soft convolutional inductive bias \cite{dascoli2021convit}.  
-      The block outputs $Z_{\text{enc}}: (N_{\text{patch}}, D_{\text{token}})$.
+\item \textbf{Transformer Encoder Block.}
+      A 4-head self-attention layer is paired with LayerScale ($\gamma \approx 10^{-5}$), a learnable scalar that stabilizes deep transformers \cite{touvron2021going}.
+      The accompanying MLP includes a depth-wise 1-D convolution, following the ConViT approach to introduce a soft convolutional inductive bias \cite{dascoli2021convit}.
+  MLP: $D_{\text{token}} \rightarrow 4 D_{\text{token}}$ (depth-wise 1-D conv $k=3$) $\rightarrow D_{\text{token}}$. The block outputs $Z_{\text{enc}}: (N_{\text{patch}}, D_{\text{token}})$.
 
 
-\item \textbf{Temporal GRU–Attention Head.}  
+\item \textbf{Temporal GRU–Attention Head.}
       For inputs with temporal length $N_{\text{time}}$, a bidirectional Gated Recurrent Unit (GRU) with attention pooling aggregates tokens into patch descriptors $E_{\text{patch}}: (N_{\text{patch}}, D_{\text{token}})$.
 \end{enumerate}
 
+Full per-component layer specifications (including fusion projections, LG-PAB FFNs, upsampling position generator, and coordinate decoder) appear in Appendix Table~\ref{tab:layer_specs} for transparency and reproducibility.
+
 \paragraph{UAVSAR Look Angle Mean Pooling}
 \begin{itemize}[leftmargin=*]
-\item \textbf{UAVSAR.}  
-      Input $I_{\text{uavsar}}: (N_{\text{time}}, N_{\text{looks}}, C_{\text{uavsar}}, H_{\text{uavsar\_pr}}, W_{\text{uavsar\_pr}})$ with $N_{\text{looks}} \leq 2$.  
-      After stage 3, we average features across available look angles to produce $Z_{\text{avg}}: (N_{\text{time}}, N_{\text{patch}}, D_{\text{token}})$ before temporal processing.
+\item \textbf{UAVSAR.}
+      Input $I_{\text{uavsar}}: (N_{\text{time}}, N_{\text{looks}}, C_{\text{uavsar}}, H_{\text{uavsar\_pr}}, W_{\text{uavsar\_pr}})$ with $N_{\text{looks}} \leq 2$.
+      After the Transformer Encoder Block, we average features across available look angles to produce $Z_{\text{avg}}: (N_{\text{time}}, N_{\text{patch}}, D_{\text{token}})$ before temporal processing.
       Otherwise, the pipeline matches NAIP.
 \end{itemize}
 
@@ -603,16 +607,16 @@ Both encoders output token matrices $E_{\text{opt}}$ and $E_{\text{rad}}: (N_{\t
 \label{sec:pipeline}
 
 \paragraph{1) Local–Global Feature Extraction.}
-The sparse 3DEP cloud—concatenated with intensity, return number, and number or returns (6 attributes total)—is processed by the first \emph{Local–Global Point Attention Block} (§\ref{sec:lgpab}). The output is a set of point features $F: (N_{\text{pts}}, D_{\text{p\_feat}})$ that encode both neighborhood morphology and tile-level context.
+The sparse 3DEP cloud—concatenated with intensity, return number, and number of returns (6 attributes total)—is processed by the first \emph{Local–Global Point Attention Block} (§\ref{sec:lgpab}). The output is a set of point features $F: (N_{\text{pts}}, D_{\text{p\_feat}})$ that encode both neighborhood morphology and tile-level context.
 
 \paragraph{2) Imagery Encoders.}
-Co-registered NAIP and UAVSAR chips are independently tokenized and fed to lightweight Transformer encoders ($N_{\text{patch}}$ patches, embed dim $D_{\text{token}}$).  
-The optical encoder (RGB+NIR) outputs patch embeddings $E_{\text{opt}}: (N_{\text{patch}}, D_{\text{token}})$, whereas the radar encoder (L-band polarimetry) outputs $E_{\text{rad}}: (N_{\text{patch}}, D_{\text{token}})$.  
+Co-registered NAIP and UAVSAR chips are independently tokenized and fed to lightweight Transformer encoders ($N_{\text{patch}}$ patches, embed dim $D_{\text{token}}$).
+The optical encoder (RGB+NIR) outputs patch embeddings $E_{\text{opt}}: (N_{\text{patch}}, D_{\text{token}})$, whereas the radar encoder (L-band polarimetry) outputs $E_{\text{rad}}: (N_{\text{patch}}, D_{\text{token}})$.
 When multiple acquisition dates exist, per-modality tokens are fused temporally via a shared GRU–attention head.
 
 \paragraph{3) Cross-Attention Fusion.}
-Point features act as \emph{queries} and image patches as \emph{keys/values} in a four-head cross-attention block.  
-Scaled dot-product scores are masked for patches whose centroid is more than 8 meters from the query point. 
+Point features act as \emph{queries} and image patches as \emph{keys/values} in a four-head cross-attention block.
+Scaled dot-product scores are masked for patches whose centroid is more than 8 meters from the query point.
 The fused representation $F_{\text{fused}}: (N_{\text{pts}}, D_{\text{p\_feat}})$ augments every point with spectral texture and volumetric back-scatter cues, improving discrimination of canopy surfaces versus gaps.
 
 \paragraph{4) Feature-Guided Upsampling.}
@@ -647,7 +651,7 @@ To systematically evaluate our research questions, we established a rigorous tra
   \end{tabular}
 \end{table}
 
-To isolate the impact of each data modality, we trained four distinct model variants (Table \ref{tab:model_variants}). A baseline model was trained using only the sparse 3DEP LiDAR input. Two single-modality models were trained by fusing the LiDAR with either NAIP optical imagery or UAVSAR radar data. Finally, a fully fused model was trained using all three data sources simultaneously. 
+To isolate the impact of each data modality, we trained four distinct model variants (Table \ref{tab:model_variants}). A baseline model was trained using only the sparse 3DEP LiDAR input. Two single-modality models were trained by fusing the LiDAR with either NAIP optical imagery or UAVSAR radar data. Finally, a fully fused model was trained using all three data sources simultaneously.
 %---------------------------------------------------------------
 % 2) Model variants
 %---------------------------------------------------------------
@@ -667,7 +671,7 @@ To isolate the impact of each data modality, we trained four distinct model vari
   \end{tabular}
 \end{table}
 
-All model variants were trained using an identical architecture, set of hyperparameters, and training protocol to ensure a fair comparison. Key model configuration parameters, including feature dimensions and attention head counts, are provided in Table \ref{tab:model_config_a}. The models were trained for 100 epochs on four NVIDIA L40 GPUs using the ScheduleFreeAdamW optimizer \cite{defazio_road_2024} and a density-aware Chamfer distance loss function (Eq. 9 in \cite{wu_density-aware_2021}). Further details on the training protocol and hardware are listed in Table \ref{tab:training_protocol}.
+All model variants were trained using an identical architecture, set of hyperparameters, and training protocol to ensure a fair comparison. Key model configuration parameters, including feature dimensions and attention head counts, are provided in Table \ref{tab:model_config_a}. The models were trained for 100 epochs on four NVIDIA L40 GPUs using the ScheduleFreeAdamW optimizer \cite{defazio_road_2024} and a density-aware Chamfer distance loss function (Eq. 9 in \cite{wu_density-aware_2021}). We set the loss hyperparameter $\alpha$ to 4, adapting the recommendation in \cite{wu_density-aware_2021} for our un-normalized, meter-scale data to prevent the loss function's exponential term from saturating and causing vanishing gradients. Further details on the training protocol and hardware are listed in Table \ref{tab:training_protocol}.
 
 \begin{table}[htbp]
   \centering
@@ -725,11 +729,14 @@ All model variants were trained using an identical architecture, set of hyperpar
 \end{table}
 
 We evaluated our research questions using non-parametric statistical tests to account for non-normality in the error distribution. For RQ1 and RQ2, we used Wilcoxon signed-rank tests to compare reconstruction error (measured by Chamfer distance) between models, with median percentage change and rank-biserial correlation as effect size measures. For RQ3, we used Spearman rank correlations to analyze the relationship between reconstruction error and absolute canopy height change across all models. We further split the dataset into canopy gains (N=2423) and losses (N=3264) to examine potential asymmetries in error patterns. Fisher r-to-z transformations were used to statistically compare correlation coefficients between models. All significance values are reported at $\alpha$=0.05, with bold values indicating statistically significant results.
+For each tile, net canopy height change was calculated as the difference in the mean 95th percentile point height (z-value) across 2 m × 2 m grid cells between the UAV LiDAR and 3DEP clouds (N=5687; one tile removed due to a spurious below-ground return in 3DEP preventing canopy-change computation).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{Results}
 
-A summary of the reconstruction performance, measured by Chamfer distance (CD), across all models is presented in Table \ref{tab:descriptive_stats}. The 3DEP LiDAR-only baseline model provided a substantial improvement over using the raw, sparse input data, reducing the median error by over 60\% and tightening the error distribution (Figure \ref{fig:baseline_v_input_boxplot} and Figure \ref{fig:baseline_pt_cloud_example}). When comparing the performance across all models (Figure \ref{fig:boxplot_model_comparison}), the fused model consistently achieved the lowest median error and smallest interquartile range, indicating the most robust performance. To address our first research question (RQ1) on the impact of individual modalities, we compared the error distributions of the single-modality models against the baseline (Table \ref{tab:rq1_rq2_combined}).
+A summary of the reconstruction performance, measured by Chamfer distance (CD), across all models is presented in Table \ref{tab:descriptive_stats}.
+The 3DEP LiDAR-only baseline model yields a markedly lower CD and a tighter distribution than the raw, sparse input (Figure \ref{fig:baseline_v_input_boxplot}; Figure \ref{fig:baseline_pt_cloud_example}); however, because CD can vary with sampling density and point counts, we present this contrast as a qualitative sanity check rather than a normalized comparison \citep{wu2021dcd,gradpu2023}.
+When comparing the performance across all models (Figure \ref{fig:boxplot_model_comparison}), the fused model consistently achieved the lowest median error and smallest interquartile range, indicating the most robust performance. To address our first research question (RQ1) on the impact of individual modalities, we compared the error distributions of the single-modality models against the baseline (Table \ref{tab:rq1_rq2_combined}).
 
 
 \begin{table}[htbp]
@@ -754,12 +761,13 @@ Fused & 0.965 & 0.298 & 5.753 & 0.393 \\
 \begin{figure}[!b]
     \centering
     \includegraphics[width=0.9\linewidth]{manuscript/figures/baseline_v_input_boxplot.png}
-    \caption{Distribution of Chamfer distance reconstruction errors comparing raw input data to 3DEP LiDAR-only baseline model. Horizontal boxplots show median (red line), interquartile range (colored boxes), and 10th-90th percentile whiskers. The baseline model demonstrates substantial improvement, reducing median error from 0.858 m to 0.340 m with a significantly tighter distribution. Outliers beyond the 90th percentile are excluded for clarity.}
+    % \caption{Distribution of Chamfer distance reconstruction errors comparing raw input data to 3DEP LiDAR-only baseline model. Horizontal boxplots show median (red line), interquartile range (colored boxes), and 10th-90th percentile whiskers. The baseline model demonstrates substantial improvement, reducing median error from 0.858 m to 0.340 m with a significantly tighter distribution. Outliers beyond the 90th percentile are excluded for clarity.}
+    \caption{Distribution of Chamfer distance (CD) reconstruction errors comparing raw input data to the 3DEP LiDAR-only baseline model, each evaluated against the reference. Horizontal boxplots show the median (red line), interquartile range (colored boxes), and 10th–90th percentile whiskers; outliers beyond the 90th percentile are excluded. The baseline model shows a lower median CD (0.340 m vs. 0.858 m) with a tighter distribution.\footnote{CD can vary with sampling density and point counts; since the input and predictions (2$\times$ upsampled) differ in size relative to the reference, these magnitudes are not a normalized comparison and are shown for qualitative context \citep{wu2021dcd,lin2023hcd}.}}
     \label{fig:baseline_v_input_boxplot}
 \end{figure}
 
 \begin{widefigure}[!t]
-    \vspace{-15pt}  
+    \vspace{-15pt}
     \centering
     \includegraphics[width=1\linewidth]{manuscript/figures/baseline_prediction_example.png}
     \caption{A comparison of baseline (3DEP LiDAR only) model output vs input}
@@ -799,7 +807,7 @@ Fused & 0.965 & 0.298 & 5.753 & 0.393 \\
 
 
 \begin{widefigure}
-    \vspace{-20pt}  
+    \vspace{-20pt}
     \centering
     \includegraphics[width=1\linewidth]{manuscript/figures/model_output_example.png}
     \caption{Example tile where no major vegetation change occurred between the 3DEP aerial LiDAR (2015--2018) and UAV LiDAR (2023--2024). The optical+SAR fusion model more accurately recovers fine-scale canopy structure compared to the LiDAR-only model, producing a point cloud that more closely matches the UAV LiDAR reference (lower Chamfer Distance).}
@@ -858,7 +866,7 @@ Baseline vs Fused (z) & 0.768 & p=0.442 & \textbf{6.074} & p$<$0.001 \\
 \end{table}
 
 
-All models showed strong correlations with absolute canopy height change, confirming that reconstruction error systematically increases with vegetation structure changes since the original LiDAR collection. The baseline model exhibited the strongest correlation with canopy change ($\rho=0.650$), while the fused model showed the weakest ($\rho=0.582$), with this difference being statistically significant ($z=5.868$, $p<0.001$). Importantly, the extended analysis revealed this pattern was driven primarily by canopy losses, where the baseline model performed significantly worse than all other models, particularly the fusion approach ($z=6.074$, $p<0.001$), while for canopy gains, all models performed similarly without statistically significant differences. These findings partially support our hypothesis that advanced models better mitigate error from canopy changes, but specifically for canopy removal scenarios where legacy LiDAR contains no information about the removed vegetation (Figures \ref{fig:single_veg_loss_example} and \ref{fig:error_vs_cnpy_chng}).
+All models showed strong correlations with absolute canopy height change, confirming that reconstruction error systematically increases with vegetation structure changes since the original LiDAR collection. The baseline model exhibited the strongest correlation with canopy change ($\rho=0.650$), while the fused model showed the weakest ($\rho=0.582$), with this difference being statistically significant ($z=5.868$, $p<0.001$). Importantly, the extended analysis revealed this pattern was driven primarily by canopy losses, where the baseline model performed significantly worse than all other models, particularly the fusion approach ($z=6.074$, $p<0.001$), while for canopy gains, all models performed similarly without statistically significant differences. These findings partially support our hypothesis that advanced models better mitigate error from canopy changes, but specifically for canopy removal scenarios where legacy LiDAR contains no information about the removed vegetation (Figures \ref{fig:single_veg_loss_example} and \ref{fig:error_vs_cnpy_chng}). For canopy gains the limited separation is consistent with our original reasoning: most growth cases represent incremental vertical or volumetric accretion within an existing structural envelope already partly encoded in the sparse legacy LiDAR, allowing even the baseline to extrapolate plausibly. Ancillary optical and SAR cues add comparatively little discriminative signal for these modest positive changes, whereas abrupt canopy removal creates a true information void that fused imagery helps fill.
 
 \begin{widefigure}
     \centering
@@ -868,7 +876,7 @@ All models showed strong correlations with absolute canopy height change, confir
 \end{widefigure}
 
 \begin{widefigure}
-    \vspace{-20pt}  
+    \vspace{-20pt}
     \centering
     \includegraphics[width=1\linewidth]{manuscript/figures/error_vs_cnpy_chng.png}
     \caption{Relationship between point cloud reconstruction error (Chamfer distance) and net canopy height change since the original LiDAR survey. Scatter points show individual sample tiles (N=5,687) with LOWESS trend lines for each model; outliers above the 99.5th percentile for both error and height change metrics were excluded for visualization clarity. Negative values represent canopy losses while positive values represent gains. The baseline model (blue) shows substantially higher error rates for large canopy losses compared to models incorporating additional remote sensing data (NAIP optical, UAVSAR radar, and fused approaches), while all models perform similarly for canopy gains.}
@@ -890,10 +898,14 @@ The developed Local-Global Point Attention Block (LG-PAB) proved to be a robust 
 
 Despite these promising results, some limitations exist. The improvements, while statistically significant, were modest in terms of percentage change in Chamfer distance. This suggests that while fusion helps, there might be inherent limits to upsampling very sparse LiDAR or that the current metrics may not fully capture all aspects of structural improvement relevant to ecological applications. Furthermore, our study was conducted in Southern California's Mediterranean ecosystems; model performance and the relative contributions of optical versus radar data might vary in different biomes with distinct vegetation structures and phenology.
 
+PLACEHOLDER: Computational complexity represents a practical consideration for deployment. While FlashAttention optimizes memory efficiency for the global attention mechanism, processing entire point clouds (thousands of points per tile) still demands substantial computational resources. The fused model's 6.8M parameters represent a 26\% increase over the baseline, with the quadratic scaling of global attention being the primary contributor. For large-scale operational deployment, this could necessitate GPU-accelerated inference or simplified architectures that trade some accuracy for computational efficiency.
+
+PLACEHOLDER: Data alignment and quality requirements impose another practical constraint. Our approach relies on precise spatial co-registration of LiDAR, NAIP, and UAVSAR data sources, achieved through careful preprocessing including ground control point refinement and tile-based quality assessment. The requirement for UAV-to-3DEP point ratios above 2.0 and minimum point thresholds may limit applicability in scenarios with lower data quality or sparser reference datasets. In practice, relaxed alignment tolerances or lower reference densities would likely result in performance degradation, though the magnitude of this impact warrants investigation in future work focused on operational deployment scenarios.
+
 Beyond the primary 2x upsampling task, we also conducted a preliminary investigation into the model's potential for higher-ratio densification (8x). This exploratory model was scaled up significantly, with larger feature dimensions (512 point, 192 image), more local attention heads for extraction and expansion (16), and a total of ~125M parameters. With our hardware, this increased model size necessitated reducing the batch size to one per GPU. The results (Figure \ref{fig:upsampling_comparison_8x}) show that the architecture can indeed produce highly dense outputs that qualitatively approach the reference data. The appendix provides further qualitative examples from both the standard 2x and experimental 8x models, illustrating their performance across different vegetation change scenarios (Figures \ref{fig:appendix_growth1}--\ref{fig:appendix_loss}).
 
 \begin{widefigure}[!b]
-    \vspace{-10pt}  
+    \vspace{-10pt}
     \centering
     \includegraphics[width=1\linewidth]{manuscript/figures/example_8x_v_2x.png}
     \caption{Comparison of the standard 2x upsampling model (optical+SAR, 6.8 million parameters) output versus a preliminary high-density 8x model (optical+SAR, 125 million parameters)}
@@ -911,7 +923,7 @@ This research successfully demonstrates that attention-based deep learning, leve
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% \vspace{6pt} 
+% \vspace{6pt}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -927,7 +939,7 @@ This research successfully demonstrates that attention-based deep learning, leve
 
 \acknowledgments{The authors wish to express their sincere gratitude to Lloyd L. ("Pete") Coulter (Center for Earth Systems Analysis Research, Department of Geography, SDSU) for his skillful piloting and management of all UAV LiDAR data acquisition campaigns; this data was foundational to the research presented. Separately, during the preparation of this manuscript, generative AI models (including Google's Gemini, Anthropic's Claude, and OpenAI's ChatGPT) were utilized to assist with language refinement, conceptual brainstorming, generating preliminary code structures, and code debugging. The authors have reviewed and edited all AI-generated suggestions and take full responsibility for the content of this publication.}
 
-\conflictsofinterest{The authors declare no conflicts of interest. The funders had no role in the design of the study; in the collection, analyses, or interpretation of data; in the writing of the manuscript; or in the decision to publish the results} 
+\conflictsofinterest{The authors declare no conflicts of interest. The funders had no role in the design of the study; in the collection, analyses, or interpretation of data; in the writing of the manuscript; or in the decision to publish the results}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Optional
@@ -937,7 +949,7 @@ This research successfully demonstrates that attention-based deep learning, leve
 \abbreviations{Abbreviations}{
 The following abbreviations are used in this manuscript:\\
 
-\noindent 
+\noindent
 \begin{tabular}{@{}ll}
 3DEP & 3D Elevation Program \\
 C-ALS & Crewed Airborne LiDAR \\
@@ -970,7 +982,7 @@ ViT & Vision Transformer \\
 % \reftitle{References}
 
 % % Please provide either the correct journal abbreviation (e.g. according to the “List of Title Word Abbreviations” http://www.issn.org/services/online-services/access-to-the-ltwa/) or the full name of the journal.
-% % Citations and References in Supplementary files are permitted provided that they also appear in the reference list here. 
+% % Citations and References in Supplementary files are permitted provided that they also appear in the reference list here.
 
 % %=====================================
 % % References, variant A: external bibliography
@@ -1002,17 +1014,44 @@ ViT & Vision Transformer \\
 \appendixtitles{no} % Leave argument "no" if all appendix headings stay EMPTY (then no dot is printed after "Appendix A"). If the appendix sections contain a heading then change the argument to "yes".
 \appendixstart
 \appendix
+% Appendix visualization note (Reviewer 1 Fig A3 concern)
+\begin{table}[H]
+  \centering
+  \caption{Detailed layer specifications not fully enumerated in the main text. All experiments use $D_{\text{p\_feat}}=256$, $D_{\text{token}}=128$, upsampling ratio $R_{\text{up}}=2$, and KNN $k=16$.}
+  \label{tab:layer_specs}
+  \small
+  \begin{tabular}{p{3.2cm} p{10.8cm}}
+    	oprule
+    Component & Specification \\
+    \midrule
+    Patch Conv Stem & Conv1 $C_{in}\rightarrow D_{tok}/2$ ($3\times3$, s=1,p=1) – GELU – Conv2 $D_{tok}/2\rightarrow D_{tok}$ ($3\times3$, s=1,p=1) – AvgPool (k=stride=10) – LayerNorm. \\
+    Transformer Encoder MLP & $D_{tok} \rightarrow 4D_{tok}$ – depth-wise 1-D conv (k=3) – GELU – $\rightarrow D_{tok}$ (LayerScale $\gamma\approx10^{-5}$; 4 heads self-attn). \\
+    Temporal GRU Head & Bi-GRU hidden=$D_{tok}$ (fwd+bwd) – attention pooling (Linear $2D_{tok}\rightarrow1$). \\
+    Cross-Attention Fusion & Point query proj: Linear $256\rightarrow256$; NAIP/UAVSAR key \/ value proj: Linear $(128+pos_{patch})\rightarrow256$ (pos enc dim 24); multi-head (4) scaled dot-product; post-concat MLP: Linear $C\rightarrow C$ – GELU – Linear $C\rightarrow256$ + residual + LayerNorm. \\
+    LG-PAB Local Attention & Multi-head PointTransformerConv (4 heads) over KNN graph ($k=16$); per-head out dim $256/4$; FFN after local attn: $256\rightarrow512\rightarrow256$ (GELU). \\
+    LG-PAB Global Attention & Position MLP $3\rightarrow32\rightarrow32$; concatenate with features; 4-head global FlashAttention; FFN: $256\rightarrow512\rightarrow256$ (GELU). \\
+    Feature-Guided Upsampling & Intermediate reshape $[N,R,256]$; Position-Generator MLP $256\rightarrow64\rightarrow32\rightarrow3$ (GELU); feature clones flattened to $(R\cdot N,256)$. \\
+    Coordinate Decoder & MLP $256\rightarrow128\rightarrow64\rightarrow32\rightarrow3$ (GELU) producing residual offsets. \\
+    Normalization & LayerNorm after major residual joins (fusion output; after local and global attention outputs). \\
+    Dropout & Imagery encoder \/ fusion attention: 0.02–0.10; point global attention: 0.02 (no dropout in local PointTransformerConv). \\
+    Positional Encodings & Global point attention position MLP (32 dims); patch sinusoidal encoding dim 24. \\
+    Optimizer & ScheduleFreeAdamW (shared across variants; see main text Table~\ref{tab:training_protocol}). \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\noindent\textit{Appendix visualization note:} All quantitative metrics in the manuscript are derived from the production 2$\times$ upsampling models. The two vegetation growth examples below use an experimental 8$\times$ model \emph{only} to improve visual legibility of subtle new canopy structure (higher point density reveals incremental infill); these outputs are illustrative and not part of reported statistics. The vegetation loss example is shown with the production 2$\times$ fusion model to reflect the evaluated configuration.
 \begin{widefigure}[H]
     \centering
     \includegraphics[width=1\linewidth]{manuscript/figures/veg_growth_8x.png}
-    \caption{Example of vegetation growth reconstruction (using the experimental 8x upsampling model for better visual clarity). The model successfully infers new canopy structure (center) that is absent in the input 3DEP LiDAR but present in the recent UAV LiDAR reference.}
+  \caption{Example of vegetation growth reconstruction (experimental 8$\times$ model for illustrative visual clarity only; all reported metrics use the production 2$\times$ model). The model successfully infers new canopy structure (center) that is absent in the input 3DEP LiDAR but present in the recent UAV LiDAR reference.}
     \label{fig:appendix_growth1}
 \end{widefigure}
 
 \begin{widefigure}[H]
     \centering
     \includegraphics[width=1\linewidth]{manuscript/figures/veg_growth2_8x.png}
-    \caption{A second example of vegetation growth reconstruction with the 8x model.}
+  \caption{Second vegetation growth example (experimental 8$\times$ visualization only; quantitative results use the 2$\times$ model).}
     \label{fig:appendix_growth2}
 \end{widefigure}
 
@@ -1020,7 +1059,7 @@ ViT & Vision Transformer \\
 \begin{widefigure}[H]
     \centering
     \includegraphics[width=1\linewidth]{manuscript/figures/veg_loss_2x.png}
-    \caption{Example of the standard 2x fusion model correctly identifying vegetation loss. The model removes vegetation  present in the outdated input LiDAR (left) to match the  state shown in the recent UAV LiDAR reference (right), highlighting the value of multi-modal fusion for change detection.}
+  \caption{Vegetation loss example using the production 2$\times$ fusion model (configuration used for all quantitative evaluation). The model removes vegetation present in the outdated input LiDAR (left) to match the state shown in the recent UAV LiDAR reference (right), highlighting the value of multi-modal fusion for change detection.}
    \label{fig:appendix_loss}
 \end{widefigure}
 
