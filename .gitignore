@@ -13,3 +13,10 @@ data/*
 *.ipynb
 *.json
 *.log
+*to.pdf
+*.out
+*.fls
+*.aux
+*latexmk
+*.eps
+*synctex.gz

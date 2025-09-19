@@ -74,10 +74,22 @@
 % cleveref: load \crefname definitions after \begin{document}
 \usepackage{siunitx}
 \usepackage{makecell}
+\usepackage{threeparttable}
 % \usepackage{wrapfig}
 
 
 \usepackage{graphicx,changepage}
+
+% --- Unicode compatibility fixes ---
+% Map Unicode minus (U+2212) to a regular ASCII minus to avoid compilation errors
+\DeclareUnicodeCharacter{2212}{-}
+
+% --- Disable editor highlighting boxes ---
+% The MDPI editing markup uses \hl{...} (from soul), which is fragile in moving
+% arguments (captions, headings) and breaks compilation. Neutralize it to a no-op.
+\makeatletter
+\renewcommand{\hl}[1]{#1}
+\makeatother
 
 % -------------------------------------------------------------------
 
@@ -212,7 +224,7 @@ $^{2}$ \quad Center for Open Geographical Sciences, San Diego State University, 
 
 \section{Introduction}
 
-\hl{Accurate} %MDPI: We found “Table A1” has been removed in this final version, please check if it should be added back. Please check all the Figures in this version and ensure that there are no duplicated Figures and there are no Figures missing
+\hl{Accurate} %MDPI: We found “Table A1” has been removed in this final version, please check if it should be added back. Please check all the Figures in this version and ensure that there are no duplicated Figures and there are no Figures missing (MM: see layer_specs table in appendix)
  three-dimensional (3D) vegetation structure information at sub-meter spatial scales now plays a key role in applications ranging from wildfire risk modeling \cite{martin-ducup_unlocking_2025} to biodiversity and habitat assessment \cite{Merrick2013Into3D,moudry2023vegetation}. The way vegetation is arranged—its height, density, and continuity—directly influences both fire hazard and fire behavior and impacts how species use the landscape. Fuels, as opposed to topography and weather, are the only element of the fire behavior triangle that land managers can directly \mbox{manipulate \cite{agee_influence_1996}}, making structural data vital for strategic interventions. Simultaneously, vegetation structure governs microclimate, resource availability, and landscape connectivity, making it a cornerstone of ecological monitoring and conservation planning \cite{guo2018integrating, mahata2023microclimate,ustin2021current}. Airborne light detection and ranging (LiDAR) has emerged as a premier tool for capturing this structural complexity, enabling detailed, landscape-scale mapping of vegetation structure that was previously unattainable with passive optical imagery \cite{Merrick2013Into3D, belov2019capabilities, guo2020lidar}.
 
 National mapping programs such as the U.S. Geological Survey's 3D Elevation Program (3DEP) now collect LiDAR data over large areas, but these surveys have important limitations. Typical 3DEP acquisitions are performed at modest point densities (on the order of \qtyrange{0.5}{20}{pts\per\square\meter}) \cite{wu2016evaluating}, and with much of the national LiDAR baseline acquired over an extended period (e.g., roughly 2015--2023), a significant portion of this data is now several years old, a situation exacerbated by the lack of a guaranteed or universal update timeline \cite{usgs_what_2019}. Consequently, the available point clouds often reflect conditions from several years prior and are relatively sparse compared to those obtained from other platforms (e.g., uncrewed aerial vehicles---or UAVs; see Figure \ref{fig:intro_pt_clouds}).
@@ -485,7 +497,7 @@ Fully polarimetric L-band imagery (23.84 cm wavelength) from NASA’s UAVSAR sys
 & \multicolumn{2}{c}{\textbf{Volcan Mountain}} & \multicolumn{2}{c}{\textbf{Sedgwick Reserve}} \\
 \midrule
 \textbf{Year} & \textbf{NAIP (GSD)} & \textbf{UAVSAR (\# Looks\textsuperscript{1})} %MDPI: please add the explanation of “#” (MM: added in footnote)
- & \textbf{NAIP (GSD)} & \textbf{UAVSAR (\# Looks\textsuperscript{1})} \\
+ & \textbf{NAIP (GSD)} & \textbf{UAVSAR (\# Looks\textsuperscript{2})} \\
 \midrule
 2014 & May (1 m) & \hl{June} %MDPI: We revised the month format in the whole table. Please confirm this revision. (MM: confirmed)
  (3), October (2) & June (1 m) & June (8) \\
@@ -771,19 +783,21 @@ To isolate the impact of each data modality, we trained four distinct model vari
 \begin{table}[htbp]
   \centering
   \begin{threeparttable}
-  \caption{Model variants evaluated\footnotemark}
+  \caption{Model variants evaluated}
   \label{tab:model_variants}
   \begin{tabular}{lllr}
-  \toprule
-  \textbf{Variant} & \textbf{Active encoders} & \textbf{Cross-attention on} & \textbf{Parameters} \\
+  	oprule
+  	extbf{Variant} & \textbf{Active encoders} & \textbf{Cross-attention on} & \textbf{Parameters} \\
   \midrule
- Baseline & LiDAR only & None  & 4.7M \\
+  Baseline & LiDAR only & None  & 4.7M \\
   + NAIP & LiDAR, optical  & NAIP tokens & 5.9M \\
   + UAVSAR & LiDAR, radar & UAVSAR tokens  & 5.8M \\
   Fused  & LiDAR, optical, radar & Concatenated token  & 6.8M \\
   \bottomrule
   \end{tabular}
-  \footnotetext{Parameter differences relative to the baseline reflect only the additional modules enabled in each variant (e.g., imagery encoders and cross-attention fusion). The remaining architecture is unchanged to ensure a fair comparison.}
+  \begin{tablenotes}
+    \footnotesize
+    \item Parameter differences relative to the baseline reflect only the additional modules enabled in each variant (e.g., imagery encoders and cross-attention fusion). The remaining architecture is unchanged to ensure a fair comparison.
   \end{tablenotes}
   \end{threeparttable}
 \end{table}
@@ -958,7 +972,7 @@ Finally, to evaluate our third research question (RQ3) on the impact of vegetati
 \begin{table}[H]
 
 \caption{RQ3: Correlation between reconstruction error and canopy height change.}
-\begin{tabularx}{lCC} %MM: Please do not make table textwidth. Adds too much whitespace and hinders readability.
+\begin{tabularx}{\textwidth}{lCC} %MM: Please do not make table textwidth. Adds too much whitespace and hinders readability.
 \toprule
 \textbf{Model} & \textbf{Spearman \boldmath{$\rho$}} & \textbf{\textit{p}-Value} \\
 \midrule
@@ -982,7 +996,7 @@ Baseline vs. Fused (z) & \textbf{5.868} & \emph{p} $<$ 0.001 \\
 
 \caption{\hl{RQ3} %MDPI: We revised the line format in the table. Please confirm this revision. (MM: Please do not make table textwidth. Adds too much whitespace and hinders readability.)
  extended: Correlation between reconstruction error and canopy height changes (gains vs. losses).}
-\begin{tabularx}{lCCCC}
+\begin{tabularx}{\textwidth}{lCCCC}
 \toprule
 \multirow{2.35}{*}{\textbf{Model}} & \multicolumn{2}{c}{\textbf{Canopy Gains (N = 2423)}} & \multicolumn{2}{c}{\textbf{Canopy Losses (N = 3264)}} \\
 \cmidrule{2-5}
@@ -1189,9 +1203,7 @@ ViT & Vision Transformer \\
     \centering
     \includegraphics[width=0.98\linewidth]{figures/veg_growth_8x.png}
     \end{adjustwidth}
-    \caption{\hl{Example} %MDPI: 1. Commas are only used for numbers with five or more digits. We removed them in four-digit numbers in the figure. Please confirm. 2. Please confirm if explanation should be added for colors in the image.(MM: 1. Thank you, 2. Fine as-is)
-
-        \includegraphics[width=1\linewidth]{manuscript/figures/veg_growth_8x.png}
+  \caption{\hl{Example} %MDPI: 1. Commas are only used for numbers with five or more digits. We removed them in four-digit numbers in the figure. Please confirm. 2. Please confirm if explanation should be added for colors in the image.(MM: 1. Thank you, 2. Fine as-is)
  of vegetation growth reconstruction (experimental 8$\times$ model for illustrative visual clarity only; all reported metrics use the production 2$\times$ model). The model successfully infers new canopy structure (center) that is absent in the input 3DEP LiDAR but present in the recent UAV LiDAR reference.}
     \label{fig:appendix_growth1}
 \end{figure}
