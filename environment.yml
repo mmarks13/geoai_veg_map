@@ -1,4 +1,4 @@
-name: /home/jovyan/geoai_env
+name: geoai_env
 channels:
   - conda-forge
 dependencies:
@@ -12,6 +12,7 @@ dependencies:
   - asttokens==3.0.0=pyhd8ed1ab_1
   - attr==2.5.1=h166bdaf_1
   - attrs==25.1.0=pyh71513ae_0
+  - awscli
   - aws-c-auth==0.8.1=h205f482_0
   - aws-c-cal==0.8.1=h1a47875_3
   - aws-c-common==0.10.6=hb9d3cd8_0
@@ -460,4 +461,3 @@ dependencies:
   - kornia>=0.7.0
   # Note: R packages for LidarForFuel fuel metrics are now in a separate environment
   # Use environment_r_fuel_metrics.yml for fuel metrics processing
-prefix: /home/jovyan/geoai_env

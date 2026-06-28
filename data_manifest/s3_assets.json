@@ -1,0 +1,1106 @@
+{
+  "version": 1,
+  "repo": "geoai_veg_map",
+  "generated_at": "2026-06-28T00:26:00.638466+00:00",
+  "canonical_s3_root_env": "GEOAI_DATA_S3_URI",
+  "assets": [
+    {
+      "local_path": "data/output/checkpoints/ablation_study/baseline_20250512-221512/0512_ablation_study_baseline_baseline_k16_f256_b15_e100.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/baseline_20250512-221512/0512_ablation_study_baseline_baseline_k16_f256_b15_e100.pth",
+      "size": 19477078,
+      "sha256": "678db94ce672d420aa04ce86a03d64c9ea00c9a8d27e9fe3bc75b416a65361dc",
+      "bundles": [
+        "published_eval_epoch100"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/baseline_20250512-221512/final_best/0512_ablation_study_baseline_baseline_best_loss.json",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/baseline_20250512-221512/final_best/0512_ablation_study_baseline_baseline_best_loss.json",
+      "size": 37,
+      "sha256": "c80329719aea5668813d72bec2f81ca95f09a7f5ba43fc2f8708c843dfa19908",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/baseline_20250512-221512/final_best/0512_ablation_study_baseline_baseline_final_best.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/baseline_20250512-221512/final_best/0512_ablation_study_baseline_baseline_final_best.pth",
+      "size": 19475048,
+      "sha256": "1c3805af09b1c724561eb892c0e2d71371d4532de977bea1e625922c3b7bdfda",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/combined_20250512-221512/0512_ablation_study_combined_naip_uavsar_k16_f256_b15_e100.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/combined_20250512-221512/0512_ablation_study_combined_naip_uavsar_k16_f256_b15_e100.pth",
+      "size": 27440716,
+      "sha256": "159151d41b5accb15a7510ccd41df4d37513bf3314310702880deea7bc2b3e8c",
+      "bundles": [
+        "published_eval_epoch100"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/combined_20250512-221512/final_best/0512_ablation_study_combined_naip_uavsar_best_loss.json",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/combined_20250512-221512/final_best/0512_ablation_study_combined_naip_uavsar_best_loss.json",
+      "size": 37,
+      "sha256": "8a7ca13250e560c9def0542e4c94c7aba2ad0a53a73664b08293902f9f2c97dd",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/combined_20250512-221512/final_best/0512_ablation_study_combined_naip_uavsar_final_best.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/combined_20250512-221512/final_best/0512_ablation_study_combined_naip_uavsar_final_best.pth",
+      "size": 27438062,
+      "sha256": "3fe2c7b028f4cac4c7d107dc569ba3229e492c192b5bade1e9fd442cb35b744e",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/optical_only_20250512-221512/0512_ablation_study_optical_only_naip_k16_f256_b15_e100.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/optical_only_20250512-221512/0512_ablation_study_optical_only_naip_k16_f256_b15_e100.pth",
+      "size": 23746074,
+      "sha256": "0c2a985023547ac6bb16c36e77d2f18501aef97eb2f11610f46fc19d2331a291",
+      "bundles": [
+        "published_eval_epoch100"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/optical_only_20250512-221512/final_best/0512_ablation_study_optical_only_naip_best_loss.json",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/optical_only_20250512-221512/final_best/0512_ablation_study_optical_only_naip_best_loss.json",
+      "size": 36,
+      "sha256": "d1f37768b18ad4fb33e3ad4c0588369dddcf6e9e641ab5f2472f248d92dd9712",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/optical_only_20250512-221512/final_best/0512_ablation_study_optical_only_naip_final_best.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/optical_only_20250512-221512/final_best/0512_ablation_study_optical_only_naip_final_best.pth",
+      "size": 23743722,
+      "sha256": "a57bf82e33b739f3e957cc2fba603b1f723c3e388dc258afcd604c5ca3332fd5",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/sar_only_20250512-221512/0512_ablation_study_sar_only_uavsar_k16_f256_b15_e100.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/sar_only_20250512-221512/0512_ablation_study_sar_only_uavsar_k16_f256_b15_e100.pth",
+      "size": 23442914,
+      "sha256": "a4339e98f4a49a0a72bdb0261099af3830488056b301d6116ecd534f9954ae6b",
+      "bundles": [
+        "published_eval_epoch100"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/sar_only_20250512-221512/final_best/0512_ablation_study_sar_only_uavsar_best_loss.json",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/sar_only_20250512-221512/final_best/0512_ablation_study_sar_only_uavsar_best_loss.json",
+      "size": 37,
+      "sha256": "aff097fd0e4a00778fedca529991d7bb1a1f318bfc58348f9d079f101828b22b",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/ablation_study/sar_only_20250512-221512/final_best/0512_ablation_study_sar_only_uavsar_final_best.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/ablation_study/sar_only_20250512-221512/final_best/0512_ablation_study_sar_only_uavsar_final_best.pth",
+      "size": 23441024,
+      "sha256": "6748830c528a5c3bb86d5f55e80a32b2c50d051b69ac9beeca4de95fd5c0ddb6",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/final_best/0529_8xUp_512ft_b1_naip_uavsar_best_loss.json",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/final_best/0529_8xUp_512ft_b1_naip_uavsar_best_loss.json",
+      "size": 38,
+      "sha256": "a1b7b631b6b70c7f65f95ecdb35ad7da8ef4c0c5701593ca01fa1f97b89a9989",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/output/checkpoints/final_best/0529_8xUp_512ft_b1_naip_uavsar_final_best.pth",
+      "s3_key": "geoai_veg_map/data/output/checkpoints/final_best/0529_8xUp_512ft_b1_naip_uavsar_final_best.pth",
+      "size": 497601658,
+      "sha256": "0165b574b7d6140e71a878e4c0dbf24d4b7fb16ebdf971b1a7bcf6166ceab13b",
+      "bundles": [
+        "default",
+        "published_checkpoints"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/augmented_tiles_32bit_16k_no_repl.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/augmented_tiles_32bit_16k_no_repl.pt",
+      "size": 32203904817,
+      "sha256": "30ba7327eaae81270b0b345f8c7b143b90d21ff4958112d3d4d342678eb4da68",
+      "bundles": [
+        "default",
+        "published_pointcloud"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/combined_training_data_v3.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/combined_training_data_v3.pt",
+      "size": 121346585154,
+      "sha256": "28202b5445fb140769faebdb728f052656c017cfdc2eaf9d5a215125fcf197e0",
+      "bundles": [
+        "pointcloud_precompute"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/naip_normalization_stats.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/naip_normalization_stats.pt",
+      "size": 1598,
+      "sha256": "50d084cfeb86cfb912a998790cb355ee7e80d2bc7119f87e45d821a0dc531f24",
+      "bundles": [
+        "default",
+        "published_pointcloud"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/point_attr_normalization_stats.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/point_attr_normalization_stats.pt",
+      "size": 1634,
+      "sha256": "509fb0ccc4b410946328b50fd37b624e90124f6773e1ab68fd3184304abb915b",
+      "bundles": [
+        "default",
+        "published_pointcloud"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/point_cloud_comparison_df.pkl",
+      "s3_key": "geoai_veg_map/data/processed/model_data/point_cloud_comparison_df.pkl",
+      "size": 6272492098,
+      "sha256": "658d49097ef242a87a01f8569cfee308562f95ab1b166c9df3bf888084e4d6f8",
+      "bundles": [
+        "pointcloud_precompute"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/point_cloud_comparison_df_0516_e100.pkl",
+      "s3_key": "geoai_veg_map/data/processed/model_data/point_cloud_comparison_df_0516_e100.pkl",
+      "size": 6272719724,
+      "sha256": "0c8505200d842cc09564a48bcf0ae2779fa50d826480a60bf041f2568b040dc6",
+      "bundles": [
+        "default",
+        "published_pointcloud"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/precomputed_test_tiles_32bit.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/precomputed_test_tiles_32bit.pt",
+      "size": 10882705154,
+      "sha256": "c4ac1e09ab549995804a8ed925ddcff1387c6ad4e7a5464bc9453a0645276efc",
+      "bundles": [
+        "default",
+        "published_pointcloud"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/precomputed_training_tiles_32bit.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/precomputed_training_tiles_32bit.pt",
+      "size": 47509211356,
+      "sha256": "7c38142773c4790b59d1559cacbe8816cbebfd19109d1a2ed4ea7e64eb0c3946",
+      "bundles": [
+        "default",
+        "published_pointcloud"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/precomputed_validation_tiles_32bit.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/precomputed_validation_tiles_32bit.pt",
+      "size": 7265296346,
+      "sha256": "4b79fea7ec6449221d6247ceedd6ccee8bcc7c73d0540b50936b7337d6f577b0",
+      "bundles": [
+        "default",
+        "published_pointcloud"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/test_tiles.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/test_tiles.pt",
+      "size": 17760145522,
+      "sha256": "eeb2ec733e78262dc7c1270f29705b5ac9bec1c5562ee4f874ebdee59693ce9a",
+      "bundles": [
+        "pointcloud_precompute"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/training_tiles.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/training_tiles.pt",
+      "size": 79337752862,
+      "sha256": "3255e46c44ca5a4e8ea319cfa795d79bd0b56333418460335697cb32b45a3445",
+      "bundles": [
+        "pointcloud_precompute"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/uavsar_normalization_stats.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/uavsar_normalization_stats.pt",
+      "size": 1738,
+      "sha256": "1ff11864c1605fe8eaecdeed9b5b445cac9145077e33eced4cc4cec7df9de86e",
+      "bundles": [
+        "default",
+        "published_pointcloud"
+      ]
+    },
+    {
+      "local_path": "data/processed/model_data/validation_tiles.pt",
+      "s3_key": "geoai_veg_map/data/processed/model_data/validation_tiles.pt",
+      "size": 11798112974,
+      "sha256": "79f03fcffd596dd4d1461f8d2061f5645ad30c72c0e266b01ebe6332d29beb3c",
+      "bundles": [
+        "pointcloud_precompute"
+      ]
+    },
+    {
+      "local_path": "data/raw/uavlidar/study_las/241031_215356_SAFE.zip",
+      "s3_key": "geoai_veg_map/data/raw/uavlidar/study_las/241031_215356_SAFE.zip",
+      "size": 38213943410,
+      "sha256": "ddb67ced9206e9b69383fd80563ff779fa56eb5d4dc7c7786f69525616064450",
+      "bundles": [
+        "raw_private"
+      ]
+    },
+    {
+      "local_path": "data/raw/uavlidar/study_las/T01-T09_LiDAR_20230928_Pre_LAS.las",
+      "s3_key": "geoai_veg_map/data/raw/uavlidar/study_las/T01-T09_LiDAR_20230928_Pre_LAS.las",
+      "size": 4031413592,
+      "sha256": "6f44d57fdacad801e88e0198cc820f5b222464aa9ebed840def474eeea515315",
+      "bundles": [
+        "raw_private"
+      ]
+    },
+    {
+      "local_path": "data/raw/uavlidar/study_las/T03-T13_LIDAR_20231025_Pre_LAS.las",
+      "s3_key": "geoai_veg_map/data/raw/uavlidar/study_las/T03-T13_LIDAR_20231025_Pre_LAS.las",
+      "size": 1695936942,
+      "sha256": "1d2f71bc2213f3d1099bd0a7b2b56f944585eab03d6f1292f1354e00b32c8cb8",
+      "bundles": [
+        "raw_private"
+      ]
+    },
+    {
+      "local_path": "data/raw/uavlidar/study_las/T06-T14_LIDAR_20231025_Pre_LAS.las",
+      "s3_key": "geoai_veg_map/data/raw/uavlidar/study_las/T06-T14_LIDAR_20231025_Pre_LAS.las",
+      "size": 3072981042,
+      "sha256": "18483a5780af8f976ccc76d60a555321b8ac223b65a49ebc5deeb8d4b4019cac",
+      "bundles": [
+        "raw_private"
+      ]
+    },
+    {
+      "local_path": "data/raw/uavlidar/study_las/TREX_LIDAR_20230630_Pre_LAS.las",
+      "s3_key": "geoai_veg_map/data/raw/uavlidar/study_las/TREX_LIDAR_20230630_Pre_LAS.las",
+      "size": 9786788042,
+      "sha256": "ac024fac63692356ffc9e56744acfb59fc4eeaab84d411ea572633be9f0200ee",
+      "bundles": [
+        "raw_private"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_151528.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_151528.copc.laz",
+      "size": 455847399,
+      "sha256": "361012513e07e874fc85d028af2c96e4df62b9082e88c109e2f5ff872b4e62f4",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_151746.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_151746.copc.laz",
+      "size": 461364586,
+      "sha256": "fb0289df3f158561bccdd4373c8dde2af903cdd4888a416534cab68c4c73607a",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_152008.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_152008.copc.laz",
+      "size": 416407011,
+      "sha256": "1b46737c2e9e086d0fb44bc71320546097d12656cf12e962b1a7345972a7bcc5",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_152218.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_152218.copc.laz",
+      "size": 396836774,
+      "sha256": "ae3b3244ef847b22809dab5ee4392c9dd654114ec18421e2a886eecd8037b49e",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_155659.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_155659.copc.laz",
+      "size": 160293096,
+      "sha256": "ded058b5d56a63e0ab858f6bac3e988933d60175df53da5957a0c8d319b98d33",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_155743.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_155743.copc.laz",
+      "size": 216944059,
+      "sha256": "a72e88c33bdf81f249cd13069810885c26686ae06f2815e49f15609d33cece21",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_155835.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_155835.copc.laz",
+      "size": 452074141,
+      "sha256": "1ad95e9c2b29424d488365acd2cbec1996cf17879a23e4e8d4543938d8fc0637",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_160044.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_160044.copc.laz",
+      "size": 573192360,
+      "sha256": "ccdf15b6050c37f0e869c4d7fe5f2cb0aea545a606a61d0a7abd62c753b29243",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_165847.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_165847.copc.laz",
+      "size": 216407400,
+      "sha256": "407d8e945de65e190b066b0eb65f34c30498a170fb03d921a053b5f06c3ea7ec",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_170001.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_170001.copc.laz",
+      "size": 627892093,
+      "sha256": "8ac4cbaa1d2294c34bf1ab16fcc8d1bd5b0785dabb1304f771499dba8c0ce736",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_170322.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_170322.copc.laz",
+      "size": 352813511,
+      "sha256": "513ae3cc0bdaa7640c41bc857a9e7512f5fea5ba8659f0f3545626fd01b4539d",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_170501.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_170501.copc.laz",
+      "size": 301528120,
+      "sha256": "04aaa3d7d177e2ce7c1f51cd30d4b344486208cb616d6df5820995fc13af6600",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_170641.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_170641.copc.laz",
+      "size": 117108950,
+      "sha256": "8721fa740d1deba2c5f82c3ea55804d129d09feaa06fbaa099bb99a8daa872fc",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_171832.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_171832.copc.laz",
+      "size": 464378620,
+      "sha256": "4e3c816fbac539f29aa185892ebf78a85b4db387c6a9c6d80c56fae2f33fe89c",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_172047.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_172047.copc.laz",
+      "size": 467477488,
+      "sha256": "1353bf08e116f39d4f357c7f6e76337af7fcda04bf966259e15a2b5b035aad5f",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_173610.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_173610.copc.laz",
+      "size": 465678890,
+      "sha256": "95cd18dc48bbb2179a436280d26ea85e12ec52ff6e3509737f20f8b54eccd79f",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_173820.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_173820.copc.laz",
+      "size": 385517994,
+      "sha256": "ded557988af7ff897dda75235026bd26b83abe0d846ad3a2c855642c15149f25",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_174028.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_174028.copc.laz",
+      "size": 255754310,
+      "sha256": "db20c1aac09fff62eafd95c51a57b7b5801e46cf83d81a4f720833d39ed91b73",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_174233.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_174233.copc.laz",
+      "size": 555604104,
+      "sha256": "b6360a93e1e6bff746c90705f4d71ec5c24dd6536fe77960865feaf63085790f",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_180112.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_180112.copc.laz",
+      "size": 243838917,
+      "sha256": "3e9a1499f319c203d5b21596db0bbf5b2e9cfa80a1513550e50dd7e998309aad",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_180231.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_180231.copc.laz",
+      "size": 313949283,
+      "sha256": "aa6783a27ecb11502c2bd29999d4b92a3149e459ef86def21a2072384679f044",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_180414.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_180414.copc.laz",
+      "size": 332862917,
+      "sha256": "cebc83886462e9fcb6084e2e9284952f55c7bf07472f0f5cae5c4f0df83e8056",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_182049.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_182049.copc.laz",
+      "size": 399444286,
+      "sha256": "6809e7ea8e0dbd27b39b0d0393bdb53be96a926679c0599ed9ec5a4634e0a040",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_182240.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_182240.copc.laz",
+      "size": 382194043,
+      "sha256": "19a71d32d5d27235a5b10c2973db828eacaeb6d6418d81da2ffa8ab4d7767708",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_182428.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_182428.copc.laz",
+      "size": 382765655,
+      "sha256": "92dd81b4029111a3d8186a805641492e9199defcb1373fce0d31feb8e46bc057",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_182623.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_182623.copc.laz",
+      "size": 406982871,
+      "sha256": "046e8e1f7d134393f99c175db1d6431e8c230ce83c8ee11bbf989334d3a7a4d9",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_183849.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_183849.copc.laz",
+      "size": 486458513,
+      "sha256": "b95da28d348e3127a9088e22ddddf21c0d223620408f0d1a9d402f6b626650ef",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_184132.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_184132.copc.laz",
+      "size": 417415169,
+      "sha256": "0bf61b70623c78e98b4bdc5f435bee3f888c21d5d948e458fd302e1eb6077c4f",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_184331.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_184331.copc.laz",
+      "size": 298805550,
+      "sha256": "3141ccdc5e5e3cf1ecf7522f90f349f96200da6a049ae8cbd45dd959fe665e65",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_184446.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_184446.copc.laz",
+      "size": 129136043,
+      "sha256": "131a521c728b9fed31f81d16bca30db56a365566d1fec1ccda5a48a205c8782f",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_202451.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_202451.copc.laz",
+      "size": 275125012,
+      "sha256": "c8fff149d3df24bb482f687bcc5cd8324d4cb6a1f10c18277860276cff34e55c",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_202626.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_202626.copc.laz",
+      "size": 408453965,
+      "sha256": "1bfe97978887c2eaba4bc67312e1305742e46bfc55866ac439a82d784628a915",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_202835.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_202835.copc.laz",
+      "size": 264472032,
+      "sha256": "4da34c7f501d8ffa53144a4f1f40106a3b9addd0fdf8f97db54a353766212210",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_204020.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_204020.copc.laz",
+      "size": 279348417,
+      "sha256": "f16eba1fb86aca555921f043013517aada28a3924e92879205a1a58d7dcd7b1c",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_204159.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_204159.copc.laz",
+      "size": 423759307,
+      "sha256": "a7529ab8d85689fb603ef1c55d58f442f950b966174cbbd221932a5e9bea20f6",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_204420.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_204420.copc.laz",
+      "size": 423784679,
+      "sha256": "818a8163b6491e922c581842ba20f9ccf36b13707e435df478f9ff6a89ed5ad2",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_205541.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_205541.copc.laz",
+      "size": 402724504,
+      "sha256": "ea7915d2f032fed2a7f8f215e43fdda93e575986a7d02802f0df7d7a6b016993",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_205750.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_205750.copc.laz",
+      "size": 526777630,
+      "sha256": "e227169efe357232680c2fdd4a0da3776038c088ef7afc03cd6ee70f38f517c1",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/20241025_210014.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/20241025_210014.copc.laz",
+      "size": 428024465,
+      "sha256": "322a15c282f6898eff02d347eb3f88222b660373d85df197b73be4840c93e217",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/T01-T09_LiDAR_20230928_Pre_LAS.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/T01-T09_LiDAR_20230928_Pre_LAS.copc.laz",
+      "size": 812396552,
+      "sha256": "d6fca38a5bc0bcfbdd9557092e42c9bb389e9eefa519189b4e6bde8df7c7b084",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/T03-T13_LIDAR_20231025_Pre_LAS.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/T03-T13_LIDAR_20231025_Pre_LAS.copc.laz",
+      "size": 333754482,
+      "sha256": "3ffafc34581c899058fa3822dbadc41714bb0cc716ebdc7086b8d783db716444",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/T06-T14_LIDAR_20231025_Pre_LAS.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/T06-T14_LIDAR_20231025_Pre_LAS.copc.laz",
+      "size": 616565583,
+      "sha256": "5a583f4cecea6a0292d14b7fabebad0e2c8490d922a39e0edba8424ca8401472",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/TREX_LIDAR_20230630_Pre_LAS.copc.laz",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/TREX_LIDAR_20230630_Pre_LAS.copc.laz",
+      "size": 1950137493,
+      "sha256": "b8f10157f3bd7a7196243ac133955e4d75fb448397911b1a3e6ffd7ed8cc899e",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/catalog.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/catalog.json",
+      "size": 498,
+      "sha256": "da6c43eb1538d1a019058641aacf4f2531b7e545345424ef09a972c56866b4f8",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_151528/20241025_151528.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_151528/20241025_151528.json",
+      "size": 1404,
+      "sha256": "784b7057b4449e89d363845e4815d16dcbb5d221ac73525ef054e7613bc2cf4e",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_151746/20241025_151746.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_151746/20241025_151746.json",
+      "size": 1408,
+      "sha256": "681c82818d2d1871f140c4537caada4ec5d0430522f8d4b5dda787ed28d5a722",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_152008/20241025_152008.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_152008/20241025_152008.json",
+      "size": 1408,
+      "sha256": "a6e7ddfcbaceea9899ff3b4ad33561de1733df6707b1025d1fa6beac99736687",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_152218/20241025_152218.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_152218/20241025_152218.json",
+      "size": 1408,
+      "sha256": "da5c68368bb7c14fd7e3a256af5cc8f03928d1e9274a84ac28884803e7690cb5",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_155659/20241025_155659.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_155659/20241025_155659.json",
+      "size": 1404,
+      "sha256": "60458a56b940ca349869e92e5fe5e826a7473a58d9ca07847a028ad53e50b9bd",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_155743/20241025_155743.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_155743/20241025_155743.json",
+      "size": 1408,
+      "sha256": "e0b475146fe570061aee21632f3af313612c01b63502c4c01dd32c9f82cd01cc",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_155835/20241025_155835.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_155835/20241025_155835.json",
+      "size": 1408,
+      "sha256": "ade551e9a5c652a92dd92fadb9ad44b1cb27943c6ff5aa3de4efa7dc91b3bd25",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_160044/20241025_160044.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_160044/20241025_160044.json",
+      "size": 1408,
+      "sha256": "a5d7c8e3ca0bc81fa50b1be4cf6f66cb227568f8c43239622dd6bcf9960436b4",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_165847/20241025_165847.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_165847/20241025_165847.json",
+      "size": 1408,
+      "sha256": "411ec6d3478fe90d0d31eeed4fa820d5d2480bdc2904889bcd2b1262388c8ba4",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_170001/20241025_170001.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_170001/20241025_170001.json",
+      "size": 1400,
+      "sha256": "f9ffa1a1fd4b8468e4663d56fb4cb9a739e28ad6518ca4b02436b495ee756b3c",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_170322/20241025_170322.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_170322/20241025_170322.json",
+      "size": 1408,
+      "sha256": "a5b4a4865f97e759a0e79da9df9b776e46808f91ba172e9062ab7e52b1f5d936",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_170501/20241025_170501.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_170501/20241025_170501.json",
+      "size": 1408,
+      "sha256": "0f1fd1c8f9d5636d054bb0165995b0d604a2277adc6e49886ffd5ec822a3f63d",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_170641/20241025_170641.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_170641/20241025_170641.json",
+      "size": 1405,
+      "sha256": "76e52b71528b9978f8cfa6892028150c371795e93fbb434fef5cd699b003120e",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_171832/20241025_171832.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_171832/20241025_171832.json",
+      "size": 1404,
+      "sha256": "e524783df5a124cb95499f8d931beaa28ec8f55ce307fed402596ce800d9445f",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_172047/20241025_172047.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_172047/20241025_172047.json",
+      "size": 1408,
+      "sha256": "85709c5ec1477e69967c2002a74aa56556e6d79b98b3fe63cbfc23824f38a34d",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_173610/20241025_173610.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_173610/20241025_173610.json",
+      "size": 1402,
+      "sha256": "0163fbe5d33ec8a9b915dec218d72677d66016ec6a1240d3b42a4ff0e7668d79",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_173820/20241025_173820.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_173820/20241025_173820.json",
+      "size": 1408,
+      "sha256": "42af0ab0d205e85645415a47d7f34064940c7cb6287e4e2e3b88d79020725eab",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_174028/20241025_174028.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_174028/20241025_174028.json",
+      "size": 1407,
+      "sha256": "41fc4e895f984bc9e935fcee2b47cf6987d98e5cb620b74ff3356886dce6abca",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_174233/20241025_174233.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_174233/20241025_174233.json",
+      "size": 1405,
+      "sha256": "1e1a8d0e52e246479864a50e5682872d60ba710db8b3fc49e35d5396133b24ac",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_180112/20241025_180112.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_180112/20241025_180112.json",
+      "size": 1401,
+      "sha256": "a89877c6da6c2780eae4dd69d32602363019bf13c6cd53b3972f3fd637defb38",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_180231/20241025_180231.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_180231/20241025_180231.json",
+      "size": 1408,
+      "sha256": "887ba063210a8b8b651a479cc0cdbfe522b6b92a89822f75c396e0c08b59ce19",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_180414/20241025_180414.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_180414/20241025_180414.json",
+      "size": 1405,
+      "sha256": "89e09e0ff5e563e71bad76e5ead9d031eef9daebbae77ddac59a21c337d8ffc5",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_182049/20241025_182049.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_182049/20241025_182049.json",
+      "size": 1404,
+      "sha256": "43631533a7f5169202cea8afdceb5f84344043075c3732d89548d80a91691855",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_182240/20241025_182240.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_182240/20241025_182240.json",
+      "size": 1408,
+      "sha256": "f2aec3f4639bec9bc7cb69cacc9c0d59e46bb7009f44a5aec023ce4ee21d965d",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_182428/20241025_182428.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_182428/20241025_182428.json",
+      "size": 1408,
+      "sha256": "8ff11c88bd5e456729c724207a09b403b463ff4010f1e21431e5ac15a1b0a9aa",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_182623/20241025_182623.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_182623/20241025_182623.json",
+      "size": 1404,
+      "sha256": "111a0280aa5fe6bd78f97e6fa14c5724eef82b0cbd6f928285021b9115622f51",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_183849/20241025_183849.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_183849/20241025_183849.json",
+      "size": 1408,
+      "sha256": "867daa8ff0d773c266925fbaf112278b6b48fa0ccaf62c98a82f12c196ca4d88",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_184132/20241025_184132.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_184132/20241025_184132.json",
+      "size": 1408,
+      "sha256": "466b4eecedbc772e7de12a30f4ca01b72d9cd3512b7e4f45d4ab75f9532ed105",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_184331/20241025_184331.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_184331/20241025_184331.json",
+      "size": 1408,
+      "sha256": "b97bdb353757991e39f601cc4d45ad49ad86c3d2717d0ca84d8f60b75861f5aa",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_184446/20241025_184446.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_184446/20241025_184446.json",
+      "size": 1407,
+      "sha256": "8337817294e364402d78342fd9da9f6140300e4c98a12de2aedca6efbca0b2fe",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_202451/20241025_202451.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_202451/20241025_202451.json",
+      "size": 1408,
+      "sha256": "f3cd65d6bba70bfe71dfb4e9da26cee6c853c8146f525fde0bc5bbbc76c5d2e0",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_202626/20241025_202626.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_202626/20241025_202626.json",
+      "size": 1407,
+      "sha256": "bbad55778408f19966239365235372586819a3d565786e5cbbbe0ff2f96837c3",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_202835/20241025_202835.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_202835/20241025_202835.json",
+      "size": 1404,
+      "sha256": "94c01be5762edd16ef5a30ec91033dc891ac6a5c15a606252d74a3599aee9541",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_204020/20241025_204020.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_204020/20241025_204020.json",
+      "size": 1408,
+      "sha256": "0a63058cd7d42c5768604362ae69372113f0695a5c5782af676543700f0ee075",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_204159/20241025_204159.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_204159/20241025_204159.json",
+      "size": 1408,
+      "sha256": "22b78f41b7966b291e4f20f4f3ca72797c7e2942732b6dc09d2b088a887572c2",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_204420/20241025_204420.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_204420/20241025_204420.json",
+      "size": 1405,
+      "sha256": "d694df76c468987adf46b22e694d5416ff03894eb4b798647ab5361db7606ddf",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_205541/20241025_205541.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_205541/20241025_205541.json",
+      "size": 1408,
+      "sha256": "c0c74019571e2b69e09d9191ceb83ea4cb773871a1f3ab6e8297dcb2c12ef99d",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_205750/20241025_205750.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_205750/20241025_205750.json",
+      "size": 1408,
+      "sha256": "42306beddc93d26312bfa39c1496b44171e3de4338cd610e04a2a998fb420a24",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/20241025_210014/20241025_210014.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/20241025_210014/20241025_210014.json",
+      "size": 1407,
+      "sha256": "27f1c9bf41829c67d34830e130b8317897866558ac61da8ca421353970857216",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/T01-T09_LiDAR_20230928_Pre_LAS/T01-T09_LiDAR_20230928_Pre_LAS.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/T01-T09_LiDAR_20230928_Pre_LAS/T01-T09_LiDAR_20230928_Pre_LAS.json",
+      "size": 1476,
+      "sha256": "d5eef78cc7ef9ec3af494c1ce304b4d8c7308c03bd5e9012b5e341e07217a375",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/T03-T13_LIDAR_20231025_Pre_LAS/T03-T13_LIDAR_20231025_Pre_LAS.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/T03-T13_LIDAR_20231025_Pre_LAS/T03-T13_LIDAR_20231025_Pre_LAS.json",
+      "size": 1473,
+      "sha256": "7c6dbe16fb04347aad25f3e1f328ac0f051d900feea0ba43376dc814fd53022d",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/T06-T14_LIDAR_20231025_Pre_LAS/T06-T14_LIDAR_20231025_Pre_LAS.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/T06-T14_LIDAR_20231025_Pre_LAS/T06-T14_LIDAR_20231025_Pre_LAS.json",
+      "size": 1476,
+      "sha256": "6e393f602d35aaccd1458e4edb4c9cf4df0763810a11133f5dde4251c14eba12",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/TREX_LIDAR_20230630_Pre_LAS/TREX_LIDAR_20230630_Pre_LAS.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/TREX_LIDAR_20230630_Pre_LAS/TREX_LIDAR_20230630_Pre_LAS.json",
+      "size": 1464,
+      "sha256": "b598a5e839420dae46845ab14f8173af2e2a91d541fa329b3f13993d72c6eef3",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    },
+    {
+      "local_path": "data/stac/uavlidar/uav_lidar/collection.json",
+      "s3_key": "geoai_veg_map/data/stac/uavlidar/uav_lidar/collection.json",
+      "size": 6392,
+      "sha256": "40d6aca8942313ff6906594c0258bc1d35eff49fbca53c6131c79160f829f5b3",
+      "bundles": [
+        "private_uavlidar_stac"
+      ]
+    }
+  ]
+}
